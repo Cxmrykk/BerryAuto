@@ -1,0 +1,86 @@
+syntax = "proto3";
+package opengal;
+
+enum StatusCode { STATUS_SUCCESS = 0; }
+
+enum MediaCodecType {
+    MEDIA_CODEC_UNKNOWN = 0;
+    MEDIA_CODEC_AUDIO_PCM = 1;
+    MEDIA_CODEC_AUDIO_AAC_LC = 2;
+    MEDIA_CODEC_VIDEO_H264_BP = 3;
+    MEDIA_CODEC_AUDIO_AAC_LC_ADTS = 4;
+    MEDIA_CODEC_VIDEO_VP9 = 5;
+    MEDIA_CODEC_VIDEO_AV1 = 6;
+    MEDIA_CODEC_VIDEO_H265 = 7;
+}
+
+enum VideoResolution {
+    VIDEO_RES_UNKNOWN = 0;
+    VIDEO_800x480 = 1;
+    VIDEO_1280x720 = 2;
+    VIDEO_1920x1080 = 3;
+}
+
+enum NavFocusState {
+    NAV_FOCUS_UNKNOWN = 0;
+    NAV_FOCUS_NATIVE = 1;
+    NAV_FOCUS_PROJECTED = 2;
+}
+
+message AuthComplete { StatusCode status = 1; }
+
+message ChannelOpenRequest {
+    int32 priority = 1;
+    int32 channel_id = 2;
+}
+
+message PingRequest {
+    int64 timestamp = 1;
+    bool reply_requested = 2;
+    bytes payload = 3;
+}
+
+message PongResponse {
+    int64 timestamp = 1;
+    bytes payload = 2;
+}
+
+message NavFocusEvent { NavFocusState focus_state = 1; }
+
+message ServiceDiscovery {
+    repeated ServiceDescriptor services = 1;
+    string head_unit_make = 2;
+    string head_unit_model = 3;
+    string head_unit_software_build = 4;
+    string head_unit_software_version = 5;
+    int32 display_resolution = 6;
+}
+
+message ServiceDescriptor {
+    uint32 service_id = 1;
+    MediaSinkService media_sink_service = 3;
+    InputSourceService input_service = 4;
+}
+
+message MediaSinkService {
+    MediaCodecType codec_type = 1;
+    int32 audio_stream_type = 2;
+    repeated VideoConfig video_configs = 4;
+}
+
+message InputSourceService {
+    repeated TouchscreenConfig touchscreens = 3;
+}
+
+message TouchscreenConfig {
+    uint32 width = 1;
+    uint32 height = 2;
+}
+
+message VideoConfig {
+    VideoResolution codec_resolution = 1;
+    uint32 framerate = 2;
+    uint32 width_margin = 3;
+    uint32 height_margin = 4;
+    uint32 density = 5;
+}
