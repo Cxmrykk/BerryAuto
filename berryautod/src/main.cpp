@@ -111,7 +111,6 @@ int main() {
                     }
                     else if (msg_type == 11) { // PingRequest -> PongResponse
                         PingRequest ping; ping.ParseFromArray(plaintext.data() + 2, plaintext.size() - 2);
-                        std::cout << "[MAIN] <- [Ch 0] Received PingRequest (timestamp: " << ping.timestamp() << ")." << std::endl;
                         
                         PongResponse pong; pong.set_timestamp(ping.timestamp());
                         std::string pong_str = pong.SerializeAsString();
@@ -121,12 +120,7 @@ int main() {
                         GalFrame pong_frame; pong_frame.channel_id = 0;
                         pong_frame.flags = FLAG_FIRST | FLAG_LAST | FLAG_ENCRYPTED;
                         pong_frame.payload = tls_ctx.encrypt(pong_pt);
-                        // Commenting out the Pong send log to avoid spamming the console 1x per second
-                        // std::cout << "[MAIN] -> [Ch 0] Sending PongResponse." << std::endl;
                         usb_transport.write_frame(pong_frame);
-                    }
-                    else {
-                        std::cout << "[MAIN] <- [Ch 0] Received Unknown/Unhandled Message Type: " << msg_type << std::endl;
                     }
                 }
             }
