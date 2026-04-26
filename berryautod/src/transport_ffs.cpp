@@ -152,13 +152,17 @@ void FunctionFSTransport::write_frame(const GalFrame& frame) {
     write(ep1_in_fd, data.data(), data.size());
 }
 
+void FunctionFSTransport::write_frame_raw(const std::vector<uint8_t>& data) {
+    std::lock_guard<std::mutex> lock(write_mutex);
+    write(ep1_in_fd, data.data(), data.size());
+}
+
 std::vector<GalFrame> FunctionFSTransport::read_frames() {
     uint8_t buffer[16384];
     ssize_t bytes = read(ep2_out_fd, buffer, sizeof(buffer));
     std::vector<GalFrame> frames;
     
     if (bytes > 0) {
-        std::cout << "[FFS-DEBUG] Read " << bytes << " bytes from USB endpoint." << std::endl;
         reassembler.append(buffer, bytes, frames);
     } else if (bytes == 0) {
         std::cerr << "\n[FFS-ERR] FATAL: Head Unit abruptly closed the USB connection (EOF)." << std::endl;
@@ -168,9 +172,4 @@ std::vector<GalFrame> FunctionFSTransport::read_frames() {
         running = false;
     }
     return frames;
-}
-
-void FunctionFSTransport::write_frame_raw(const std::vector<uint8_t>& data) {
-    std::lock_guard<std::mutex> lock(write_mutex);
-    write(ep1_in_fd, data.data(), data.size());
 }

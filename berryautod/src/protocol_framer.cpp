@@ -20,7 +20,8 @@ void Reassembler::append(const uint8_t* buffer, size_t length, std::vector<GalFr
         uint16_t payload_len = (partial_buffer[2] << 8) | partial_buffer[3];
         size_t header_size = 4;
         
-        // If this is the FIRST fragment (FIRST=1, LAST=0), there is a 4-byte Total Size field.
+        // If this is the FIRST fragment of a fragmented message (FIRST=1, LAST=0)
+        // A 4-byte 'Total Payload Size' field is injected into the header.
         if ((partial_buffer[1] & FLAG_FIRST) && !(partial_buffer[1] & FLAG_LAST)) {
             header_size = 8;
         }
