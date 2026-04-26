@@ -84,3 +84,9 @@ message VideoConfig {
     uint32 height_margin = 4;
     uint32 density = 5;
 }
+
+// --- ADDED ---
+message MediaSetupResponse {
+    StatusCode status = 1;
+    int32 max_unacked = 2;
+}

@@ -76,7 +76,7 @@ int main()
         auto frames = usb_transport.read_frames();
         for (const auto& frame : frames)
         {
-            // Only print headers for Media frames to prevent log spam, but print everything for Control frames
+            // Only print headers for Media frames to prevent log spam
             if (!(frame.flags & FLAG_MEDIA)) {
                 std::cout << "\n[MAIN-RX] Frame Received: Ch=" << (int)frame.channel_id 
                           << " Flags=" << decode_flags(frame.flags) 
@@ -138,7 +138,6 @@ int main()
                     std::cout << "[MAIN-STATE] AuthComplete (Cleartext) received. We are Trusted." << std::endl;
                     auth_complete = true;
 
-                    // 1. Send AuthComplete (Encrypted)
                     GalFrame auth_frame;
                     auth_frame.channel_id = 0;
                     auth_frame.flags = FLAG_FIRST | FLAG_LAST | FLAG_ENCRYPTED;
@@ -150,7 +149,6 @@ int main()
                     video_ch = 2;
                     input_ch = 3;
 
-                    // 2. Send ServiceDiscoveryRequest (Encrypted)
                     ServiceDiscovery sdp_req;
                     ServiceDescriptor* video_svc = sdp_req.add_services();
                     video_svc->set_service_id(video_ch);
@@ -178,7 +176,7 @@ int main()
                     std::cout << "[MAIN-TX] Sending ServiceDiscoveryRequest (Encrypted)" << std::endl;
                     usb_transport.write_frame(sdp_frame);
 
-                    // 3. Force Open Channels IMMEDIATELY
+                    // Force Open Channels IMMEDIATELY
                     ChannelOpenRequest open_req;
                     open_req.set_channel_id(video_ch);
                     open_req.set_priority(1);
@@ -204,7 +202,6 @@ int main()
                     std::cout << "[MAIN-TX] Sending ChannelOpenRequest on Ch " << input_ch << std::endl;
                     usb_transport.write_frame(chan_frame);
 
-                    // 4. Send NavFocusEvent
                     NavFocusEvent nav;
                     nav.set_focus_state(NAV_FOCUS_PROJECTED);
                     std::string nav_str = nav.SerializeAsString();
@@ -239,7 +236,6 @@ int main()
                         ServiceDiscovery sdp_resp;
                         sdp_resp.ParseFromArray(plaintext.data() + 2, plaintext.size() - 2);
                         std::cout << "[MAIN-SDP] Connected to Head Unit: " << sdp_resp.head_unit_make() << " " << sdp_resp.head_unit_model() << std::endl;
-                        // Video & Input channels were successfully forced open in AuthComplete
                     }
                     else if (enc_msg_type == 0x000B) // PingRequest -> PongResponse
                     { 
@@ -261,7 +257,16 @@ int main()
                     else if (enc_msg_type == 0x8001) // MediaSetupRequest
                     {
                         std::cout << "[MAIN-TX] Received MediaSetupRequest on Ch " << (int)frame.channel_id << ". Sending MediaSetupResponse." << std::endl;
-                        std::vector<uint8_t> resp_pt = {0x80, 0x04, 0x10, 0x01}; 
+                        
+                        // Using the proper Protobuf for the response
+                        MediaSetupResponse setup_resp;
+                        setup_resp.set_status(STATUS_SUCCESS);
+                        setup_resp.set_max_unacked(1);
+                        
+                        std::string resp_str = setup_resp.SerializeAsString();
+                        std::vector<uint8_t> resp_pt(resp_str.begin(), resp_str.end());
+                        resp_pt.insert(resp_pt.begin(), {0x80, 0x04}); // Type 0x8004
+                        
                         GalFrame resp_frame;
                         resp_frame.channel_id = frame.channel_id;
                         resp_frame.flags = FLAG_FIRST | FLAG_LAST | FLAG_ENCRYPTED;
@@ -289,7 +294,7 @@ int main()
                     {
                         std::cout << "[MAIN-STATE] Received VideoFocusNotification on Ch " << (int)frame.channel_id << std::endl;
                         if (!video_thread) {
-                            video_ch = frame.channel_id; // Trust the HU's channel assignment
+                            video_ch = frame.channel_id; 
                             std::cout << "[MAIN-STATE] Starting VideoEncoderThread!" << std::endl;
                             video_thread = std::make_unique<VideoEncoderThread>(usb_transport, *tls_ctx, video_ch);
                             video_thread->start(800, 480);
