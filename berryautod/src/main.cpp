@@ -8,6 +8,8 @@
 #include <map>
 #include <csignal>
 #include <atomic>
+#include <thread>
+#include <chrono>
 
 using namespace opengal;
 
@@ -21,10 +23,10 @@ void signal_handler(int signal) {
 
 void hex_dump(const std::string& prefix, const std::vector<uint8_t>& data) {
     std::cout << prefix << " [" << data.size() << " bytes]: ";
-    for (size_t i = 0; i < std::min(data.size(), (size_t)48); ++i) {
+    for (size_t i = 0; i < std::min(data.size(), (size_t)64); ++i) {
         std::cout << std::hex << std::setw(2) << std::setfill('0') << (int)data[i] << " ";
     }
-    if (data.size() > 48) std::cout << "...";
+    if (data.size() > 64) std::cout << "...";
     std::cout << std::dec << std::endl;
 }
 
@@ -46,8 +48,9 @@ std::string decode_msg_type(uint16_t type) {
         {0x0007, "ChannelOpenRequest"}, {0x0008, "ChannelOpenResponse"},
         {0x000B, "PingRequest"}, {0x000C, "PongResponse"}, {0x000E, "NavFocusEvent"},
         {0x0018, "CallStatus"},
-        {0x8000, "MediaSetupRequest"}, {0x8001, "MediaStartRequest"}, {0x8003, "MediaConfigResponse/Binding"},
-        {0x8004, "MediaConfigResponse"}, {0x8008, "VideoFocusNotification"}
+        {0x8000, "MediaSetupRequest/InputBindingRequest"}, {0x8001, "MediaStartRequest"}, 
+        {0x8003, "MediaConfigResponse/BindingResponse"}, {0x8004, "MediaAck"}, 
+        {0x8008, "VideoFocusNotification"}
     };
     if (types.count(type)) return types[type];
     return "UNKNOWN_TYPE_0x" + (std::stringstream() << std::hex << type).str();
@@ -84,7 +87,7 @@ int main()
         auto frames = usb_transport.read_frames();
         for (const auto& frame : frames)
         {
-            // Hide the massive flood of Video frames, print everything else
+            // Logging: Hide the massive flood of Video frames, print everything else
             if (!(frame.flags & FLAG_ENCRYPTED) || (frame.flags & FLAG_CONTROL) || frame.channel_id == 0) {
                 std::cout << "\n[MAIN-RX] Frame: Ch=" << (int)frame.channel_id 
                           << " Flags=" << decode_flags(frame.flags) 
@@ -132,11 +135,23 @@ int main()
                 }
                 else if (msg_type == 4) // AuthComplete (from Head Unit)
                 {
-                    std::cout << "[MAIN-STATE] AuthComplete received. The Head Unit trusts us." << std::endl;
+                    std::cout << "[MAIN-STATE] AuthComplete (Cleartext) received from Head Unit." << std::endl;
                     auth_complete = true;
 
-                    // THE FIX: DO NOT REPLY WITH AUTH_COMPLETE! 
-                    // The Phone initiates Service Discovery Request (Type 5) ENCRYPTED immediately.
+                    // 1. Reply with AuthComplete in CLEARTEXT.
+                    GalFrame auth_frame;
+                    auth_frame.channel_id = 0; auth_frame.flags = FLAG_FIRST | FLAG_LAST;
+                    auth_frame.payload = {0x00, 0x04, 0x08, 0x00}; // Status = 0
+                    std::cout << "[MAIN-TX] Sending AuthComplete (Cleartext)" << std::endl;
+                    usb_transport.write_frame(auth_frame);
+
+                    // 2. CRITICAL RACE CONDITION FIX
+                    // Headunit Revived requires ~300ms to launch AapProjectionActivity and setup its Read Thread.
+                    // If we send ServiceDiscoveryRequest instantly, it hits a closed USB pipe and is dropped.
+                    std::cout << "[MAIN-STATE] Sleeping 500ms to allow Head Unit to initialize Read Loop..." << std::endl;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+                    // 3. Send ServiceDiscoveryRequest (Encrypted)
                     ServiceDiscoveryRequest sdp_req;
                     sdp_req.set_phone_name("BerryAuto Emitter");
                     
@@ -146,6 +161,7 @@ int main()
                     sdp_frame.payload = tls_ctx->encrypt(wrap_protobuf(0x0005, sdp_req.SerializeAsString()));
                     
                     std::cout << "[MAIN-TX] Sending ServiceDiscoveryRequest (Type 5)" << std::endl;
+                    hex_dump("[TX-DUMP]", sdp_frame.payload);
                     usb_transport.write_frame(sdp_frame);
                 }
             }
@@ -155,12 +171,13 @@ int main()
                 std::vector<uint8_t> plaintext = tls_ctx->decrypt(frame.payload);
                 if (plaintext.empty()) continue; 
 
-                // Process Control Messages (Either on Ch 0, or on Media channels with FLAG_CONTROL)
+                // Process Control Messages
                 if (frame.channel_id == 0 || (frame.flags & FLAG_CONTROL)) 
                 {
                     if (plaintext.size() < 2) continue;
                     uint16_t enc_msg_type = (plaintext[0] << 8) | plaintext[1];
                     std::cout << "[MAIN-RX] Decrypted Control Type on Ch " << (int)frame.channel_id << ": " << decode_msg_type(enc_msg_type) << std::endl;
+                    hex_dump("[RX-DUMP]", plaintext);
 
                     if (enc_msg_type == 0x0006 && auth_complete) // ServiceDiscoveryResponse (from Head Unit)
                     { 
@@ -180,14 +197,6 @@ int main()
                         
                         std::cout << "[MAIN-TX] Sending ChannelOpenRequest on Ch 2" << std::endl;
                         usb_transport.write_frame(chan_frame);
-                        
-                        // Open Channel 3 for Touch Input
-                        open_req.set_channel_id(3);
-                        open_req.set_priority(2);
-                        chan_frame.channel_id = 3; 
-                        chan_frame.payload = tls_ctx->encrypt(wrap_protobuf(0x0007, open_req.SerializeAsString()));
-                        std::cout << "[MAIN-TX] Sending ChannelOpenRequest on Ch 3" << std::endl;
-                        usb_transport.write_frame(chan_frame);
                     }
                     else if (enc_msg_type == 0x0008) // ChannelOpenResponse
                     {
@@ -206,19 +215,16 @@ int main()
                             usb_transport.write_frame(setup_frame);
                         }
                     }
-                    else if (enc_msg_type == 0x8004) // MediaConfigResponse
+                    // THE FIX: Media Setup Response is 0x8003 (32771), NOT 0x8004!
+                    else if (enc_msg_type == 0x8003) // MediaConfigResponse
                     {
                         std::cout << "[MAIN-STATE] Received MediaConfigResponse on Ch " << (int)frame.channel_id << std::endl;
                         if (frame.channel_id == 2) {
                             
-                            // Parse Config to grab the session ID
-                            MediaConfig config;
-                            config.ParseFromArray(plaintext.data() + 2, plaintext.size() - 2);
-                            
                             // Start the Media Stream
                             MediaStart start_req;
-                            start_req.set_session_id(1); // Standard session 1
-                            start_req.set_configuration_index(0); // Standard config 0
+                            start_req.set_session_id(1); 
+                            start_req.set_configuration_index(0); 
 
                             GalFrame start_frame;
                             start_frame.channel_id = 2;
@@ -264,10 +270,6 @@ int main()
                         pong_frame.flags = FLAG_FIRST | FLAG_LAST | FLAG_ENCRYPTED;
                         pong_frame.payload = tls_ctx->encrypt(wrap_protobuf(0x000C, pong.SerializeAsString()));
                         usb_transport.write_frame(pong_frame);
-                    }
-                    else 
-                    {
-                        hex_dump("[MAIN-DEBUG] Unhandled Encrypted Packet Payload", plaintext);
                     }
                 }
             }

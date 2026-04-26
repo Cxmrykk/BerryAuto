@@ -25,7 +25,7 @@ void VideoEncoderThread::start(int width, int height) {
     std::cout << "[HW-DEBUG] Attempting to start hardware pipeline (" << width << "x" << height << ")" << std::endl;
 
     if (!init_drm_capture()) {
-        std::cout << "[HW-WARN] No active Linux Desktop found. Falling back to internal Test Pattern Generator." << std::endl;
+        std::cout << "[HW-WARN] No active Linux Desktop found (Headless Mode?). Falling back to internal Test Pattern Generator." << std::endl;
         use_test_pattern = true;
     } 
 
@@ -168,7 +168,6 @@ void VideoEncoderThread::generate_test_pattern() {
     uint8_t* u_plane = v4l2_in_buffer + frame_size;
     uint8_t* v_plane = v4l2_in_buffer + frame_size + (frame_size / 4);
 
-    // Creates a moving checkerboard pattern to easily verify rendering
     for (int y = 0; y < res_h; ++y) {
         for (int x = 0; x < res_w; ++x) {
             int block_x = (x + frame_counter * 2) / 40;
@@ -250,10 +249,10 @@ void VideoEncoderThread::encode_loop() {
             ioctl(v4l2_fd, VIDIOC_DQBUF, &buf_out); 
 
             if (!nalu.empty()) {
+                // 1. Construct Plaintext: [MsgType: 0x0000] [Timestamp: 8 bytes] [NALU]
                 std::vector<uint8_t> full_plaintext;
                 full_plaintext.reserve(10 + nalu.size());
                 
-                // 16-bit Media Data type (0x0000)
                 full_plaintext.push_back(0x00);
                 full_plaintext.push_back(0x00);
                 
@@ -265,7 +264,7 @@ void VideoEncoderThread::encode_loop() {
                 }
                 full_plaintext.insert(full_plaintext.end(), nalu.begin(), nalu.end());
 
-                // Application-Level Fragmentation and Encryption
+                // 2. Application-Level Fragmentation and Encryption
                 size_t max_chunk = 16000;
                 size_t offset = 0;
                 bool is_fragmented = full_plaintext.size() > max_chunk;
