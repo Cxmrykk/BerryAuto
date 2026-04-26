@@ -87,13 +87,13 @@ bool VideoEncoderThread::init_drm_capture() {
 }
 
 bool VideoEncoderThread::init_v4l2_encoder() {
-    v4l2_fd = open("/dev/video11", O_RDWR | O_NONBLOCK);
+    // FIX 1: Open in BLOCKING mode so we wait for the hardware to finish encoding!
+    v4l2_fd = open("/dev/video11", O_RDWR);
     if (v4l2_fd < 0) {
-        v4l2_fd = open("/dev/video12", O_RDWR | O_NONBLOCK);
+        v4l2_fd = open("/dev/video12", O_RDWR);
         if (v4l2_fd < 0) return false;
     }
 
-    // MULTI-PLANAR API Setup for Raspberry Pi 4
     struct v4l2_format fmt_out = {};
     fmt_out.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
     fmt_out.fmt.pix_mp.width = res_w; 
@@ -112,13 +112,15 @@ bool VideoEncoderThread::init_v4l2_encoder() {
     fmt_cap.fmt.pix_mp.field = V4L2_FIELD_ANY;
     IOCTL_OR_FAIL(v4l2_fd, VIDIOC_S_FMT, &fmt_cap, "Set capture format (H264 MPLANE)");
 
-    struct v4l2_ext_control ctrls[3] = {};
+    // FIX 2: Require SPS/PPS Sequence Headers so Android Auto can decode the stream
+    struct v4l2_ext_control ctrls[4] = {};
     ctrls[0].id = V4L2_CID_MPEG_VIDEO_H264_PROFILE; ctrls[0].value = V4L2_MPEG_VIDEO_H264_PROFILE_BASELINE;
     ctrls[1].id = V4L2_CID_MPEG_VIDEO_BITRATE; ctrls[1].value = 4000000;
     ctrls[2].id = V4L2_CID_MPEG_VIDEO_H264_I_PERIOD; ctrls[2].value = 30;
+    ctrls[3].id = V4L2_CID_MPEG_VIDEO_REPEAT_SEQ_HEADER; ctrls[3].value = 1; 
     
     struct v4l2_ext_controls ext_ctrls = {};
-    ext_ctrls.ctrl_class = V4L2_CTRL_CLASS_MPEG; ext_ctrls.count = 3; ext_ctrls.controls = ctrls;
+    ext_ctrls.ctrl_class = V4L2_CTRL_CLASS_MPEG; ext_ctrls.count = 4; ext_ctrls.controls = ctrls;
     IOCTL_OR_FAIL(v4l2_fd, VIDIOC_S_EXT_CTRLS, &ext_ctrls, "Set Encoder Controls");
 
     struct v4l2_requestbuffers req_out = {};
@@ -156,7 +158,6 @@ bool VideoEncoderThread::init_v4l2_encoder() {
     int type_cap = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE; 
     IOCTL_OR_FAIL(v4l2_fd, VIDIOC_STREAMON, &type_cap, "StreamOn Capture");
 
-    // Queue the capture buffer initially
     IOCTL_OR_FAIL(v4l2_fd, VIDIOC_QBUF, &buf_cap, "Queue Initial Capture Buffer");
 
     std::cout << "[V4L2-DEBUG] Hardware H.264 Encoder successfully initialized!" << std::endl;
@@ -229,7 +230,10 @@ void VideoEncoderThread::encode_loop() {
         buf_out.m.planes = out_planes;
         buf_out.m.planes[0].bytesused = yuv_frame_size;
         
-        if (ioctl(v4l2_fd, VIDIOC_QBUF, &buf_out) < 0) continue;
+        if (ioctl(v4l2_fd, VIDIOC_QBUF, &buf_out) < 0) {
+            std::cerr << "[V4L2-ERR] QBUF OUTPUT failed: " << strerror(errno) << std::endl;
+            continue;
+        }
 
         struct v4l2_plane cap_planes[1] = {};
         struct v4l2_buffer buf_cap = {};
@@ -238,11 +242,14 @@ void VideoEncoderThread::encode_loop() {
         buf_cap.length = 1;
         buf_cap.m.planes = cap_planes;
         
+        // FIX 3: This will now BLOCK until the frame is fully compressed!
         if (ioctl(v4l2_fd, VIDIOC_DQBUF, &buf_cap) == 0) {
             size_t bytes_used = buf_cap.m.planes[0].bytesused;
             std::vector<uint8_t> nalu(v4l2_out_buffer, v4l2_out_buffer + bytes_used);
             
+            // Re-queue the capture buffer for the next frame
             ioctl(v4l2_fd, VIDIOC_QBUF, &buf_cap);
+            // Reclaim the raw buffer we just submitted
             ioctl(v4l2_fd, VIDIOC_DQBUF, &buf_out); 
 
             if (!nalu.empty()) {
@@ -256,6 +263,10 @@ void VideoEncoderThread::encode_loop() {
                 video_frame.payload = encrypted;
 
                 usb_transport.write_frame(video_frame);
+
+                if (frame_counter % 30 == 0) {
+                    std::cout << "[HW-STATE] Sent H.264 Video Frame! (" << nalu.size() << " bytes)" << std::endl;
+                }
             }
         }
 
