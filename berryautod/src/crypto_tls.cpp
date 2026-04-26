@@ -32,7 +32,6 @@ OpenGALTlsContext::OpenGALTlsContext() {
 }
 
 OpenGALTlsContext::~OpenGALTlsContext() {
-    std::lock_guard<std::mutex> lock(tls_mutex);
     SSL_free(ssl); 
     SSL_CTX_free(ctx);
 }
@@ -68,7 +67,6 @@ bool OpenGALTlsContext::generate_ephemeral_cert() {
 }
 
 bool OpenGALTlsContext::do_handshake(const std::vector<uint8_t>& input_record, std::vector<uint8_t>& output_record) {
-    std::lock_guard<std::mutex> lock(tls_mutex);
     if (!input_record.empty()) {
         BIO_write(read_bio, input_record.data(), input_record.size());
     }
@@ -84,14 +82,14 @@ bool OpenGALTlsContext::do_handshake(const std::vector<uint8_t>& input_record, s
 }
 
 std::vector<uint8_t> OpenGALTlsContext::encrypt(const std::vector<uint8_t>& plaintext) {
-    std::lock_guard<std::mutex> lock(tls_mutex);
     std::vector<uint8_t> ciphertext;
     size_t offset = 0;
     
+    // FIX: Loop SSL_write so we don't truncate large H.264 frames at 16KB!
     while (offset < plaintext.size()) {
         int written = SSL_write(ssl, plaintext.data() + offset, plaintext.size() - offset);
         if (written <= 0) {
-            std::cerr << "[TLS-ERR] SSL_write failed during encryption! Error: " << ERR_get_error() << std::endl;
+            std::cerr << "[TLS-ERR] SSL_write failed during encryption!" << std::endl;
             break;
         }
         offset += written;
@@ -107,10 +105,10 @@ std::vector<uint8_t> OpenGALTlsContext::encrypt(const std::vector<uint8_t>& plai
 }
 
 std::vector<uint8_t> OpenGALTlsContext::decrypt(const std::vector<uint8_t>& ciphertext) {
-    std::lock_guard<std::mutex> lock(tls_mutex);
     BIO_write(read_bio, ciphertext.data(), ciphertext.size());
     std::vector<uint8_t> plaintext;
     
+    // FIX: Loop SSL_read to ensure we get all data if multiple TLS records arrived
     while (true) {
         std::vector<uint8_t> chunk(16384);
         int read = SSL_read(ssl, chunk.data(), chunk.size());

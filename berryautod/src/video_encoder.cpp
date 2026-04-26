@@ -87,6 +87,7 @@ bool VideoEncoderThread::init_drm_capture() {
 }
 
 bool VideoEncoderThread::init_v4l2_encoder() {
+    // FIX 1: Open in BLOCKING mode so we wait for the hardware to finish encoding!
     v4l2_fd = open("/dev/video11", O_RDWR);
     if (v4l2_fd < 0) {
         v4l2_fd = open("/dev/video12", O_RDWR);
@@ -111,6 +112,7 @@ bool VideoEncoderThread::init_v4l2_encoder() {
     fmt_cap.fmt.pix_mp.field = V4L2_FIELD_ANY;
     IOCTL_OR_FAIL(v4l2_fd, VIDIOC_S_FMT, &fmt_cap, "Set capture format (H264 MPLANE)");
 
+    // FIX 2: Require SPS/PPS Sequence Headers so Android Auto can decode the stream
     struct v4l2_ext_control ctrls[4] = {};
     ctrls[0].id = V4L2_CID_MPEG_VIDEO_H264_PROFILE; ctrls[0].value = V4L2_MPEG_VIDEO_H264_PROFILE_BASELINE;
     ctrls[1].id = V4L2_CID_MPEG_VIDEO_BITRATE; ctrls[1].value = 4000000;
@@ -240,43 +242,27 @@ void VideoEncoderThread::encode_loop() {
         buf_cap.length = 1;
         buf_cap.m.planes = cap_planes;
         
+        // FIX 3: This will now BLOCK until the frame is fully compressed!
         if (ioctl(v4l2_fd, VIDIOC_DQBUF, &buf_cap) == 0) {
             size_t bytes_used = buf_cap.m.planes[0].bytesused;
             std::vector<uint8_t> nalu(v4l2_out_buffer, v4l2_out_buffer + bytes_used);
             
+            // Re-queue the capture buffer for the next frame
             ioctl(v4l2_fd, VIDIOC_QBUF, &buf_cap);
+            // Reclaim the raw buffer we just submitted
             ioctl(v4l2_fd, VIDIOC_DQBUF, &buf_out); 
 
             if (!nalu.empty()) {
-                // Implementing GAL Fragmentation for large H.264 I-Frames
-                size_t max_frag = 16000;
-                size_t offset = 0;
-
+                std::vector<uint8_t> encrypted = tls_ctx.encrypt(nalu);
+                GalFrame video_frame;
+                video_frame.channel_id = ch_id;
+                video_frame.flags = FLAG_FIRST | FLAG_LAST | FLAG_ENCRYPTED | FLAG_MEDIA;
+                
                 auto pts_now = std::chrono::steady_clock::now().time_since_epoch();
-                uint32_t timestamp = std::chrono::duration_cast<std::chrono::microseconds>(pts_now).count();
+                video_frame.timestamp = std::chrono::duration_cast<std::chrono::microseconds>(pts_now).count();
+                video_frame.payload = encrypted;
 
-                while (offset < nalu.size()) {
-                    size_t chunk_size = std::min(max_frag, nalu.size() - offset);
-                    std::vector<uint8_t> chunk(nalu.begin() + offset, nalu.begin() + offset + chunk_size);
-                    
-                    bool is_first = (offset == 0);
-                    bool is_last = (offset + chunk_size >= nalu.size());
-                    
-                    std::vector<uint8_t> encrypted = tls_ctx.encrypt(chunk);
-                    
-                    GalFrame video_frame;
-                    video_frame.channel_id = ch_id;
-                    video_frame.flags = FLAG_MEDIA | FLAG_ENCRYPTED;
-                    if (is_first) video_frame.flags |= FLAG_FIRST;
-                    if (is_last) video_frame.flags |= FLAG_LAST;
-                    
-                    video_frame.timestamp = timestamp;
-                    video_frame.payload = encrypted;
-
-                    usb_transport.write_frame(video_frame);
-                    
-                    offset += chunk_size;
-                }
+                usb_transport.write_frame(video_frame);
 
                 if (frame_counter % 30 == 0) {
                     std::cout << "[HW-STATE] Sent H.264 Video Frame! (" << nalu.size() << " bytes)" << std::endl;
