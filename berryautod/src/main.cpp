@@ -19,6 +19,15 @@ void signal_handler(int signal) {
     }
 }
 
+void hex_dump(const std::string& prefix, const std::vector<uint8_t>& data) {
+    std::cout << prefix << " [" << data.size() << " bytes]: ";
+    for (size_t i = 0; i < std::min(data.size(), (size_t)32); ++i) {
+        std::cout << std::hex << std::setw(2) << std::setfill('0') << (int)data[i] << " ";
+    }
+    if (data.size() > 32) std::cout << "...";
+    std::cout << std::dec << std::endl;
+}
+
 std::string decode_flags(uint8_t flags) {
     std::string s = "[";
     if (flags & FLAG_FIRST) s += "FIRST|";
@@ -32,11 +41,12 @@ std::string decode_flags(uint8_t flags) {
 
 std::string decode_msg_type(uint16_t type) {
     static std::map<uint16_t, std::string> types = {
-        {1, "VersionRequest"}, {2, "VersionResponse"}, {3, "SslHandshake"},
-        {4, "AuthComplete"}, {6, "ServiceDiscovery"}, {7, "ChannelOpenRequest"},
-        {11, "PingRequest"}, {12, "PongResponse"}, {14, "NavFocusEvent"},
-        {15, "ByeByeRequest"}, {16, "ByeByeResponse"}, {19, "AudioFocusState"},
-        {24, "CallStatus"}, {26, "UpdateService"}
+        {0x0001, "VersionRequest"}, {0x0002, "VersionResponse"}, {0x0003, "SslHandshake"},
+        {0x0004, "AuthComplete"}, {0x0006, "ServiceDiscovery"}, {0x0007, "ChannelOpenRequest"},
+        {0x000B, "PingRequest"}, {0x000C, "PongResponse"}, {0x000E, "NavFocusEvent"},
+        {0x0018, "CallStatus"},
+        {0x8001, "MediaSetupRequest"}, {0x8002, "MediaStartRequest"}, {0x8003, "MediaStopRequest"},
+        {0x8004, "MediaSetupResponse"}, {0x8008, "VideoFocusNotification"}
     };
     if (types.count(type)) return types[type];
     return "UNKNOWN_TYPE_" + std::to_string(type);
@@ -64,18 +74,20 @@ int main()
         auto frames = usb_transport.read_frames();
         for (const auto& frame : frames)
         {
-            // ALWAYS print the frame so we know what channel is active
-            std::cout << "\n[MAIN-RX] Frame Received: Ch=" << (int)frame.channel_id 
-                      << " Flags=" << decode_flags(frame.flags) 
-                      << " Len=" << frame.payload.size() << std::endl;
+            // Only print headers for Media frames to prevent log spam, but print everything for Control frames
+            if (!(frame.flags & FLAG_MEDIA)) {
+                std::cout << "\n[MAIN-RX] Frame Received: Ch=" << (int)frame.channel_id 
+                          << " Flags=" << decode_flags(frame.flags) 
+                          << " Len=" << frame.payload.size() << std::endl;
+            }
 
             // --- CLEARTEXT MESSAGES ---
             if (!(frame.flags & FLAG_ENCRYPTED)) 
             {
-                if (frame.payload.size() < 2) continue;
+                if (frame.channel_id != 0 || frame.payload.size() < 2) continue;
 
                 uint16_t msg_type = (frame.payload[0] << 8) | frame.payload[1];
-                std::cout << "[MAIN-RX] Decoded Cleartext Type on Ch " << (int)frame.channel_id << ": " << decode_msg_type(msg_type) << std::endl;
+                std::cout << "[MAIN-RX] Decoded Cleartext Type on Ch 0: " << decode_msg_type(msg_type) << std::endl;
 
                 if (msg_type == 1) // VersionRequest
                 { 
@@ -121,7 +133,6 @@ int main()
                     std::cout << "[MAIN-STATE] AuthComplete (Cleartext) received. We are Trusted." << std::endl;
                     auth_complete = true;
 
-                    // Send Encrypted AuthComplete
                     GalFrame auth_frame;
                     auth_frame.channel_id = 0;
                     auth_frame.flags = FLAG_FIRST | FLAG_LAST | FLAG_ENCRYPTED;
@@ -130,8 +141,22 @@ int main()
                     std::cout << "[MAIN-TX] Sending AuthComplete (Encrypted)" << std::endl;
                     usb_transport.write_frame(auth_frame);
 
-                    // Send Empty ServiceDiscoveryRequest so the Car dictates capabilities
                     ServiceDiscovery sdp_req;
+                    ServiceDescriptor* video_svc = sdp_req.add_services();
+                    video_svc->set_service_id(2);
+                    MediaSinkService* sink = video_svc->mutable_media_sink_service();
+                    sink->set_codec_type(MEDIA_CODEC_VIDEO_H264_BP);
+                    VideoConfig* vconf = sink->add_video_configs();
+                    vconf->set_codec_resolution(VIDEO_800x480);
+                    vconf->set_framerate(30);
+
+                    ServiceDescriptor* input_svc = sdp_req.add_services();
+                    input_svc->set_service_id(3);
+                    InputSourceService* input = input_svc->mutable_input_service();
+                    TouchscreenConfig* touchscreen = input->add_touchscreens();
+                    touchscreen->set_width(800);
+                    touchscreen->set_height(480);
+
                     std::string sdp_req_str = sdp_req.SerializeAsString();
                     std::vector<uint8_t> sdp_req_pt(sdp_req_str.begin(), sdp_req_str.end());
                     sdp_req_pt.insert(sdp_req_pt.begin(), {0x00, 0x06}); // Type 6
@@ -151,70 +176,44 @@ int main()
                 std::vector<uint8_t> plaintext = tls_ctx->decrypt(frame.payload);
                 if (plaintext.empty()) continue; 
 
-                // Check if it's a Control Message (No MEDIA flag)
+                // Control Messages (Not Video/Audio NALUs)
                 if (!(frame.flags & FLAG_MEDIA)) 
                 {
                     if (plaintext.size() < 2) continue;
                     uint16_t enc_msg_type = (plaintext[0] << 8) | plaintext[1];
                     std::cout << "[MAIN-RX] Decrypted Control Type on Ch " << (int)frame.channel_id << ": " << decode_msg_type(enc_msg_type) << std::endl;
 
-                    if (enc_msg_type == 6 && auth_complete) // ServiceDiscoveryResponse
+                    if (enc_msg_type == 0x0006 && auth_complete) // ServiceDiscoveryResponse
                     { 
                         ServiceDiscovery sdp_resp;
                         sdp_resp.ParseFromArray(plaintext.data() + 2, plaintext.size() - 2);
+                        std::cout << "[MAIN-SDP] Connected to Head Unit: " << sdp_resp.head_unit_make() << " " << sdp_resp.head_unit_model() << std::endl;
+                        
+                        // We assume Video is Ch 2 and Input is Ch 3 for brevity
+                        ChannelOpenRequest open_req;
+                        open_req.set_channel_id(2);
+                        open_req.set_priority(1);
+                        std::string req_str = open_req.SerializeAsString();
+                        std::vector<uint8_t> req_pt(req_str.begin(), req_str.end());
+                        req_pt.insert(req_pt.begin(), {0x00, 0x07}); // Type 7
 
-                        std::cout << "[MAIN-SDP] Connected to Head Unit: " << sdp_resp.head_unit_make() 
-                                  << " " << sdp_resp.head_unit_model() << std::endl;
+                        GalFrame chan_frame;
+                        chan_frame.channel_id = 2; 
+                        chan_frame.flags = FLAG_FIRST | FLAG_LAST | FLAG_ENCRYPTED; 
+                        chan_frame.payload = tls_ctx->encrypt(req_pt);
+                        std::cout << "[MAIN-TX] Sending ChannelOpenRequest on Ch 2" << std::endl;
+                        usb_transport.write_frame(chan_frame);
 
-                        int video_ch_id = -1;
-                        int input_ch_id = -1;
-                        int res_w = 800, res_h = 480;
+                        open_req.set_channel_id(3);
+                        open_req.set_priority(2);
+                        req_str = open_req.SerializeAsString();
+                        std::vector<uint8_t> req_pt3(req_str.begin(), req_str.end());
+                        req_pt3.insert(req_pt3.begin(), {0x00, 0x07}); // Type 7
 
-                        for (int i = 0; i < sdp_resp.services_size(); ++i) {
-                            const ServiceDescriptor& svc = sdp_resp.services(i);
-                            if (svc.has_media_sink_service() && svc.media_sink_service().video_configs_size() > 0) {
-                                video_ch_id = svc.service_id();
-                            }
-                            if (svc.has_input_service()) {
-                                input_ch_id = svc.service_id();
-                                if (svc.input_service().touchscreens_size() > 0) {
-                                    res_w = svc.input_service().touchscreens(0).width();
-                                    res_h = svc.input_service().touchscreens(0).height();
-                                }
-                            }
-                        }
-
-                        if (video_ch_id != -1) {
-                            ChannelOpenRequest open_req;
-                            open_req.set_channel_id(video_ch_id);
-                            open_req.set_priority(1);
-                            std::string req_str = open_req.SerializeAsString();
-                            std::vector<uint8_t> req_pt(req_str.begin(), req_str.end());
-                            req_pt.insert(req_pt.begin(), {0x00, 0x07}); // Type 7
-
-                            GalFrame chan_frame;
-                            chan_frame.channel_id = video_ch_id; 
-                            chan_frame.flags = FLAG_FIRST | FLAG_LAST | FLAG_ENCRYPTED; 
-                            chan_frame.payload = tls_ctx->encrypt(req_pt);
-                            std::cout << "[MAIN-TX] Sending ChannelOpenRequest on Ch " << video_ch_id << std::endl;
-                            usb_transport.write_frame(chan_frame);
-                        }
-
-                        if (input_ch_id != -1) {
-                            ChannelOpenRequest open_req;
-                            open_req.set_channel_id(input_ch_id);
-                            open_req.set_priority(2);
-                            std::string req_str = open_req.SerializeAsString();
-                            std::vector<uint8_t> req_pt(req_str.begin(), req_str.end());
-                            req_pt.insert(req_pt.begin(), {0x00, 0x07}); // Type 7
-
-                            GalFrame chan_frame;
-                            chan_frame.channel_id = input_ch_id; 
-                            chan_frame.flags = FLAG_FIRST | FLAG_LAST | FLAG_ENCRYPTED;
-                            chan_frame.payload = tls_ctx->encrypt(req_pt);
-                            std::cout << "[MAIN-TX] Sending ChannelOpenRequest on Ch " << input_ch_id << std::endl;
-                            usb_transport.write_frame(chan_frame);
-                        }
+                        chan_frame.channel_id = 3; 
+                        chan_frame.payload = tls_ctx->encrypt(req_pt3);
+                        std::cout << "[MAIN-TX] Sending ChannelOpenRequest on Ch 3" << std::endl;
+                        usb_transport.write_frame(chan_frame);
 
                         NavFocusEvent nav;
                         nav.set_focus_state(NAV_FOCUS_PROJECTED);
@@ -229,14 +228,12 @@ int main()
                         std::cout << "[MAIN-TX] Sending NavFocusEvent (PROJECTED)" << std::endl;
                         usb_transport.write_frame(nav_frame);
 
-                        if (video_ch_id != -1) {
-                            touch.init(res_w, res_h);
-                            std::cout << "[MAIN-STATE] Launching Hardware Video Capture Thread..." << std::endl;
-                            video_thread = std::make_unique<VideoEncoderThread>(usb_transport, *tls_ctx, video_ch_id);
-                            video_thread->start(res_w, res_h);
-                        }
+                        touch.init(800, 480);
+                        std::cout << "[MAIN-STATE] Launching Hardware Video Capture Thread..." << std::endl;
+                        video_thread = std::make_unique<VideoEncoderThread>(usb_transport, *tls_ctx, 2);
+                        video_thread->start(800, 480);
                     }
-                    else if (enc_msg_type == 11) // PingRequest
+                    else if (enc_msg_type == 0x000B) // PingRequest -> PongResponse
                     { 
                         PingRequest ping;
                         ping.ParseFromArray(plaintext.data() + 2, plaintext.size() - 2);
@@ -248,12 +245,35 @@ int main()
                         pong_pt.insert(pong_pt.begin(), {0x00, 0x0C}); // Type 12
 
                         GalFrame pong_frame;
-                        // Send the Pong back on the EXACT channel the Ping arrived on
                         pong_frame.channel_id = frame.channel_id; 
                         pong_frame.flags = FLAG_FIRST | FLAG_LAST | FLAG_ENCRYPTED;
                         pong_frame.payload = tls_ctx->encrypt(pong_pt);
-                        
                         usb_transport.write_frame(pong_frame);
+                    }
+                    else if (enc_msg_type == 0x8001) // MediaSetupRequest (Fast Reconnect!)
+                    {
+                        std::cout << "[MAIN-TX] Session Resumed! Sending MediaSetupResponse on Ch " << (int)frame.channel_id << std::endl;
+                        // MediaSetupResponse (0x8004): Status = 0 (OK), MaxUnacked = 1 (Protobuf Tag 2 = 1)
+                        std::vector<uint8_t> resp_pt = {0x80, 0x04, 0x10, 0x01}; 
+                        GalFrame resp_frame;
+                        resp_frame.channel_id = frame.channel_id;
+                        resp_frame.flags = FLAG_FIRST | FLAG_LAST | FLAG_ENCRYPTED;
+                        resp_frame.payload = tls_ctx->encrypt(resp_pt);
+                        usb_transport.write_frame(resp_frame);
+                    }
+                    else if (enc_msg_type == 0x8008) // VideoFocusNotification (Fast Reconnect!)
+                    {
+                        if (!video_thread) {
+                            std::cout << "[MAIN-STATE] Fast Reconnect: Car requested Video. Launching Hardware Video Capture Thread..." << std::endl;
+                            touch.init(800, 480);
+                            video_thread = std::make_unique<VideoEncoderThread>(usb_transport, *tls_ctx, frame.channel_id);
+                            video_thread->start(800, 480);
+                        }
+                    }
+                    else 
+                    {
+                        // Safely dump any other mysterious packets the car sends
+                        hex_dump("[MAIN-WARN] Unhandled Encrypted Packet", plaintext);
                     }
                 }
             }
