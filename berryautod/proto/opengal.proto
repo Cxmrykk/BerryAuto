@@ -34,6 +34,10 @@ message ChannelOpenRequest {
     int32 channel_id = 2;
 }
 
+message ChannelOpenResponse {
+    StatusCode status = 1;
+}
+
 message PingRequest {
     int64 timestamp = 1;
     bool reply_requested = 2;
@@ -47,7 +51,6 @@ message PongResponse {
 
 message NavFocusEvent { NavFocusState focus_state = 1; }
 
-// ADDED: The phone must send this to the Head Unit to start the exchange
 message ServiceDiscoveryRequest {
     string phone_name = 1;
 }
@@ -88,4 +91,20 @@ message VideoConfig {
     uint32 width_margin = 3;
     uint32 height_margin = 4;
     uint32 density = 5;
+}
+
+// Media Protocol Messages (Type 0x8000+)
+message MediaSetupRequest {
+    int32 type = 1;
+}
+
+message MediaStart {
+    int32 session_id = 1;
+    int32 configuration_index = 2;
+}
+
+message MediaConfig {
+    int32 status = 1;
+    int32 max_unacked = 2;
+    repeated int32 configuration_indices = 3;
 }
