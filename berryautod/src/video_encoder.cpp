@@ -93,18 +93,24 @@ bool VideoEncoderThread::init_v4l2_encoder() {
         if (v4l2_fd < 0) return false;
     }
 
+    // MULTI-PLANAR API Setup for Raspberry Pi 4
     struct v4l2_format fmt_out = {};
-    fmt_out.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
-    fmt_out.fmt.pix.width = res_w; fmt_out.fmt.pix.height = res_h;
-    // FIX: Raspberry Pi encoder ONLY accepts YUV420!
-    fmt_out.fmt.pix.pixelformat = V4L2_PIX_FMT_YUV420;
-    IOCTL_OR_FAIL(v4l2_fd, VIDIOC_S_FMT, &fmt_out, "Set output format (YUV420)");
+    fmt_out.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+    fmt_out.fmt.pix_mp.width = res_w; 
+    fmt_out.fmt.pix_mp.height = res_h;
+    fmt_out.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_YUV420;
+    fmt_out.fmt.pix_mp.num_planes = 1;
+    fmt_out.fmt.pix_mp.field = V4L2_FIELD_ANY;
+    IOCTL_OR_FAIL(v4l2_fd, VIDIOC_S_FMT, &fmt_out, "Set output format (YUV420 MPLANE)");
 
     struct v4l2_format fmt_cap = {};
-    fmt_cap.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    fmt_cap.fmt.pix.width = res_w; fmt_cap.fmt.pix.height = res_h;
-    fmt_cap.fmt.pix.pixelformat = V4L2_PIX_FMT_H264;
-    IOCTL_OR_FAIL(v4l2_fd, VIDIOC_S_FMT, &fmt_cap, "Set capture format (H264)");
+    fmt_cap.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+    fmt_cap.fmt.pix_mp.width = res_w; 
+    fmt_cap.fmt.pix_mp.height = res_h;
+    fmt_cap.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_H264;
+    fmt_cap.fmt.pix_mp.num_planes = 1;
+    fmt_cap.fmt.pix_mp.field = V4L2_FIELD_ANY;
+    IOCTL_OR_FAIL(v4l2_fd, VIDIOC_S_FMT, &fmt_cap, "Set capture format (H264 MPLANE)");
 
     struct v4l2_ext_control ctrls[3] = {};
     ctrls[0].id = V4L2_CID_MPEG_VIDEO_H264_PROFILE; ctrls[0].value = V4L2_MPEG_VIDEO_H264_PROFILE_BASELINE;
@@ -116,34 +122,47 @@ bool VideoEncoderThread::init_v4l2_encoder() {
     IOCTL_OR_FAIL(v4l2_fd, VIDIOC_S_EXT_CTRLS, &ext_ctrls, "Set Encoder Controls");
 
     struct v4l2_requestbuffers req_out = {};
-    req_out.count = 1; req_out.type = V4L2_BUF_TYPE_VIDEO_OUTPUT; req_out.memory = V4L2_MEMORY_MMAP;
+    req_out.count = 1; req_out.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE; req_out.memory = V4L2_MEMORY_MMAP;
     IOCTL_OR_FAIL(v4l2_fd, VIDIOC_REQBUFS, &req_out, "Request Out Buffers");
 
     struct v4l2_requestbuffers req_cap = {};
-    req_cap.count = 1; req_cap.type = V4L2_BUF_TYPE_VIDEO_CAPTURE; req_cap.memory = V4L2_MEMORY_MMAP;
+    req_cap.count = 1; req_cap.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE; req_cap.memory = V4L2_MEMORY_MMAP;
     IOCTL_OR_FAIL(v4l2_fd, VIDIOC_REQBUFS, &req_cap, "Request Cap Buffers");
 
+    struct v4l2_plane out_planes[1] = {};
     struct v4l2_buffer buf_out = {};
-    buf_out.type = V4L2_BUF_TYPE_VIDEO_OUTPUT; buf_out.memory = V4L2_MEMORY_MMAP;
+    buf_out.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE; 
+    buf_out.memory = V4L2_MEMORY_MMAP; 
+    buf_out.index = 0;
+    buf_out.length = 1;
+    buf_out.m.planes = out_planes;
     IOCTL_OR_FAIL(v4l2_fd, VIDIOC_QUERYBUF, &buf_out, "Query Out Buffer");
-    v4l2_in_len = buf_out.length;
-    v4l2_in_buffer = (uint8_t*)mmap(NULL, buf_out.length, PROT_READ | PROT_WRITE, MAP_SHARED, v4l2_fd, buf_out.m.offset);
+    v4l2_in_len = buf_out.m.planes[0].length;
+    v4l2_in_buffer = (uint8_t*)mmap(NULL, v4l2_in_len, PROT_READ | PROT_WRITE, MAP_SHARED, v4l2_fd, buf_out.m.planes[0].m.mem_offset);
 
+    struct v4l2_plane cap_planes[1] = {};
     struct v4l2_buffer buf_cap = {};
-    buf_cap.type = V4L2_BUF_TYPE_VIDEO_CAPTURE; buf_cap.memory = V4L2_MEMORY_MMAP;
+    buf_cap.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE; 
+    buf_cap.memory = V4L2_MEMORY_MMAP; 
+    buf_cap.index = 0;
+    buf_cap.length = 1;
+    buf_cap.m.planes = cap_planes;
     IOCTL_OR_FAIL(v4l2_fd, VIDIOC_QUERYBUF, &buf_cap, "Query Cap Buffer");
-    v4l2_out_len = buf_cap.length;
-    v4l2_out_buffer = (uint8_t*)mmap(NULL, buf_cap.length, PROT_READ | PROT_WRITE, MAP_SHARED, v4l2_fd, buf_cap.m.offset);
+    v4l2_out_len = buf_cap.m.planes[0].length;
+    v4l2_out_buffer = (uint8_t*)mmap(NULL, v4l2_out_len, PROT_READ | PROT_WRITE, MAP_SHARED, v4l2_fd, buf_cap.m.planes[0].m.mem_offset);
 
-    int type = V4L2_BUF_TYPE_VIDEO_OUTPUT; IOCTL_OR_FAIL(v4l2_fd, VIDIOC_STREAMON, &type, "StreamOn Output");
-    type = V4L2_BUF_TYPE_VIDEO_CAPTURE; IOCTL_OR_FAIL(v4l2_fd, VIDIOC_STREAMON, &type, "StreamOn Capture");
-    IOCTL_OR_FAIL(v4l2_fd, VIDIOC_QBUF, &buf_cap, "Queue Capture Buffer");
+    int type_out = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE; 
+    IOCTL_OR_FAIL(v4l2_fd, VIDIOC_STREAMON, &type_out, "StreamOn Output");
+    int type_cap = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE; 
+    IOCTL_OR_FAIL(v4l2_fd, VIDIOC_STREAMON, &type_cap, "StreamOn Capture");
+
+    // Queue the capture buffer initially
+    IOCTL_OR_FAIL(v4l2_fd, VIDIOC_QBUF, &buf_cap, "Queue Initial Capture Buffer");
 
     std::cout << "[V4L2-DEBUG] Hardware H.264 Encoder successfully initialized!" << std::endl;
     return true;
 }
 
-// Generates a moving color gradient natively in YUV420 format
 void VideoEncoderThread::generate_test_pattern() {
     int frame_size = res_w * res_h;
     uint8_t* y_plane = v4l2_in_buffer;
@@ -164,7 +183,6 @@ void VideoEncoderThread::generate_test_pattern() {
     frame_counter += 5; 
 }
 
-// Converts DRM ARGB8888 buffer to YUV420 so the Pi's encoder can digest it
 void VideoEncoderThread::convert_rgb_to_yuv420() {
     int frame_size = res_w * res_h;
     uint8_t* y_plane = v4l2_in_buffer;
@@ -174,7 +192,6 @@ void VideoEncoderThread::convert_rgb_to_yuv420() {
     for (int j = 0; j < res_h; ++j) {
         for (int i = 0; i < res_w; ++i) {
             int rgb_idx = (j * res_w + i) * 4;
-            // DRM usually exposes BGRA in memory on little-endian ARM
             uint8_t b = drm_mapped_buffer[rgb_idx + 0];
             uint8_t g = drm_mapped_buffer[rgb_idx + 1];
             uint8_t r = drm_mapped_buffer[rgb_idx + 2];
@@ -203,18 +220,28 @@ void VideoEncoderThread::encode_loop() {
             convert_rgb_to_yuv420();
         }
         
+        struct v4l2_plane out_planes[1] = {};
         struct v4l2_buffer buf_out = {};
-        buf_out.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
+        buf_out.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
         buf_out.memory = V4L2_MEMORY_MMAP;
-        buf_out.bytesused = yuv_frame_size; // YUV420 size
+        buf_out.index = 0;
+        buf_out.length = 1;
+        buf_out.m.planes = out_planes;
+        buf_out.m.planes[0].bytesused = yuv_frame_size;
+        
         if (ioctl(v4l2_fd, VIDIOC_QBUF, &buf_out) < 0) continue;
 
+        struct v4l2_plane cap_planes[1] = {};
         struct v4l2_buffer buf_cap = {};
-        buf_cap.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        buf_cap.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
         buf_cap.memory = V4L2_MEMORY_MMAP;
+        buf_cap.length = 1;
+        buf_cap.m.planes = cap_planes;
         
         if (ioctl(v4l2_fd, VIDIOC_DQBUF, &buf_cap) == 0) {
-            std::vector<uint8_t> nalu(v4l2_out_buffer, v4l2_out_buffer + buf_cap.bytesused);
+            size_t bytes_used = buf_cap.m.planes[0].bytesused;
+            std::vector<uint8_t> nalu(v4l2_out_buffer, v4l2_out_buffer + bytes_used);
+            
             ioctl(v4l2_fd, VIDIOC_QBUF, &buf_cap);
             ioctl(v4l2_fd, VIDIOC_DQBUF, &buf_out); 
 
@@ -224,7 +251,6 @@ void VideoEncoderThread::encode_loop() {
                 video_frame.channel_id = ch_id;
                 video_frame.flags = FLAG_FIRST | FLAG_LAST | FLAG_ENCRYPTED | FLAG_MEDIA;
                 
-                // Android Auto expects timestamps in Microseconds
                 auto pts_now = std::chrono::steady_clock::now().time_since_epoch();
                 video_frame.timestamp = std::chrono::duration_cast<std::chrono::microseconds>(pts_now).count();
                 video_frame.payload = encrypted;
@@ -233,7 +259,6 @@ void VideoEncoderThread::encode_loop() {
             }
         }
 
-        // Lock to ~30 FPS
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start_time);
         if (elapsed.count() < 33) std::this_thread::sleep_for(std::chrono::milliseconds(33 - elapsed.count()));
     }
@@ -241,8 +266,8 @@ void VideoEncoderThread::encode_loop() {
 
 void VideoEncoderThread::cleanup_hardware() {
     if (v4l2_fd >= 0) {
-        int type = V4L2_BUF_TYPE_VIDEO_OUTPUT; ioctl(v4l2_fd, VIDIOC_STREAMOFF, &type);
-        type = V4L2_BUF_TYPE_VIDEO_CAPTURE; ioctl(v4l2_fd, VIDIOC_STREAMOFF, &type);
+        int type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE; ioctl(v4l2_fd, VIDIOC_STREAMOFF, &type);
+        type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE; ioctl(v4l2_fd, VIDIOC_STREAMOFF, &type);
         if (v4l2_in_buffer) munmap(v4l2_in_buffer, v4l2_in_len); 
         if (v4l2_out_buffer) munmap(v4l2_out_buffer, v4l2_out_len);
         close(v4l2_fd);
