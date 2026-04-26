@@ -18,6 +18,7 @@ private:
     bool init_v4l2_encoder();
     void cleanup_hardware();
     void generate_test_pattern();
+    void convert_rgb_to_yuv420();
 
     FunctionFSTransport& usb_transport;
     OpenGALTlsContext& tls_ctx;
