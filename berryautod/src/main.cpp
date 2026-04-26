@@ -27,7 +27,7 @@ int main()
 
     std::cout << "[MAIN] Listening for frames..." << std::endl;
 
-    while (true)
+    while (usb_transport.is_running())
     {
         auto frames = usb_transport.read_frames();
         for (const auto& frame : frames)

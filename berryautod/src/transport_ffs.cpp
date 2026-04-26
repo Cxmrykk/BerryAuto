@@ -156,6 +156,16 @@ std::vector<GalFrame> FunctionFSTransport::read_frames() {
     uint8_t buffer[16384];
     ssize_t bytes = read(ep2_out_fd, buffer, sizeof(buffer));
     std::vector<GalFrame> frames;
-    if (bytes > 0) reassembler.append(buffer, bytes, frames);
+    
+    if (bytes > 0) {
+        reassembler.append(buffer, bytes, frames);
+    } else if (bytes == 0) {
+        std::cerr << "\n[FFS] FATAL: Head Unit abruptly closed the USB connection (EOF)." << std::endl;
+        std::cerr << "[FFS] This usually means the car rejected the TLS Certificate." << std::endl;
+        running = false;
+    } else {
+        std::cerr << "\n[FFS] FATAL: Read Error on USB endpoint: " << strerror(errno) << std::endl;
+        running = false;
+    }
     return frames;
 }
