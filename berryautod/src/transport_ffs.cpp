@@ -160,11 +160,10 @@ std::vector<GalFrame> FunctionFSTransport::read_frames() {
     if (bytes > 0) {
         reassembler.append(buffer, bytes, frames);
     } else if (bytes == 0) {
-        std::cerr << "\n[FFS] FATAL: Head Unit abruptly closed the USB connection (EOF)." << std::endl;
-        std::cerr << "[FFS] This usually means the car rejected the TLS Certificate." << std::endl;
+        std::cerr << "\n[FFS] Head Unit abruptly closed the USB connection (EOF)." << std::endl;
         running = false;
     } else {
-        std::cerr << "\n[FFS] FATAL: Read Error on USB endpoint: " << strerror(errno) << std::endl;
+        std::cerr << "\n[FFS] Read Error on USB endpoint." << std::endl;
         running = false;
     }
     return frames;

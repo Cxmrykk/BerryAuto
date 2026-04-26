@@ -16,6 +16,6 @@ private:
     SSL* ssl; 
     BIO *read_bio, *write_bio;
     
-    // Loads the official Google identity required to bypass Head Unit DRM
-    bool load_google_identity();
+    // Generates a dynamic RSA keypair (Fallback used by Android Auto)
+    bool generate_ephemeral_cert();
 };
