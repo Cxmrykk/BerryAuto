@@ -3,6 +3,7 @@
 #include <openssl/bio.h>
 #include <vector>
 #include <cstdint>
+#include <mutex>
 
 class OpenGALTlsContext {
 public:
@@ -15,6 +16,7 @@ private:
     SSL_CTX* ctx; 
     SSL* ssl; 
     BIO *read_bio, *write_bio;
+    std::mutex tls_mutex;
     
     // Generates a dynamic RSA keypair (Fallback used by Android Auto)
     bool generate_ephemeral_cert();
