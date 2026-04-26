@@ -16,6 +16,6 @@ private:
     SSL* ssl; 
     BIO *read_bio, *write_bio;
     
-    // Generates a dynamic RSA keypair to satisfy the Head Unit
-    bool generate_ephemeral_cert();
+    // Loads the official Google identity required to bypass Head Unit DRM
+    bool load_google_identity();
 };
