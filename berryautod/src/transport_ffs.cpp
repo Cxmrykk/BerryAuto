@@ -169,3 +169,8 @@ std::vector<GalFrame> FunctionFSTransport::read_frames() {
     }
     return frames;
 }
+
+void FunctionFSTransport::write_frame_raw(const std::vector<uint8_t>& data) {
+    std::lock_guard<std::mutex> lock(write_mutex);
+    write(ep1_in_fd, data.data(), data.size());
+}

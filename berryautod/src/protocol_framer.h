@@ -4,13 +4,12 @@
 
 #define FLAG_FIRST     0x01
 #define FLAG_LAST      0x02
-#define FLAG_MEDIA     0x04
+#define FLAG_CONTROL   0x04
 #define FLAG_ENCRYPTED 0x08
 
 struct GalFrame {
     uint8_t channel_id;
     uint8_t flags;
-    uint32_t timestamp;
     std::vector<uint8_t> payload;
     std::vector<uint8_t> serialize() const;
 };
