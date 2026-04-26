@@ -64,20 +64,18 @@ int main()
         auto frames = usb_transport.read_frames();
         for (const auto& frame : frames)
         {
-            // Omit printing the constant data channels to keep logs clean
-            if (frame.channel_id == 0) {
-                std::cout << "\n[MAIN-RX] Frame Received: Ch=0 Flags=" << decode_flags(frame.flags) 
-                          << " Len=" << frame.payload.size() << std::endl;
-            }
+            // ALWAYS print the frame so we know what channel is active
+            std::cout << "\n[MAIN-RX] Frame Received: Ch=" << (int)frame.channel_id 
+                      << " Flags=" << decode_flags(frame.flags) 
+                      << " Len=" << frame.payload.size() << std::endl;
 
             // --- CLEARTEXT MESSAGES ---
             if (!(frame.flags & FLAG_ENCRYPTED)) 
             {
-                if (frame.channel_id != 0) continue;
                 if (frame.payload.size() < 2) continue;
 
                 uint16_t msg_type = (frame.payload[0] << 8) | frame.payload[1];
-                std::cout << "[MAIN-RX] Decoded Cleartext Type: " << decode_msg_type(msg_type) << std::endl;
+                std::cout << "[MAIN-RX] Decoded Cleartext Type on Ch " << (int)frame.channel_id << ": " << decode_msg_type(msg_type) << std::endl;
 
                 if (msg_type == 1) // VersionRequest
                 { 
@@ -98,8 +96,6 @@ int main()
                 }
                 else if (msg_type == 3) // SslHandshake
                 { 
-                    // FIX 1: ALWAYS process Handshake records, even if we think it's finished!
-                    // TLS 1.2 sends post-handshake fragments (Session Tickets/ChangeCipherSpec)
                     std::vector<uint8_t> tls_input(frame.payload.begin() + 2, frame.payload.end());
                     std::vector<uint8_t> tls_output;
                     
@@ -125,34 +121,17 @@ int main()
                     std::cout << "[MAIN-STATE] AuthComplete (Cleartext) received. We are Trusted." << std::endl;
                     auth_complete = true;
 
-                    // Acknowledge by sending our own AuthComplete (Encrypted)
+                    // Send Encrypted AuthComplete
                     GalFrame auth_frame;
                     auth_frame.channel_id = 0;
                     auth_frame.flags = FLAG_FIRST | FLAG_LAST | FLAG_ENCRYPTED;
                     std::vector<uint8_t> auth_pt = {0x00, 0x04, 0x08, 0x00}; 
                     auth_frame.payload = tls_ctx->encrypt(auth_pt);
-                    
                     std::cout << "[MAIN-TX] Sending AuthComplete (Encrypted)" << std::endl;
                     usb_transport.write_frame(auth_frame);
 
-                    // FIX 2: Populate ServiceDiscovery to tell the car we support Video and Touch
+                    // Send Empty ServiceDiscoveryRequest so the Car dictates capabilities
                     ServiceDiscovery sdp_req;
-                    
-                    ServiceDescriptor* video_svc = sdp_req.add_services();
-                    video_svc->set_service_id(2);
-                    MediaSinkService* sink = video_svc->mutable_media_sink_service();
-                    sink->set_codec_type(MEDIA_CODEC_VIDEO_H264_BP);
-                    VideoConfig* vconf = sink->add_video_configs();
-                    vconf->set_codec_resolution(VIDEO_800x480);
-                    vconf->set_framerate(30);
-
-                    ServiceDescriptor* input_svc = sdp_req.add_services();
-                    input_svc->set_service_id(3);
-                    InputSourceService* input = input_svc->mutable_input_service();
-                    TouchscreenConfig* touchscreen = input->add_touchscreens();
-                    touchscreen->set_width(800);
-                    touchscreen->set_height(480);
-
                     std::string sdp_req_str = sdp_req.SerializeAsString();
                     std::vector<uint8_t> sdp_req_pt(sdp_req_str.begin(), sdp_req_str.end());
                     sdp_req_pt.insert(sdp_req_pt.begin(), {0x00, 0x06}); // Type 6
@@ -170,13 +149,14 @@ int main()
             else if (tls_finished && (frame.flags & FLAG_ENCRYPTED))
             {
                 std::vector<uint8_t> plaintext = tls_ctx->decrypt(frame.payload);
-                if (plaintext.empty()) continue; // Skip incomplete fragments/failed MACs
+                if (plaintext.empty()) continue; 
 
-                // If it's Channel 0, it has a 16-bit message type header
-                if (frame.channel_id == 0) {
+                // Check if it's a Control Message (No MEDIA flag)
+                if (!(frame.flags & FLAG_MEDIA)) 
+                {
                     if (plaintext.size() < 2) continue;
                     uint16_t enc_msg_type = (plaintext[0] << 8) | plaintext[1];
-                    std::cout << "[MAIN-RX] Decrypted Type on Ch 0: " << decode_msg_type(enc_msg_type) << std::endl;
+                    std::cout << "[MAIN-RX] Decrypted Control Type on Ch " << (int)frame.channel_id << ": " << decode_msg_type(enc_msg_type) << std::endl;
 
                     if (enc_msg_type == 6 && auth_complete) // ServiceDiscoveryResponse
                     { 
@@ -213,7 +193,7 @@ int main()
                             req_pt.insert(req_pt.begin(), {0x00, 0x07}); // Type 7
 
                             GalFrame chan_frame;
-                            chan_frame.channel_id = video_ch_id; // Command must be sent on the target channel
+                            chan_frame.channel_id = video_ch_id; 
                             chan_frame.flags = FLAG_FIRST | FLAG_LAST | FLAG_ENCRYPTED; 
                             chan_frame.payload = tls_ctx->encrypt(req_pt);
                             std::cout << "[MAIN-TX] Sending ChannelOpenRequest on Ch " << video_ch_id << std::endl;
@@ -256,7 +236,7 @@ int main()
                             video_thread->start(res_w, res_h);
                         }
                     }
-                    else if (enc_msg_type == 11) // PingRequest -> PongResponse
+                    else if (enc_msg_type == 11) // PingRequest
                     { 
                         PingRequest ping;
                         ping.ParseFromArray(plaintext.data() + 2, plaintext.size() - 2);
@@ -268,18 +248,19 @@ int main()
                         pong_pt.insert(pong_pt.begin(), {0x00, 0x0C}); // Type 12
 
                         GalFrame pong_frame;
-                        pong_frame.channel_id = 0; // Pings are strictly Channel 0
+                        // Send the Pong back on the EXACT channel the Ping arrived on
+                        pong_frame.channel_id = frame.channel_id; 
                         pong_frame.flags = FLAG_FIRST | FLAG_LAST | FLAG_ENCRYPTED;
                         pong_frame.payload = tls_ctx->encrypt(pong_pt);
                         
                         usb_transport.write_frame(pong_frame);
                     }
-                } 
+                }
             }
         }
     }
-
-    std::cout << "[MAIN] Exiting..." << std::endl;
+    
+    std::cout << "[MAIN] Graceful shutdown initiated..." << std::endl;
     if (video_thread) video_thread->stop();
     return 0;
 }
