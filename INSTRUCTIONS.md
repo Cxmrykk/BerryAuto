@@ -130,15 +130,14 @@ You are now ready to project your Linux desktop to your car's head unit.
 
 1. **Plug it in:** Plug your Raspberry Pi into the car's smartphone USB port using your data cable.
 2. SSH into your Raspberry Pi.
-3. **Initialize the USB Gadget:**
+3. **Copy the initializer script:**
    ```bash
-   sudo /usr/local/bin/setup_opengal_gadget.sh
+   cp ~/BerryAuto/scripts/run_berryauto.sh .
+   chmod +x run_berryauto.sh
    ```
-   _The car may show "Reading USB" or "Android Auto Connected" at this stage._
 4. **Start the Daemon:**
    ```bash
-   cd ~/BerryAuto/berryautod/build
-   sudo ./opengal_emitter
+   ./run_berryauto.sh
    ```
 
 ### Success Verification
