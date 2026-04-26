@@ -4,22 +4,35 @@
 
 std::vector<uint8_t> GalFrame::serialize() const {
     size_t header_size = (flags & FLAG_MEDIA) ? 8 : 4;
+    
+    // FIX: The payload length field MUST include the 4-byte timestamp!
+    uint32_t payload_len = payload.size();
+    if (flags & FLAG_MEDIA) {
+        payload_len += 4; 
+    }
+
+    if (payload_len > 65535) {
+        std::cerr << "[FRAMER-ERR] FATAL: Frame too large for 16-bit length! Need GAL Fragmentation." << std::endl;
+    }
+
     std::vector<uint8_t> buffer(header_size + payload.size());
-    buffer[0] = channel_id; buffer[1] = flags;
-    buffer[2] = (payload.size() >> 8) & 0xFF; buffer[3] = payload.size() & 0xFF;
+    buffer[0] = channel_id; 
+    buffer[1] = flags;
+    buffer[2] = (payload_len >> 8) & 0xFF; 
+    buffer[3] = payload_len & 0xFF;
 
     if (flags & FLAG_MEDIA) {
-        buffer[4] = (timestamp >> 24) & 0xFF; buffer[5] = (timestamp >> 16) & 0xFF;
-        buffer[6] = (timestamp >> 8) & 0xFF; buffer[7] = timestamp & 0xFF;
+        buffer[4] = (timestamp >> 24) & 0xFF; 
+        buffer[5] = (timestamp >> 16) & 0xFF;
+        buffer[6] = (timestamp >> 8) & 0xFF; 
+        buffer[7] = timestamp & 0xFF;
     }
+    
     std::memcpy(buffer.data() + header_size, payload.data(), payload.size());
     return buffer;
 }
 
 void Reassembler::append(const uint8_t* buffer, size_t length, std::vector<GalFrame>& frames) {
-    std::cout << "[FRAMER-DEBUG] Appending " << length << " raw bytes to buffer. Total: " 
-              << partial_buffer.size() + length << std::endl;
-              
     partial_buffer.insert(partial_buffer.end(), buffer, buffer + length);
     
     while (partial_buffer.size() >= 4) {
@@ -27,7 +40,6 @@ void Reassembler::append(const uint8_t* buffer, size_t length, std::vector<GalFr
         size_t header_size = (partial_buffer[1] & FLAG_MEDIA) ? 8 : 4;
         
         if (partial_buffer.size() < header_size + payload_len) {
-            // Not enough data for a full frame yet
             break;
         }
 
@@ -36,10 +48,13 @@ void Reassembler::append(const uint8_t* buffer, size_t length, std::vector<GalFr
         frame.flags = partial_buffer[1];
         frame.timestamp = (frame.flags & FLAG_MEDIA) ? 
             ((partial_buffer[4]<<24)|(partial_buffer[5]<<16)|(partial_buffer[6]<<8)|partial_buffer[7]) : 0;
-        frame.payload.assign(partial_buffer.begin() + header_size, partial_buffer.begin() + header_size + payload_len);
+            
+        // If it's media, payload_len includes the 4-byte timestamp, so we subtract it for the actual data
+        size_t actual_payload_len = (frame.flags & FLAG_MEDIA) ? (payload_len - 4) : payload_len;
+        
+        frame.payload.assign(partial_buffer.begin() + header_size, partial_buffer.begin() + header_size + actual_payload_len);
         frames.push_back(frame);
         
-        // Remove parsed frame from buffer
-        partial_buffer.erase(partial_buffer.begin(), partial_buffer.begin() + header_size + payload_len);
+        partial_buffer.erase(partial_buffer.begin(), partial_buffer.begin() + header_size + actual_payload_len);
     }
 }
