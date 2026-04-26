@@ -52,6 +52,8 @@ int main() {
 
                     if (is_finished) {
                         std::cout << "[MAIN] *** TLS Handshake Complete! Transitioning to Encrypted Mode. ***" << std::endl;
+                        
+                        // 1. Send AuthComplete
                         AuthComplete auth; auth.set_status(STATUS_SUCCESS);
                         std::string auth_str = auth.SerializeAsString();
                         std::vector<uint8_t> pt(auth_str.begin(), auth_str.end());
@@ -62,6 +64,53 @@ int main() {
                         std::cout << "[MAIN] -> [Ch 0] Sending AuthComplete (Encrypted)." << std::endl;
                         usb_transport.write_frame(auth_frame);
                         auth_complete = true;
+
+                        // 2. Send Service Discovery Request (Declare our Hardware Capabilities)
+                        ServiceDiscovery sdp_req;
+                        sdp_req.set_head_unit_make("OpenGAL");
+                        sdp_req.set_head_unit_model("BerryAuto");
+                        sdp_req.set_head_unit_software_build("1.0");
+                        sdp_req.set_head_unit_software_version("1.0");
+
+                        // Add Video Service (Channel 2)
+                        ServiceDescriptor* video_svc = sdp_req.add_services();
+                        video_svc->set_service_id(2);
+                        MediaSinkService* media_sink = new MediaSinkService();
+                        media_sink->set_codec_type(MEDIA_CODEC_VIDEO_H264_BP);
+                        VideoConfig* video_config = media_sink->add_video_configs();
+                        video_config->set_codec_resolution(VIDEO_800x480);
+                        video_config->set_framerate(30);
+                        video_config->set_width_margin(0);
+                        video_config->set_height_margin(0);
+                        video_config->set_density(160);
+                        video_svc->set_allocated_media_sink_service(media_sink);
+
+                        // Add Touch Input Service (Channel 3)
+                        ServiceDescriptor* input_svc = sdp_req.add_services();
+                        input_svc->set_service_id(3);
+                        InputSourceService* input_src = new InputSourceService();
+                        TouchscreenConfig* touch_cfg = input_src->add_touchscreens();
+                        touch_cfg->set_width(800);
+                        touch_cfg->set_height(480);
+                        input_svc->set_allocated_input_service(input_src);
+
+                        // Add Audio Sink Service (Channel 4) - Required by phone to route music/nav
+                        ServiceDescriptor* audio_sink_svc = sdp_req.add_services();
+                        audio_sink_svc->set_service_id(4);
+                        MediaSinkService* a_sink = new MediaSinkService();
+                        a_sink->set_codec_type(MEDIA_CODEC_AUDIO_PCM);
+                        a_sink->set_audio_stream_type(1); // Media Stream
+                        // Omit AudioConfig allocation as the phone will accept PCM default constraints
+                        audio_sink_svc->set_allocated_media_sink_service(a_sink);
+
+                        std::string sdp_str = sdp_req.SerializeAsString();
+                        std::vector<uint8_t> sdp_pt(sdp_str.begin(), sdp_str.end());
+                        sdp_pt.insert(sdp_pt.begin(), {0x00, 0x06});
+
+                        GalFrame sdp_frame; sdp_frame.channel_id = 0; sdp_frame.flags = FLAG_FIRST | FLAG_LAST | FLAG_ENCRYPTED;
+                        sdp_frame.payload = tls_ctx.encrypt(sdp_pt);
+                        std::cout << "[MAIN] -> [Ch 0] Sending ServiceDiscoveryRequest (Video, Input, Audio)." << std::endl;
+                        usb_transport.write_frame(sdp_frame);
                     }
                 }
             } 
@@ -78,23 +127,31 @@ int main() {
                         sdp.ParseFromArray(plaintext.data() + 2, plaintext.size() - 2);
                         
                         int res_w = 800, res_h = 480;
-                        if (sdp.display_resolution() == 3) { res_w = 1920; res_h = 1080; }
-                        else if (sdp.display_resolution() == 2) { res_w = 1280; res_h = 720; }
-                        
-                        std::cout << "[MAIN] SDP configures Display Resolution: " << res_w << "x" << res_h << std::endl;
                         touch.init(res_w, res_h);
 
+                        // Open Video Channel (2)
                         ChannelOpenRequest open_req; open_req.set_channel_id(2); open_req.set_priority(1);
                         std::string req_str = open_req.SerializeAsString();
                         std::vector<uint8_t> req_pt(req_str.begin(), req_str.end());
                         req_pt.insert(req_pt.begin(), {0x00, 0x07});
                         
-                        GalFrame chan_frame; chan_frame.channel_id = 2; 
+                        GalFrame chan_frame; chan_frame.channel_id = 2; // Sent on the target channel
                         chan_frame.flags = FLAG_FIRST | FLAG_LAST | FLAG_ENCRYPTED;
                         chan_frame.payload = tls_ctx.encrypt(req_pt);
                         std::cout << "[MAIN] -> [Ch 2] Sending ChannelOpenRequest." << std::endl;
                         usb_transport.write_frame(chan_frame);
 
+                        // Open Input Channel (3)
+                        open_req.set_channel_id(3); open_req.set_priority(2);
+                        req_str = open_req.SerializeAsString();
+                        req_pt.assign(req_str.begin(), req_str.end());
+                        req_pt.insert(req_pt.begin(), {0x00, 0x07});
+                        chan_frame.channel_id = 3;
+                        chan_frame.payload = tls_ctx.encrypt(req_pt);
+                        std::cout << "[MAIN] -> [Ch 3] Sending ChannelOpenRequest." << std::endl;
+                        usb_transport.write_frame(chan_frame);
+
+                        // Request the Phone to project UI to the Native display
                         NavFocusEvent nav; nav.set_focus_state(NAV_FOCUS_PROJECTED);
                         std::string nav_str = nav.SerializeAsString();
                         std::vector<uint8_t> nav_pt(nav_str.begin(), nav_str.end());
@@ -111,6 +168,7 @@ int main() {
                     }
                     else if (msg_type == 11) { // PingRequest -> PongResponse
                         PingRequest ping; ping.ParseFromArray(plaintext.data() + 2, plaintext.size() - 2);
+                        // std::cout << "[MAIN] <- [Ch 0] Received PingRequest (timestamp: " << ping.timestamp() << ")." << std::endl;
                         
                         PongResponse pong; pong.set_timestamp(ping.timestamp());
                         std::string pong_str = pong.SerializeAsString();
