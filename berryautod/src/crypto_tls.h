@@ -2,6 +2,7 @@
 #include <openssl/ssl.h>
 #include <openssl/bio.h>
 #include <vector>
+#include <cstdint>
 
 class OpenGALTlsContext {
 public:
@@ -15,6 +16,6 @@ private:
     SSL* ssl; 
     BIO *read_bio, *write_bio;
     
-    // Generates a dynamic RSA keypair to satisfy the Head Unit
-    bool generate_ephemeral_cert();
+    // Loads the official Google Automotive Link X.509 identity required by the Head Unit
+    bool load_google_identity();
 };
