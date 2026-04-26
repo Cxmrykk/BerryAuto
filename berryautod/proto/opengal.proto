@@ -47,6 +47,11 @@ message PongResponse {
 
 message NavFocusEvent { NavFocusState focus_state = 1; }
 
+// ADDED: The phone must send this to the Head Unit to start the exchange
+message ServiceDiscoveryRequest {
+    string phone_name = 1;
+}
+
 message ServiceDiscovery {
     repeated ServiceDescriptor services = 1;
     string head_unit_make = 2;

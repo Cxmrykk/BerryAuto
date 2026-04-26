@@ -243,9 +243,7 @@ void VideoEncoderThread::encode_loop() {
             size_t bytes_used = buf_cap.m.planes[0].bytesused;
             std::vector<uint8_t> nalu(v4l2_out_buffer, v4l2_out_buffer + bytes_used);
             
-            // Re-queue the capture buffer for the next frame
             ioctl(v4l2_fd, VIDIOC_QBUF, &buf_cap);
-            // Reclaim the raw buffer we just submitted
             ioctl(v4l2_fd, VIDIOC_DQBUF, &buf_out); 
 
             if (!nalu.empty()) {
@@ -253,21 +251,19 @@ void VideoEncoderThread::encode_loop() {
                 std::vector<uint8_t> full_plaintext;
                 full_plaintext.reserve(10 + nalu.size());
                 
-                // 16-bit Media Data type (0x0000)
                 full_plaintext.push_back(0x00);
                 full_plaintext.push_back(0x00);
                 
                 auto pts_now = std::chrono::steady_clock::now().time_since_epoch();
                 uint64_t timestamp = std::chrono::duration_cast<std::chrono::microseconds>(pts_now).count();
                 
-                // 64-bit Network Byte Order Timestamp
                 for (int i = 7; i >= 0; --i) {
                     full_plaintext.push_back((timestamp >> (i * 8)) & 0xFF);
                 }
                 full_plaintext.insert(full_plaintext.end(), nalu.begin(), nalu.end());
 
                 // 2. Application-Level Fragmentation and Encryption
-                size_t max_chunk = 16000;
+                size_t max_chunk = 16000; // Safe threshold well below Head Unit MTU
                 size_t offset = 0;
                 bool is_fragmented = full_plaintext.size() > max_chunk;
                 uint32_t total_size = full_plaintext.size();
@@ -278,7 +274,7 @@ void VideoEncoderThread::encode_loop() {
                     
                     std::vector<uint8_t> encrypted_chunk = tls_ctx.encrypt(chunk);
 
-                    uint8_t flags = FLAG_ENCRYPTED;
+                    uint8_t flags = FLAG_ENCRYPTED; // NO FLAG_CONTROL here! It's media!
                     bool is_first = (offset == 0);
                     bool is_last = (offset + chunk_size >= full_plaintext.size());
 
