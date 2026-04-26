@@ -16,6 +16,6 @@ private:
     SSL* ssl; 
     BIO *read_bio, *write_bio;
     
-    // Loads the official Google Automotive Link X.509 identity required by the Head Unit
-    bool load_google_identity();
+    // Generates a dynamic RSA keypair to satisfy the Head Unit
+    bool generate_ephemeral_cert();
 };
