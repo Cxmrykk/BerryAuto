@@ -1,5 +1,6 @@
 #include "protocol_framer.h"
 #include <cstring>
+#include <iostream>
 
 std::vector<uint8_t> GalFrame::serialize() const {
     size_t header_size = (flags & FLAG_MEDIA) ? 8 : 4;
@@ -16,18 +17,29 @@ std::vector<uint8_t> GalFrame::serialize() const {
 }
 
 void Reassembler::append(const uint8_t* buffer, size_t length, std::vector<GalFrame>& frames) {
+    std::cout << "[FRAMER-DEBUG] Appending " << length << " raw bytes to buffer. Total: " 
+              << partial_buffer.size() + length << std::endl;
+              
     partial_buffer.insert(partial_buffer.end(), buffer, buffer + length);
+    
     while (partial_buffer.size() >= 4) {
         uint16_t payload_len = (partial_buffer[2] << 8) | partial_buffer[3];
         size_t header_size = (partial_buffer[1] & FLAG_MEDIA) ? 8 : 4;
-        if (partial_buffer.size() < header_size + payload_len) break;
+        
+        if (partial_buffer.size() < header_size + payload_len) {
+            // Not enough data for a full frame yet
+            break;
+        }
 
         GalFrame frame;
-        frame.channel_id = partial_buffer[0]; frame.flags = partial_buffer[1];
+        frame.channel_id = partial_buffer[0]; 
+        frame.flags = partial_buffer[1];
         frame.timestamp = (frame.flags & FLAG_MEDIA) ? 
             ((partial_buffer[4]<<24)|(partial_buffer[5]<<16)|(partial_buffer[6]<<8)|partial_buffer[7]) : 0;
         frame.payload.assign(partial_buffer.begin() + header_size, partial_buffer.begin() + header_size + payload_len);
         frames.push_back(frame);
+        
+        // Remove parsed frame from buffer
         partial_buffer.erase(partial_buffer.begin(), partial_buffer.begin() + header_size + payload_len);
     }
 }

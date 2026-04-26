@@ -44,9 +44,9 @@ FunctionFSTransport::~FunctionFSTransport() {
 }
 
 bool FunctionFSTransport::init() {
-    std::cout << "[FFS] Opening EP0..." << std::endl;
+    std::cout << "[FFS-DEBUG] Opening EP0..." << std::endl;
     ep0_fd = open((path + "/ep0").c_str(), O_RDWR);
-    if (ep0_fd < 0) { std::cerr << "[FFS] Failed to open FFS ep0\n"; return false; }
+    if (ep0_fd < 0) { std::cerr << "[FFS-ERR] Failed to open FFS ep0\n"; return false; }
 
     ffs_descriptors.header.magic = CPU_TO_LE32(FUNCTIONFS_DESCRIPTORS_MAGIC_V2);
     ffs_descriptors.header.length = CPU_TO_LE32(sizeof(ffs_descriptors));
@@ -76,7 +76,7 @@ bool FunctionFSTransport::init() {
 
     ffs_descriptors.hs_descs = ffs_descriptors.fs_descs;
     
-    std::cout << "[FFS] Writing Descriptors..." << std::endl;
+    std::cout << "[FFS-DEBUG] Writing Descriptors..." << std::endl;
     write(ep0_fd, &ffs_descriptors, sizeof(ffs_descriptors));
 
     ffs_strings.header.magic = CPU_TO_LE32(FUNCTIONFS_STRINGS_MAGIC);
@@ -86,17 +86,17 @@ bool FunctionFSTransport::init() {
     ffs_strings.lang0.code = CPU_TO_LE16(0x0409);
     strncpy(ffs_strings.lang0.str1, "OpenGAL Interface", sizeof(ffs_strings.lang0.str1));
     
-    std::cout << "[FFS] Writing Strings..." << std::endl;
+    std::cout << "[FFS-DEBUG] Writing Strings..." << std::endl;
     write(ep0_fd, &ffs_strings, sizeof(ffs_strings));
 
     running = true;
     ep0_thread = std::thread(&FunctionFSTransport::ep0_loop, this);
 
-    std::cout << "[FFS] Opening Bulk Endpoints (Waiting for Host)..." << std::endl;
+    std::cout << "[FFS-DEBUG] Opening Bulk Endpoints (Waiting for Host)..." << std::endl;
     ep1_in_fd = open((path + "/ep1").c_str(), O_WRONLY);
     ep2_out_fd = open((path + "/ep2").c_str(), O_RDONLY);
     
-    std::cout << "[FFS] Transport Initialized Successfully!" << std::endl;
+    std::cout << "[FFS-STATE] Transport Initialized Successfully!" << std::endl;
     return true;
 }
 
@@ -106,7 +106,7 @@ void FunctionFSTransport::ep0_loop() {
     while (running) {
         ssize_t ret = read(ep0_fd, &event, sizeof(event));
         if (ret < 0) {
-            if (running) std::cerr << "[FFS-EP0] Read error or descriptor closed.\n";
+            if (running) std::cerr << "[FFS-EP0-ERR] Read error or descriptor closed.\n";
             break;
         }
 
@@ -158,12 +158,13 @@ std::vector<GalFrame> FunctionFSTransport::read_frames() {
     std::vector<GalFrame> frames;
     
     if (bytes > 0) {
+        std::cout << "[FFS-DEBUG] Read " << bytes << " bytes from USB endpoint." << std::endl;
         reassembler.append(buffer, bytes, frames);
     } else if (bytes == 0) {
-        std::cerr << "\n[FFS] Head Unit abruptly closed the USB connection (EOF)." << std::endl;
+        std::cerr << "\n[FFS-ERR] FATAL: Head Unit abruptly closed the USB connection (EOF)." << std::endl;
         running = false;
     } else {
-        std::cerr << "\n[FFS] Read Error on USB endpoint." << std::endl;
+        std::cerr << "\n[FFS-ERR] FATAL: Read Error on USB endpoint." << std::endl;
         running = false;
     }
     return frames;
