@@ -96,8 +96,9 @@ bool VideoEncoderThread::init_v4l2_encoder() {
     struct v4l2_format fmt_out = {};
     fmt_out.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
     fmt_out.fmt.pix.width = res_w; fmt_out.fmt.pix.height = res_h;
-    fmt_out.fmt.pix.pixelformat = V4L2_PIX_FMT_RGB32;
-    IOCTL_OR_FAIL(v4l2_fd, VIDIOC_S_FMT, &fmt_out, "Set output format (RGB32)");
+    // FIX: Raspberry Pi encoder ONLY accepts YUV420!
+    fmt_out.fmt.pix.pixelformat = V4L2_PIX_FMT_YUV420;
+    IOCTL_OR_FAIL(v4l2_fd, VIDIOC_S_FMT, &fmt_out, "Set output format (YUV420)");
 
     struct v4l2_format fmt_cap = {};
     fmt_cap.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -142,34 +143,70 @@ bool VideoEncoderThread::init_v4l2_encoder() {
     return true;
 }
 
+// Generates a moving color gradient natively in YUV420 format
 void VideoEncoderThread::generate_test_pattern() {
-    uint32_t* pixels = reinterpret_cast<uint32_t*>(v4l2_in_buffer);
+    int frame_size = res_w * res_h;
+    uint8_t* y_plane = v4l2_in_buffer;
+    uint8_t* u_plane = v4l2_in_buffer + frame_size;
+    uint8_t* v_plane = v4l2_in_buffer + frame_size + (frame_size / 4);
+
     for (int y = 0; y < res_h; ++y) {
         for (int x = 0; x < res_w; ++x) {
-            uint8_t r = (x + frame_counter) % 256;
-            uint8_t g = (y + frame_counter) % 256;
-            uint8_t b = ((x + y) / 2 + frame_counter) % 256;
-            pixels[y * res_w + x] = (255 << 24) | (r << 16) | (g << 8) | b;
+            y_plane[y * res_w + x] = (x + y + frame_counter) % 256;
+        }
+    }
+    for (int y = 0; y < res_h / 2; ++y) {
+        for (int x = 0; x < res_w / 2; ++x) {
+            u_plane[y * (res_w / 2) + x] = (x + frame_counter) % 256;
+            v_plane[y * (res_w / 2) + x] = (y + frame_counter) % 256;
         }
     }
     frame_counter += 5; 
 }
 
+// Converts DRM ARGB8888 buffer to YUV420 so the Pi's encoder can digest it
+void VideoEncoderThread::convert_rgb_to_yuv420() {
+    int frame_size = res_w * res_h;
+    uint8_t* y_plane = v4l2_in_buffer;
+    uint8_t* u_plane = v4l2_in_buffer + frame_size;
+    uint8_t* v_plane = v4l2_in_buffer + frame_size + (frame_size / 4);
+
+    for (int j = 0; j < res_h; ++j) {
+        for (int i = 0; i < res_w; ++i) {
+            int rgb_idx = (j * res_w + i) * 4;
+            // DRM usually exposes BGRA in memory on little-endian ARM
+            uint8_t b = drm_mapped_buffer[rgb_idx + 0];
+            uint8_t g = drm_mapped_buffer[rgb_idx + 1];
+            uint8_t r = drm_mapped_buffer[rgb_idx + 2];
+
+            y_plane[j * res_w + i] = ((66 * r + 129 * g + 25 * b) >> 8) + 16;
+            
+            if (j % 2 == 0 && i % 2 == 0) {
+                int uv_idx = (j / 2) * (res_w / 2) + (i / 2);
+                u_plane[uv_idx] = ((-38 * r + -74 * g + 112 * b) >> 8) + 128;
+                v_plane[uv_idx] = ((112 * r + -94 * g + -18 * b) >> 8) + 128;
+            }
+        }
+    }
+}
+
 void VideoEncoderThread::encode_loop() {
     std::cout << "[HW-STATE] Transmitting Video Frames!" << std::endl;
+    int yuv_frame_size = (res_w * res_h * 3) / 2;
+
     while (running) {
         auto start_time = std::chrono::steady_clock::now();
 
         if (use_test_pattern) {
-            generate_test_pattern(); // Generate colors in CPU
+            generate_test_pattern();
         } else {
-            std::memcpy(v4l2_in_buffer, drm_mapped_buffer, std::min(drm_buffer_size, v4l2_in_len));
+            convert_rgb_to_yuv420();
         }
         
         struct v4l2_buffer buf_out = {};
         buf_out.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
         buf_out.memory = V4L2_MEMORY_MMAP;
-        buf_out.bytesused = (use_test_pattern) ? (res_w * res_h * 4) : v4l2_in_len;
+        buf_out.bytesused = yuv_frame_size; // YUV420 size
         if (ioctl(v4l2_fd, VIDIOC_QBUF, &buf_out) < 0) continue;
 
         struct v4l2_buffer buf_cap = {};
@@ -186,6 +223,8 @@ void VideoEncoderThread::encode_loop() {
                 GalFrame video_frame;
                 video_frame.channel_id = ch_id;
                 video_frame.flags = FLAG_FIRST | FLAG_LAST | FLAG_ENCRYPTED | FLAG_MEDIA;
+                
+                // Android Auto expects timestamps in Microseconds
                 auto pts_now = std::chrono::steady_clock::now().time_since_epoch();
                 video_frame.timestamp = std::chrono::duration_cast<std::chrono::microseconds>(pts_now).count();
                 video_frame.payload = encrypted;
@@ -194,6 +233,7 @@ void VideoEncoderThread::encode_loop() {
             }
         }
 
+        // Lock to ~30 FPS
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start_time);
         if (elapsed.count() < 33) std::this_thread::sleep_for(std::chrono::milliseconds(33 - elapsed.count()));
     }
