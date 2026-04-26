@@ -72,9 +72,15 @@ We need to instruct the Raspberry Pi kernel to enable USB Gadget mode (DWC2) and
 
 ---
 
-## Step 4: Configure X11 & USB Gadget Scripts
+## Step 4: Clone Repository, Configure X11 & USB Gadget Scripts
 
-1. **Force X11 to use the Virtual Display:**
+1. **Clone the repository to your home directory**
+    ```bash
+    git clone https://github.com/Cxmrykk/BerryAuto.git
+    cd BerryAuto/
+    ```
+
+2. **Force X11 to use the Virtual Display:**
    Copy the provided X11 configuration file so the desktop renders to the virtual monitor instead of the physical HDMI port.
 
    ```bash
@@ -82,7 +88,7 @@ We need to instruct the Raspberry Pi kernel to enable USB Gadget mode (DWC2) and
    sudo cp config/10-vkms.conf /etc/X11/xorg.conf.d/
    ```
 
-2. **Install the USB Gadget Script:**
+3. **Install the USB Gadget Script:**
    This script makes the Pi disguise itself as a Google Android Auto Accessory (`VID: 0x18D1`, `PID: 0x2D00`).
    ```bash
    sudo cp scripts/setup_opengal_gadget.sh /usr/local/bin/
