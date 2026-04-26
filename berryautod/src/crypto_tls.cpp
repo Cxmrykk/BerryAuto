@@ -88,7 +88,6 @@ std::vector<uint8_t> OpenGALTlsContext::encrypt(const std::vector<uint8_t>& plai
     std::vector<uint8_t> ciphertext;
     size_t offset = 0;
     
-    // Loop SSL_write so we don't truncate large H.264 frames at 16KB!
     while (offset < plaintext.size()) {
         int written = SSL_write(ssl, plaintext.data() + offset, plaintext.size() - offset);
         if (written <= 0) {
@@ -112,7 +111,6 @@ std::vector<uint8_t> OpenGALTlsContext::decrypt(const std::vector<uint8_t>& ciph
     BIO_write(read_bio, ciphertext.data(), ciphertext.size());
     std::vector<uint8_t> plaintext;
     
-    // Loop SSL_read to ensure we get all data if multiple TLS records arrived
     while (true) {
         std::vector<uint8_t> chunk(16384);
         int read = SSL_read(ssl, chunk.data(), chunk.size());

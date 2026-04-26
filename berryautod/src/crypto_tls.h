@@ -16,8 +16,7 @@ private:
     SSL_CTX* ctx; 
     SSL* ssl; 
     BIO *read_bio, *write_bio;
-    std::mutex tls_mutex;
+    std::mutex tls_mutex; // ADDED: Thread safety for OpenSSL
     
-    // Generates a dynamic RSA keypair (Fallback used by Android Auto)
     bool generate_ephemeral_cert();
 };
