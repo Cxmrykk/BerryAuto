@@ -17,12 +17,16 @@ private:
     bool init_drm_capture();
     bool init_v4l2_encoder();
     void cleanup_hardware();
+    void generate_test_pattern();
 
     FunctionFSTransport& usb_transport;
     OpenGALTlsContext& tls_ctx;
     int ch_id;
     std::thread worker;
     std::atomic<bool> running;
+
+    bool use_test_pattern = false;
+    int frame_counter = 0;
 
     int drm_fd = -1;
     uint32_t fb_id = 0;

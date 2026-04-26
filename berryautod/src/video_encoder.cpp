@@ -25,15 +25,17 @@ void VideoEncoderThread::start(int width, int height) {
     std::cout << "[HW-DEBUG] Attempting to start hardware pipeline (" << width << "x" << height << ")" << std::endl;
 
     if (!init_drm_capture()) {
-        std::cerr << "[HW-ERR] DRM Capture Initialization Failed." << std::endl;
-    } else if (!init_v4l2_encoder()) {
-        std::cerr << "[HW-ERR] V4L2 Encoder Initialization Failed." << std::endl;
-    } else {
-        running = true;
-        worker = std::thread(&VideoEncoderThread::encode_loop, this);
+        std::cout << "[HW-WARN] No active Linux Desktop found (Headless Mode?). Falling back to internal Test Pattern Generator." << std::endl;
+        use_test_pattern = true;
+    } 
+
+    if (!init_v4l2_encoder()) {
+        std::cerr << "[HW-ERR] V4L2 Hardware Encoder Initialization Failed. Aborting video stream." << std::endl;
         return;
-    }
-    std::cerr << "[HW-ERR] Pipeline aborted." << std::endl;
+    } 
+
+    running = true;
+    worker = std::thread(&VideoEncoderThread::encode_loop, this);
 }
 
 void VideoEncoderThread::stop() {
@@ -42,7 +44,6 @@ void VideoEncoderThread::stop() {
 }
 
 bool VideoEncoderThread::init_drm_capture() {
-    // Dynamically hunt for the DRM card that has an active framebuffer
     for (int i = 0; i < 3; i++) {
         std::string path = "/dev/dri/card" + std::to_string(i);
         drm_fd = open(path.c_str(), O_RDWR | O_CLOEXEC);
@@ -63,21 +64,16 @@ bool VideoEncoderThread::init_drm_capture() {
                 if (fb) {
                     std::cout << "[DRM-DEBUG] Found active framebuffer on " << path 
                               << " (Res: " << fb->width << "x" << fb->height << ")" << std::endl;
-                    
                     drm_buffer_size = fb->pitch * fb->height;
-
                     struct drm_mode_map_dumb map_req = {}; 
                     map_req.handle = fb->handle;
                     
-                    if (ioctl(drm_fd, DRM_IOCTL_MODE_MAP_DUMB, &map_req) < 0) {
-                        std::cerr << "[DRM-ERR] Failed to map dumb buffer: " << strerror(errno) << std::endl;
-                    } else {
+                    if (ioctl(drm_fd, DRM_IOCTL_MODE_MAP_DUMB, &map_req) == 0) {
                         drm_mapped_buffer = (uint8_t*)mmap(0, drm_buffer_size, PROT_READ, MAP_SHARED, drm_fd, map_req.offset);
                         if (drm_mapped_buffer != MAP_FAILED) {
                             drmModeFreeFB(fb); drmModeFreeCrtc(crtc); drmModeFreeResources(res);
                             return true;
                         }
-                        std::cerr << "[DRM-ERR] mmap failed: " << strerror(errno) << std::endl;
                     }
                     drmModeFreeFB(fb);
                 }
@@ -87,22 +83,15 @@ bool VideoEncoderThread::init_drm_capture() {
         drmModeFreeResources(res);
         close(drm_fd);
     }
-    
-    std::cerr << "[DRM-ERR] Could not find an active DRM framebuffer! Is the X11 Desktop running?" << std::endl;
     return false;
 }
 
 bool VideoEncoderThread::init_v4l2_encoder() {
     v4l2_fd = open("/dev/video11", O_RDWR | O_NONBLOCK);
     if (v4l2_fd < 0) {
-        std::cerr << "[V4L2-ERR] Cannot open /dev/video11: " << strerror(errno) << " trying video12..." << std::endl;
         v4l2_fd = open("/dev/video12", O_RDWR | O_NONBLOCK);
-        if (v4l2_fd < 0) {
-            std::cerr << "[V4L2-ERR] Cannot open /dev/video12: " << strerror(errno) << std::endl;
-            return false;
-        }
+        if (v4l2_fd < 0) return false;
     }
-    std::cout << "[V4L2-DEBUG] Opened hardware encoder node successfully." << std::endl;
 
     struct v4l2_format fmt_out = {};
     fmt_out.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
@@ -123,30 +112,24 @@ bool VideoEncoderThread::init_v4l2_encoder() {
     
     struct v4l2_ext_controls ext_ctrls = {};
     ext_ctrls.ctrl_class = V4L2_CTRL_CLASS_MPEG; ext_ctrls.count = 3; ext_ctrls.controls = ctrls;
-    IOCTL_OR_FAIL(v4l2_fd, VIDIOC_S_EXT_CTRLS, &ext_ctrls, "Set Encoder Controls (Profile/Bitrate)");
+    IOCTL_OR_FAIL(v4l2_fd, VIDIOC_S_EXT_CTRLS, &ext_ctrls, "Set Encoder Controls");
 
     struct v4l2_requestbuffers req_out = {};
-    req_out.count = 1;
-    req_out.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
-    req_out.memory = V4L2_MEMORY_MMAP;
+    req_out.count = 1; req_out.type = V4L2_BUF_TYPE_VIDEO_OUTPUT; req_out.memory = V4L2_MEMORY_MMAP;
     IOCTL_OR_FAIL(v4l2_fd, VIDIOC_REQBUFS, &req_out, "Request Out Buffers");
 
     struct v4l2_requestbuffers req_cap = {};
-    req_cap.count = 1;
-    req_cap.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    req_cap.memory = V4L2_MEMORY_MMAP;
+    req_cap.count = 1; req_cap.type = V4L2_BUF_TYPE_VIDEO_CAPTURE; req_cap.memory = V4L2_MEMORY_MMAP;
     IOCTL_OR_FAIL(v4l2_fd, VIDIOC_REQBUFS, &req_cap, "Request Cap Buffers");
 
     struct v4l2_buffer buf_out = {};
-    buf_out.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
-    buf_out.memory = V4L2_MEMORY_MMAP;
+    buf_out.type = V4L2_BUF_TYPE_VIDEO_OUTPUT; buf_out.memory = V4L2_MEMORY_MMAP;
     IOCTL_OR_FAIL(v4l2_fd, VIDIOC_QUERYBUF, &buf_out, "Query Out Buffer");
     v4l2_in_len = buf_out.length;
     v4l2_in_buffer = (uint8_t*)mmap(NULL, buf_out.length, PROT_READ | PROT_WRITE, MAP_SHARED, v4l2_fd, buf_out.m.offset);
 
     struct v4l2_buffer buf_cap = {};
-    buf_cap.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    buf_cap.memory = V4L2_MEMORY_MMAP;
+    buf_cap.type = V4L2_BUF_TYPE_VIDEO_CAPTURE; buf_cap.memory = V4L2_MEMORY_MMAP;
     IOCTL_OR_FAIL(v4l2_fd, VIDIOC_QUERYBUF, &buf_cap, "Query Cap Buffer");
     v4l2_out_len = buf_cap.length;
     v4l2_out_buffer = (uint8_t*)mmap(NULL, buf_cap.length, PROT_READ | PROT_WRITE, MAP_SHARED, v4l2_fd, buf_cap.m.offset);
@@ -159,17 +142,34 @@ bool VideoEncoderThread::init_v4l2_encoder() {
     return true;
 }
 
+void VideoEncoderThread::generate_test_pattern() {
+    uint32_t* pixels = reinterpret_cast<uint32_t*>(v4l2_in_buffer);
+    for (int y = 0; y < res_h; ++y) {
+        for (int x = 0; x < res_w; ++x) {
+            uint8_t r = (x + frame_counter) % 256;
+            uint8_t g = (y + frame_counter) % 256;
+            uint8_t b = ((x + y) / 2 + frame_counter) % 256;
+            pixels[y * res_w + x] = (255 << 24) | (r << 16) | (g << 8) | b;
+        }
+    }
+    frame_counter += 5; 
+}
+
 void VideoEncoderThread::encode_loop() {
-    std::cout << "[HW-STATE] DRM -> V4L2 Hardware Streaming Started. Transmitting Video Frames!" << std::endl;
+    std::cout << "[HW-STATE] Transmitting Video Frames!" << std::endl;
     while (running) {
         auto start_time = std::chrono::steady_clock::now();
 
-        std::memcpy(v4l2_in_buffer, drm_mapped_buffer, std::min(drm_buffer_size, v4l2_in_len));
+        if (use_test_pattern) {
+            generate_test_pattern(); // Generate colors in CPU
+        } else {
+            std::memcpy(v4l2_in_buffer, drm_mapped_buffer, std::min(drm_buffer_size, v4l2_in_len));
+        }
         
         struct v4l2_buffer buf_out = {};
         buf_out.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
         buf_out.memory = V4L2_MEMORY_MMAP;
-        buf_out.bytesused = v4l2_in_len;
+        buf_out.bytesused = (use_test_pattern) ? (res_w * res_h * 4) : v4l2_in_len;
         if (ioctl(v4l2_fd, VIDIOC_QBUF, &buf_out) < 0) continue;
 
         struct v4l2_buffer buf_cap = {};
@@ -203,8 +203,12 @@ void VideoEncoderThread::cleanup_hardware() {
     if (v4l2_fd >= 0) {
         int type = V4L2_BUF_TYPE_VIDEO_OUTPUT; ioctl(v4l2_fd, VIDIOC_STREAMOFF, &type);
         type = V4L2_BUF_TYPE_VIDEO_CAPTURE; ioctl(v4l2_fd, VIDIOC_STREAMOFF, &type);
-        munmap(v4l2_in_buffer, v4l2_in_len); munmap(v4l2_out_buffer, v4l2_out_len);
+        if (v4l2_in_buffer) munmap(v4l2_in_buffer, v4l2_in_len); 
+        if (v4l2_out_buffer) munmap(v4l2_out_buffer, v4l2_out_len);
         close(v4l2_fd);
     }
-    if (drm_fd >= 0) { munmap(drm_mapped_buffer, drm_buffer_size); close(drm_fd); }
+    if (drm_fd >= 0) { 
+        if (drm_mapped_buffer) munmap(drm_mapped_buffer, drm_buffer_size); 
+        close(drm_fd); 
+    }
 }
