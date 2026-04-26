@@ -298,6 +298,7 @@ void VideoEncoderThread::encode_loop() {
                     buffer[2] = (encrypted_chunk.size() >> 8) & 0xFF;
                     buffer[3] = encrypted_chunk.size() & 0xFF;
 
+                    // If this is the FIRST chunk of a fragmented message, inject the Total Frame Size
                     if (is_first && is_fragmented) {
                         buffer[4] = (total_size >> 24) & 0xFF;
                         buffer[5] = (total_size >> 16) & 0xFF;

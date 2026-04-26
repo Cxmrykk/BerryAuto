@@ -39,7 +39,7 @@ FunctionFSTransport::~FunctionFSTransport() {
     running = false;
     if (ep1_in_fd >= 0) close(ep1_in_fd);
     if (ep2_out_fd >= 0) close(ep2_out_fd);
-    if (ep0_fd >= 0) close(ep0_fd); // Closing ep0_fd will interrupt the read() in ep0_loop
+    if (ep0_fd >= 0) close(ep0_fd); 
     if (ep0_thread.joinable()) ep0_thread.join();
 }
 
@@ -76,7 +76,6 @@ bool FunctionFSTransport::init() {
 
     ffs_descriptors.hs_descs = ffs_descriptors.fs_descs;
     
-    std::cout << "[FFS-DEBUG] Writing Descriptors..." << std::endl;
     write(ep0_fd, &ffs_descriptors, sizeof(ffs_descriptors));
 
     ffs_strings.header.magic = CPU_TO_LE32(FUNCTIONFS_STRINGS_MAGIC);
@@ -86,7 +85,6 @@ bool FunctionFSTransport::init() {
     ffs_strings.lang0.code = CPU_TO_LE16(0x0409);
     strncpy(ffs_strings.lang0.str1, "OpenGAL Interface", sizeof(ffs_strings.lang0.str1));
     
-    std::cout << "[FFS-DEBUG] Writing Strings..." << std::endl;
     write(ep0_fd, &ffs_strings, sizeof(ffs_strings));
 
     running = true;
@@ -114,17 +112,10 @@ void FunctionFSTransport::ep0_loop() {
             case FUNCTIONFS_BIND:
                 std::cout << "[FFS-EP0] EVENT: USB Gadget BOUND to Host." << std::endl;
                 break;
-            case FUNCTIONFS_UNBIND:
-                std::cout << "[FFS-EP0] EVENT: USB Gadget UNBOUND from Host." << std::endl;
-                break;
             case FUNCTIONFS_ENABLE:
                 std::cout << "[FFS-EP0] EVENT: USB Endpoints ENABLED. Connection ready!" << std::endl;
                 break;
-            case FUNCTIONFS_DISABLE:
-                std::cout << "[FFS-EP0] EVENT: USB Endpoints DISABLED." << std::endl;
-                break;
             case FUNCTIONFS_SETUP:
-                // Silently handle setup requests so the host doesn't timeout
                 if (event.u.setup.bRequestType & USB_DIR_IN) {
                     uint8_t buf[256] = {0};
                     write(ep0_fd, buf, std::min((uint16_t)256, event.u.setup.wLength));
@@ -133,14 +124,7 @@ void FunctionFSTransport::ep0_loop() {
                     read(ep0_fd, buf, std::min((uint16_t)256, event.u.setup.wLength));
                 }
                 break;
-            case FUNCTIONFS_SUSPEND:
-                std::cout << "[FFS-EP0] EVENT: USB SUSPEND." << std::endl;
-                break;
-            case FUNCTIONFS_RESUME:
-                std::cout << "[FFS-EP0] EVENT: USB RESUME." << std::endl;
-                break;
             default:
-                std::cout << "[FFS-EP0] EVENT: Unknown (" << event.type << ")" << std::endl;
                 break;
         }
     }

@@ -3,7 +3,7 @@
 #include <iostream>
 
 std::vector<uint8_t> GalFrame::serialize() const {
-    // Unfragmented frame serialization
+    // Basic unfragmented serialization (used by Control Messages)
     std::vector<uint8_t> buffer(4 + payload.size());
     buffer[0] = channel_id; 
     buffer[1] = flags;

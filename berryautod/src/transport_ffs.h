@@ -12,7 +12,7 @@ public:
     ~FunctionFSTransport();
     bool init();
     void write_frame(const GalFrame& frame);
-    void write_frame_raw(const std::vector<uint8_t>& data); // ADDED: Raw bypass for fragmented chunks
+    void write_frame_raw(const std::vector<uint8_t>& data);
     std::vector<GalFrame> read_frames();
     bool is_running() const { return running; }
 private:
