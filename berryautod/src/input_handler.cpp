@@ -7,6 +7,8 @@ static Display* input_dpy = nullptr;
 
 void handle_touch_event(const com::andrerinas::headunitrevived::aap::protocol::proto::InputReport& report) {
     if (report.has_touch_event() && video_streamer != nullptr) {
+        if (report.touch_event().pointer_data_size() == 0) return; // Safety guard
+
         int action = report.touch_event().action();
         int x = report.touch_event().pointer_data(0).x();
         int y = report.touch_event().pointer_data(0).y();

@@ -64,7 +64,7 @@ void ep0_thread(int ep0) {
     while (true) {
         int r = read(ep0, &event, sizeof(event));
         if (r < 0) {
-            usleep(500000); 
+            usleep(10000); 
             continue; 
         }
         switch (event.type) {
@@ -72,11 +72,47 @@ void ep0_thread(int ep0) {
             case FUNCTIONFS_UNBIND: LOG_I("[USB] Gadget Unbound"); break;
             case FUNCTIONFS_ENABLE: LOG_I("[USB] Configured & Enabled by Host! Ready for AAP!"); break;
             case FUNCTIONFS_DISABLE: LOG_I("[USB] Disabled by Host"); break;
-            case FUNCTIONFS_SETUP: 
-                // Acknowledge standard control requests directed at the interface to keep kernel happy
-                if (event.u.setup.bRequestType & USB_DIR_IN) read(ep0, nullptr, 0); 
-                else read(ep0, nullptr, 0);
+            case FUNCTIONFS_SETUP: {
+                auto& setup = event.u.setup;
+                if ((setup.bRequestType & USB_TYPE_MASK) == USB_TYPE_VENDOR) {
+                    if (setup.bRequest == 51) { // AOA GET_PROTOCOL
+                        uint16_t version = 2; // AOA 2.0
+                        write(ep0, &version, 2);
+                        LOG_I("[USB] Answered AOA GET_PROTOCOL (51)");
+                    } else if (setup.bRequest == 52) { // AOA GET_STRING
+                        const char* str = "";
+                        switch (setup.wIndex) {
+                            case 0: str = "Android"; break; // Manufacturer
+                            case 1: str = "Android Auto"; break; // Model
+                            case 2: str = "Android Auto"; break; // Description
+                            case 3: str = "2.0.1"; break; // Version
+                            case 4: str = "https://developer.android.com/auto/index.html"; break; // URI
+                            case 5: str = "HU-AAAAAA001"; break; // Serial
+                        }
+                        int len = strlen(str); // AOA strings are specifically NOT null-terminated
+                        write(ep0, str, len);
+                        LOG_I("[USB] Answered AOA GET_STRING (index " << setup.wIndex << "): " << str);
+                    } else if (setup.bRequest == 53) { // AOA START
+                        read(ep0, nullptr, 0); // ACK the OUT request
+                        LOG_I("[USB] Received AOA START (53)");
+                    } else {
+                        // Unknown vendor request - ZLP or ACK to prevent STALL
+                        if (setup.bRequestType & USB_DIR_IN) {
+                            write(ep0, nullptr, 0); 
+                        } else {
+                            read(ep0, nullptr, 0);
+                        }
+                    }
+                } else {
+                    // Standard request - ZLP or ACK to prevent STALL
+                    if (setup.bRequestType & USB_DIR_IN) {
+                        write(ep0, nullptr, 0); 
+                    } else {
+                        read(ep0, nullptr, 0);
+                    }
+                }
                 break;
+            }
         }
     }
 }

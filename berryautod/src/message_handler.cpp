@@ -57,6 +57,13 @@ void handle_decrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload_d
                             global_touch_height = global_video_height;
                         }
                     }
+                    // Bluetooth Parsing
+                    if (svc.id() == 8 && svc.has_bluetooth_service()) {
+                        std::cout << "[INFO] Headunit requested Bluetooth connection to MAC: " 
+                                  << svc.bluetooth_service().car_address() << std::endl;
+                        std::cout << "[INFO] Note: BerryAuto does not currently initiate BT connections automatically. "
+                                  << "Audio will route through the Pi, or you can manually pair." << std::endl;
+                    }
                 }
             } 
             
