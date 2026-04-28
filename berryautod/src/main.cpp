@@ -168,6 +168,8 @@ int main() {
                 usleep(1000); 
                 continue;
             }
+            // Explicit error logging to catch endpoint disconnections
+            LOG_E("[BULK-RX] Read error: " << strerror(errno));
             usleep(500000); 
             continue;
         }
@@ -176,7 +178,8 @@ int main() {
             continue;
         }
         
-        LOG_I("[BULK-RX] Received " << r << " bytes from Host");
+        // Uncomment this to heavily spam the console, but prove data is flowing
+        // LOG_I("[BULK-RX] Received " << r << " bytes from Host");
         
         usb_rx_buffer.insert(usb_rx_buffer.end(), tmp_buf, tmp_buf + r);
 

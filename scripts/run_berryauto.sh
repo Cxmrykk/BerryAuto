@@ -55,6 +55,12 @@ if [ $EXIT_CODE -eq 42 ]; then
     
     # Morph IDs to Accessory
     echo 0x2D00 | sudo tee /sys/kernel/config/usb_gadget/opengal/idProduct > /dev/null
+    
+    # CRITICAL: Strict Automotive USB Hosts require DeviceClass to be 255 (Vendor Specific)
+    echo 255 | sudo tee /sys/kernel/config/usb_gadget/opengal/bDeviceClass > /dev/null
+    echo 255 | sudo tee /sys/kernel/config/usb_gadget/opengal/bDeviceSubClass > /dev/null
+    echo 0 | sudo tee /sys/kernel/config/usb_gadget/opengal/bDeviceProtocol > /dev/null
+    
     echo "Android" | sudo tee /sys/kernel/config/usb_gadget/opengal/strings/0x409/manufacturer > /dev/null
     echo "Android Auto" | sudo tee /sys/kernel/config/usb_gadget/opengal/strings/0x409/product > /dev/null
     
