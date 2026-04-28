@@ -57,12 +57,12 @@ void handle_decrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload_d
                             global_touch_height = global_video_height;
                         }
                     }
-                    // Bluetooth Parsing
+                    // Bluetooth Connection Parsing
                     if (svc.id() == 8 && svc.has_bluetooth_service()) {
-                        std::cout << "[INFO] Headunit requested Bluetooth connection to MAC: " 
+                        std::cout << "[INFO] Headunit expects Bluetooth pairing to MAC: " 
                                   << svc.bluetooth_service().car_address() << std::endl;
-                        std::cout << "[INFO] Note: BerryAuto does not currently initiate BT connections automatically. "
-                                  << "Audio will route through the Pi, or you can manually pair." << std::endl;
+                        std::cout << "[INFO] Notice: Bluetooth is not fatal to the USB stream. "
+                                  << "Audio will route via USB automatically. Pair the Pi to the car manually if you desire." << std::endl;
                     }
                 }
             } 
@@ -222,8 +222,6 @@ void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload
         }
         
         // Flush the TLS handshake data BEFORE updating is_tls_connected to true.
-        // This guarantees the Server Finished message goes out as unencrypted MESSAGE_ENCAPSULATED_SSL (Type 3)
-        // rather than an encrypted frame.
         ssl_write_and_flush_unlocked({}, 0, 0x0B, 0); 
         
         if (handshake_just_completed) {

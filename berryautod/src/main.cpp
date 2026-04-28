@@ -58,7 +58,7 @@ bool load_hardcoded_certs(SSL_CTX *ctx) {
     return true;
 }
 
-// Monitors connection status and prints neat diagnostics
+// Monitors connection status and handles the AOA Protocol Handshake
 void ep0_thread(int ep0) {
     struct usb_functionfs_event event;
     while (true) {
@@ -70,15 +70,15 @@ void ep0_thread(int ep0) {
         switch (event.type) {
             case FUNCTIONFS_BIND: LOG_I("[USB] Gadget Bound to Host"); break;
             case FUNCTIONFS_UNBIND: LOG_I("[USB] Gadget Unbound"); break;
-            case FUNCTIONFS_ENABLE: LOG_I("[USB] Configured & Enabled by Host! Ready for AAP!"); break;
-            case FUNCTIONFS_DISABLE: LOG_I("[USB] Disabled by Host"); break;
+            case FUNCTIONFS_ENABLE: LOG_I("[USB] Configured & Enabled by Host! Ready for Data!"); break;
+            case FUNCTIONFS_DISABLE: LOG_I("[USB] Disabled by Host (Port Reset/Suspend)"); break;
             case FUNCTIONFS_SETUP: {
                 auto& setup = event.u.setup;
                 if ((setup.bRequestType & USB_TYPE_MASK) == USB_TYPE_VENDOR) {
                     if (setup.bRequest == 51) { // AOA GET_PROTOCOL
-                        uint16_t version = 2; // AOA 2.0
+                        uint16_t version = 2; // AOA Version 2.0
                         write(ep0, &version, 2);
-                        LOG_I("[USB] Answered AOA GET_PROTOCOL (51)");
+                        LOG_I("[AOA] Answered GET_PROTOCOL (51)");
                     } else if (setup.bRequest == 52) { // AOA GET_STRING
                         const char* str = "";
                         switch (setup.wIndex) {
@@ -89,27 +89,22 @@ void ep0_thread(int ep0) {
                             case 4: str = "https://developer.android.com/auto/index.html"; break; // URI
                             case 5: str = "HU-AAAAAA001"; break; // Serial
                         }
-                        int len = strlen(str); // AOA strings are specifically NOT null-terminated
-                        write(ep0, str, len);
-                        LOG_I("[USB] Answered AOA GET_STRING (index " << setup.wIndex << "): " << str);
+                        int len = strlen(str);
+                        int to_write = std::min((int)setup.wLength, len);
+                        write(ep0, str, to_write);
+                        LOG_I("[AOA] Answered GET_STRING (index " << setup.wIndex << "): " << str);
                     } else if (setup.bRequest == 53) { // AOA START
                         read(ep0, nullptr, 0); // ACK the OUT request
-                        LOG_I("[USB] Received AOA START (53)");
+                        LOG_I("[AOA] Received START (53). Triggering immediate morph script!");
+                        // Exactly execute the morph only when the car requests it!
+                        system("sudo /usr/local/bin/morph_to_aa.sh &");
                     } else {
-                        // Unknown vendor request - ZLP or ACK to prevent STALL
-                        if (setup.bRequestType & USB_DIR_IN) {
-                            write(ep0, nullptr, 0); 
-                        } else {
-                            read(ep0, nullptr, 0);
-                        }
+                        if (setup.bRequestType & USB_DIR_IN) write(ep0, nullptr, 0); 
+                        else read(ep0, nullptr, 0);
                     }
                 } else {
-                    // Standard request - ZLP or ACK to prevent STALL
-                    if (setup.bRequestType & USB_DIR_IN) {
-                        write(ep0, nullptr, 0); 
-                    } else {
-                        read(ep0, nullptr, 0);
-                    }
+                    if (setup.bRequestType & USB_DIR_IN) write(ep0, nullptr, 0); 
+                    else read(ep0, nullptr, 0);
                 }
                 break;
             }
@@ -166,7 +161,6 @@ int main() {
                 usleep(1000); 
                 continue;
             }
-            // Port suspended / disconnected. Suppress log spam.
             usleep(500000); 
             continue;
         }

@@ -16,10 +16,7 @@ USER_HOME=$(getent passwd "$CURRENT_USER" | cut -d: -f6)
 export DISPLAY=:0
 export XAUTHORITY="$USER_HOME/.Xauthority"
 
-# Allow root to access the display
 xhost +SI:localuser:root > /dev/null 2>&1 || true
-
-# Wake up the screen and disable sleep/blanking
 xset s reset > /dev/null 2>&1 || true
 xset s off > /dev/null 2>&1 || true
 xset -dpms > /dev/null 2>&1 || true
@@ -41,24 +38,9 @@ if [ -z "$UDC_NAME" ]; then
     exit 1
 fi
 
-# 3. Bind the gadget -> Car sees a normal phone and probes it
+# 3. Bind the gadget -> Car sees a normal phone and probes it via AOA
 echo "$UDC_NAME" | sudo tee /sys/kernel/config/usb_gadget/opengal/UDC > /dev/null
-echo "[BOUNCE] Pretending to be a phone. Waiting 4 seconds for car to probe..."
-sleep 4
+echo "[BOUNCE] Pretending to be a phone. Waiting for car to send AOA START command..."
 
-# 4. Unbind the gadget -> Car sees phone disconnect
-echo "" | sudo tee /sys/kernel/config/usb_gadget/opengal/UDC > /dev/null
-sleep 1
-
-# 5. Morph the gadget into an Android Auto Accessory
-echo "[BOUNCE] Morphing into Android Auto Accessory Mode (0x2D00)..."
-echo 0x2D00 | sudo tee /sys/kernel/config/usb_gadget/opengal/idProduct > /dev/null
-echo "Android" | sudo tee /sys/kernel/config/usb_gadget/opengal/strings/0x409/manufacturer > /dev/null
-echo "Android Auto" | sudo tee /sys/kernel/config/usb_gadget/opengal/strings/0x409/product > /dev/null
-
-# 6. Rebind the gadget -> Car sees Android Auto start!
-sleep 1
-echo "$UDC_NAME" | sudo tee /sys/kernel/config/usb_gadget/opengal/UDC > /dev/null
-echo "[BOUNCE] Accessory Mode Active! Car should start AAP stream now."
-
+# The C++ code will handle the morphing dynamically when the car is ready!
 wait $EMITTER_PID
