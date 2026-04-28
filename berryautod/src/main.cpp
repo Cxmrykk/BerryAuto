@@ -10,9 +10,7 @@
 #include <thread>
 #include <string.h>
 #include <errno.h>
-#include <endian.h>
 #include <linux/usb/functionfs.h>
-#include <linux/usb/ch9.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 
@@ -60,69 +58,25 @@ bool load_hardcoded_certs(SSL_CTX *ctx) {
     return true;
 }
 
-// Dedicated thread to read and respond to EP0 (Control Endpoint) events
-// This intercepts the Head Unit's AOA (Android Open Accessory) negotiation requests
+// Monitors connection status and prints neat diagnostics
 void ep0_thread(int ep0) {
     struct usb_functionfs_event event;
     while (true) {
         int r = read(ep0, &event, sizeof(event));
         if (r < 0) {
-            LOG_E("[EP0] Read failed: " << strerror(errno));
-            usleep(1000000); // Sleep 1s and retry
+            usleep(500000); 
             continue; 
         }
-
         switch (event.type) {
-            case FUNCTIONFS_BIND: LOG_I("[EP0] Event: BIND"); break;
-            case FUNCTIONFS_UNBIND: LOG_I("[EP0] Event: UNBIND"); break;
-            case FUNCTIONFS_ENABLE: LOG_I("[EP0] Event: ENABLE (Host successfully configured the gadget)"); break;
-            case FUNCTIONFS_DISABLE: LOG_I("[EP0] Event: DISABLE (Host unconfigured the gadget)"); break;
-            case FUNCTIONFS_SUSPEND: LOG_I("[EP0] Event: SUSPEND"); break;
-            case FUNCTIONFS_RESUME: LOG_I("[EP0] Event: RESUME"); break;
-            case FUNCTIONFS_SETUP: {
-                auto setup = event.u.setup;
-                
-                // Intercept Android Open Accessory (AOA) Negotiation
-                if ((setup.bRequestType & USB_TYPE_MASK) == USB_TYPE_VENDOR) {
-                    if (setup.bRequest == 51) { // ACC_REQ_GET_PROTOCOL
-                        LOG_I("[AOA] Car requested protocol version. Sending AOA 2.0");
-                        uint16_t version = htole16(2);
-                        write(ep0, &version, 2);
-                    } else if (setup.bRequest == 52) { // ACC_REQ_SEND_STRING
-                        uint16_t len = le16toh(setup.wLength);
-                        if (len > 0) {
-                            std::vector<uint8_t> buf(len);
-                            read(ep0, buf.data(), len);
-                            std::string str(buf.begin(), buf.end());
-                            LOG_I("[AOA] Car sent string (Index " << le16toh(setup.wIndex) << "): " << str);
-                        } else {
-                            read(ep0, nullptr, 0);
-                        }
-                    } else if (setup.bRequest == 53) { // ACC_REQ_START
-                        LOG_I("[AOA] Car requested accessory start!");
-                        read(ep0, nullptr, 0); // ACK the request
-                        
-                        LOG_I(">>> Bouncing USB Gadget to Accessory Mode (0x2D00) <<<");
-                        // Execute the bounce. FunctionFS endpoints survive this rebind!
-                        system("echo \"\" > /sys/kernel/config/usb_gadget/opengal/UDC; "
-                               "sleep 0.5; "
-                               "echo 0x2D00 > /sys/kernel/config/usb_gadget/opengal/idProduct; "
-                               "sleep 0.5; "
-                               "ls /sys/class/udc | head -n 1 > /sys/kernel/config/usb_gadget/opengal/UDC");
-                    } else {
-                        // Unknown vendor request, stall
-                        if (setup.bRequestType & USB_DIR_IN) read(ep0, nullptr, 0); 
-                        else read(ep0, nullptr, 0);
-                    }
-                } else {
-                    // Non-Vendor Setup Request. Stall to delegate standard requests to the kernel.
-                    if (setup.bRequestType & USB_DIR_IN) read(ep0, nullptr, 0); 
-                    else read(ep0, nullptr, 0); 
-                }
+            case FUNCTIONFS_BIND: LOG_I("[USB] Gadget Bound to Host"); break;
+            case FUNCTIONFS_UNBIND: LOG_I("[USB] Gadget Unbound"); break;
+            case FUNCTIONFS_ENABLE: LOG_I("[USB] Configured & Enabled by Host! Ready for AAP!"); break;
+            case FUNCTIONFS_DISABLE: LOG_I("[USB] Disabled by Host"); break;
+            case FUNCTIONFS_SETUP: 
+                // Acknowledge standard control requests directed at the interface to keep kernel happy
+                if (event.u.setup.bRequestType & USB_DIR_IN) read(ep0, nullptr, 0); 
+                else read(ep0, nullptr, 0);
                 break;
-            }
-            default:
-                LOG_I("[EP0] Unknown Event (" << event.type << ")");
         }
     }
 }
@@ -147,7 +101,7 @@ int main() {
     SSL_CTX_set_tlsext_ticket_keys(ssl_ctx, aa_ticket_keys, sizeof(aa_ticket_keys));
 
     if (!load_hardcoded_certs(ssl_ctx)) {
-        LOG_E("Failed to load Google Certificates. Exiting.");
+        LOG_E("Failed to load Google Certificates.");
         return 1;
     }
     
@@ -163,12 +117,9 @@ int main() {
         return 1;
     }
     
-    // Spawn the EP0 event thread in the background
     std::thread ep0_t(ep0_thread, ep0);
     ep0_t.detach();
     
-    LOG_I("USB Endpoints bound successfully. Waiting for Car/Tablet to connect...");
-
     std::vector<uint8_t> usb_rx_buffer;
     uint8_t tmp_buf[16384];
 
@@ -176,12 +127,10 @@ int main() {
         int r = read(ep_out, tmp_buf, sizeof(tmp_buf));
         if (r < 0) {
             if (errno == EAGAIN || errno == EINTR) {
-                usleep(1000); // 1ms sleep for non-blocking interruptions
+                usleep(1000); 
                 continue;
             }
-            // ESHUTDOWN (108) happens when the port suspends or during the AOA bounce.
-            // Just sleep and loop until the connection comes back up.
-            LOG_E("[USB IN] Bulk Read failed! Errno: " << errno << " (" << strerror(errno) << ")");
+            // Port suspended / disconnected. Suppress log spam.
             usleep(500000); 
             continue;
         }
@@ -234,6 +183,5 @@ int main() {
     }
     
     cleanup_input();
-    LOG_I("[SHUTDOWN] Exiting...");
     return 0;
 }
