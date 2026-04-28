@@ -79,40 +79,30 @@ void ep0_thread(int ep0) {
                 
                 // Ensure this is a Vendor Request (0x40 / 0xC0)
                 if ((setup.bRequestType & USB_TYPE_MASK) == USB_TYPE_VENDOR) {
-                    if (setup.bRequest == 51) { // AOA GET_PROTOCOL
+                    if (setup.bRequest == 51) { // AOA GET_PROTOCOL (IN Request - Host wants data)
                         uint16_t version = 2; // AOA Version 2.0
-                        int w = write(ep0, &version, 2);
-                        LOG_I("[AOA] Answered GET_PROTOCOL (51) - Bytes Written: " << w);
+                        write(ep0, &version, 2);
+                        LOG_I("[AOA] Answered GET_PROTOCOL (51)");
                         
-                    } else if (setup.bRequest == 52) { // AOA GET_STRING
-                        const char* str = "";
-                        switch (setup.wIndex) {
-                            case 0: str = "Android"; break; // Manufacturer
-                            case 1: str = "Android Auto"; break; // Model
-                            case 2: str = "Android Auto"; break; // Description
-                            case 3: str = "2.0.1"; break; // Version
-                            case 4: str = "https://developer.android.com/auto/index.html"; break; // URI
-                            case 5: str = "HU-AAAAAA001"; break; // Serial
-                        }
+                    } else if (setup.bRequest == 52) { // AOA SEND_STRING (OUT Request - Host sends data)
+                        char str_buf[256];
+                        memset(str_buf, 0, sizeof(str_buf));
                         
-                        int len = strlen(str);
-                        int to_write = std::min((int)setup.wLength, len);
-                        
-                        // If to_write > 0, write it. If 0, write empty string to send a ZLP.
-                        if (to_write > 0) {
-                            write(ep0, str, to_write);
+                        if (setup.wLength > 0) {
+                            int to_read = std::min((int)setup.wLength, 255);
+                            read(ep0, str_buf, to_read);
                         } else {
-                            write(ep0, "", 0);
+                            read(ep0, nullptr, 0);
                         }
-                        LOG_I("[AOA] Answered GET_STRING (index " << setup.wIndex << "): " << str);
+                        LOG_I("[AOA] Received SEND_STRING (index " << setup.wIndex << "): " << str_buf);
                         
-                    } else if (setup.bRequest == 53) { // AOA START
-                        read(ep0, nullptr, 0); // ACK the OUT request by reading 0 bytes
+                    } else if (setup.bRequest == 53) { // AOA START (OUT Request - 0 bytes)
+                        read(ep0, nullptr, 0); // ACK the OUT request
                         LOG_I("[AOA] Received START (53). Telling Daemon to Morph and Restart...");
                         should_morph = true;
                         
                     } else {
-                        // Unhandled Vendor Request - STALL IT
+                        // Unhandled Vendor Request - STALL IT gracefully
                         if (setup.bRequestType & USB_DIR_IN) write(ep0, nullptr, 0); 
                         else read(ep0, nullptr, 0);
                     }
