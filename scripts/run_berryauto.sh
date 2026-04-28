@@ -1,7 +1,7 @@
 #!/bin/bash
 cleanup() {
     echo "[RUNNER] Shutting down..."
-    sudo pkill -SIGINT opengal_emitter
+    sudo pkill -9 opengal_emitter 2>/dev/null || true
     sleep 1
     if [ -d "/sys/kernel/config/usb_gadget/opengal" ]; then
         echo "" | sudo tee "/sys/kernel/config/usb_gadget/opengal/UDC" > /dev/null 2>&1
@@ -37,7 +37,7 @@ UDC_NAME=$(ls /sys/class/udc | head -n 1)
 
 if [ -z "$UDC_NAME" ]; then
     echo "[ERROR] No UDC (USB controller) found. Are you using the OTG port?"
-    kill $PID1
+    kill -9 $PID1
     exit 1
 fi
 

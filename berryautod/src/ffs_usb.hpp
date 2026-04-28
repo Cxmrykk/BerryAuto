@@ -4,9 +4,11 @@
 #include <unistd.h>
 #include <iostream>
 #include <endian.h>
+#include <stdio.h> // For perror
 
+// Correct flag value from Linux Kernel source (1 << 6)
 #ifndef FUNCTIONFS_ALL_CTRL_RECIP
-#define FUNCTIONFS_ALL_CTRL_RECIP (1 << 2)
+#define FUNCTIONFS_ALL_CTRL_RECIP 64 
 #endif
 
 // USB Descriptors telling the Linux Kernel what our endpoints look like
@@ -23,7 +25,6 @@ struct {
     .header = {
         .magic = htole32(FUNCTIONFS_DESCRIPTORS_MAGIC_V2),
         .length = htole32(sizeof(descriptors)),
-        // CRITICAL FIX: Add ALL_CTRL_RECIP so the Kernel passes AOA packets to our C++ code!
         .flags = htole32(FUNCTIONFS_HAS_FS_DESC | FUNCTIONFS_HAS_HS_DESC | FUNCTIONFS_ALL_CTRL_RECIP),
     },
     .fs_count = htole32(3),
@@ -53,10 +54,32 @@ struct {
 
 bool init_ffs(int& ep0, int& ep_in, int& ep_out) {
     ep0 = open("/dev/ffs-opengal/ep0", O_RDWR);
-    if (ep0 < 0) return false;
-    if (write(ep0, &descriptors, sizeof(descriptors)) < 0) return false;
-    if (write(ep0, &strings, sizeof(strings)) < 0) return false;
+    if (ep0 < 0) { 
+        perror("[FFS] open ep0 failed"); 
+        return false; 
+    }
+    
+    if (write(ep0, &descriptors, sizeof(descriptors)) < 0) { 
+        perror("[FFS] write descriptors failed"); 
+        return false; 
+    }
+    
+    if (write(ep0, &strings, sizeof(strings)) < 0) { 
+        perror("[FFS] write strings failed"); 
+        return false; 
+    }
+    
     ep_in = open("/dev/ffs-opengal/ep1", O_RDWR);
+    if (ep_in < 0) { 
+        perror("[FFS] open ep1 failed"); 
+        return false; 
+    }
+    
     ep_out = open("/dev/ffs-opengal/ep2", O_RDWR);
-    return (ep_in >= 0 && ep_out >= 0);
+    if (ep_out < 0) { 
+        perror("[FFS] open ep2 failed"); 
+        return false; 
+    }
+    
+    return true;
 }
