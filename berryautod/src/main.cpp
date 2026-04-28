@@ -76,11 +76,14 @@ void ep0_thread(int ep0) {
             case FUNCTIONFS_DISABLE: LOG_I("[USB] Disabled by Host (Port Reset/Suspend)"); break;
             case FUNCTIONFS_SETUP: {
                 auto& setup = event.u.setup;
+                
+                // Ensure this is a Vendor Request (0x40 / 0xC0)
                 if ((setup.bRequestType & USB_TYPE_MASK) == USB_TYPE_VENDOR) {
                     if (setup.bRequest == 51) { // AOA GET_PROTOCOL
                         uint16_t version = 2; // AOA Version 2.0
-                        write(ep0, &version, 2);
-                        LOG_I("[AOA] Answered GET_PROTOCOL (51)");
+                        int w = write(ep0, &version, 2);
+                        LOG_I("[AOA] Answered GET_PROTOCOL (51) - Bytes Written: " << w);
+                        
                     } else if (setup.bRequest == 52) { // AOA GET_STRING
                         const char* str = "";
                         switch (setup.wIndex) {
@@ -91,19 +94,30 @@ void ep0_thread(int ep0) {
                             case 4: str = "https://developer.android.com/auto/index.html"; break; // URI
                             case 5: str = "HU-AAAAAA001"; break; // Serial
                         }
+                        
                         int len = strlen(str);
                         int to_write = std::min((int)setup.wLength, len);
-                        write(ep0, str, to_write);
+                        
+                        // If to_write > 0, write it. If 0, write empty string to send a ZLP.
+                        if (to_write > 0) {
+                            write(ep0, str, to_write);
+                        } else {
+                            write(ep0, "", 0);
+                        }
                         LOG_I("[AOA] Answered GET_STRING (index " << setup.wIndex << "): " << str);
+                        
                     } else if (setup.bRequest == 53) { // AOA START
-                        read(ep0, nullptr, 0); // ACK the OUT request
+                        read(ep0, nullptr, 0); // ACK the OUT request by reading 0 bytes
                         LOG_I("[AOA] Received START (53). Telling Daemon to Morph and Restart...");
                         should_morph = true;
+                        
                     } else {
+                        // Unhandled Vendor Request - STALL IT
                         if (setup.bRequestType & USB_DIR_IN) write(ep0, nullptr, 0); 
                         else read(ep0, nullptr, 0);
                     }
                 } else {
+                    // Standard Interface Requests - ACK them
                     if (setup.bRequestType & USB_DIR_IN) write(ep0, nullptr, 0); 
                     else read(ep0, nullptr, 0);
                 }

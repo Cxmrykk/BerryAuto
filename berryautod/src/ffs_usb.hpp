@@ -5,6 +5,10 @@
 #include <iostream>
 #include <endian.h>
 
+#ifndef FUNCTIONFS_ALL_CTRL_RECIP
+#define FUNCTIONFS_ALL_CTRL_RECIP (1 << 2)
+#endif
+
 // USB Descriptors telling the Linux Kernel what our endpoints look like
 struct {
     struct usb_functionfs_descs_head_v2 header;
@@ -19,7 +23,8 @@ struct {
     .header = {
         .magic = htole32(FUNCTIONFS_DESCRIPTORS_MAGIC_V2),
         .length = htole32(sizeof(descriptors)),
-        .flags = htole32(FUNCTIONFS_HAS_FS_DESC | FUNCTIONFS_HAS_HS_DESC),
+        // CRITICAL FIX: Add ALL_CTRL_RECIP so the Kernel passes AOA packets to our C++ code!
+        .flags = htole32(FUNCTIONFS_HAS_FS_DESC | FUNCTIONFS_HAS_HS_DESC | FUNCTIONFS_ALL_CTRL_RECIP),
     },
     .fs_count = htole32(3),
     .hs_count = htole32(3),
