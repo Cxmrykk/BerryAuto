@@ -16,12 +16,15 @@ USER_HOME=$(getent passwd "$CURRENT_USER" | cut -d: -f6)
 export DISPLAY=:0
 export XAUTHORITY="$USER_HOME/.Xauthority"
 
+# Allow root to access the display
 xhost +SI:localuser:root > /dev/null 2>&1 || true
+
+# Wake up the screen and disable sleep/blanking
 xset s reset > /dev/null 2>&1 || true
 xset s off > /dev/null 2>&1 || true
 xset -dpms > /dev/null 2>&1 || true
 
-# 1. Setup the initial gadget (Google Pixel MTP)
+# 1. Setup the gadget directly as Android Auto
 sudo /usr/local/bin/setup_opengal_gadget.sh
 
 # 2. Start the daemon in the background
@@ -38,9 +41,8 @@ if [ -z "$UDC_NAME" ]; then
     exit 1
 fi
 
-# 3. Bind the gadget -> Car sees a normal phone and probes it via AOA
+# 3. Bind the gadget -> Car immediately sees Android Auto!
 echo "$UDC_NAME" | sudo tee /sys/kernel/config/usb_gadget/opengal/UDC > /dev/null
-echo "[BOUNCE] Pretending to be a phone. Waiting for car to send AOA START command..."
+echo "[USB] Bound directly as Android Auto Accessory Mode (0x2D00)!"
 
-# The C++ code will handle the morphing dynamically when the car is ready!
 wait $EMITTER_PID

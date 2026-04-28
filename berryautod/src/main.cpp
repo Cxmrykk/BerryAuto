@@ -58,7 +58,7 @@ bool load_hardcoded_certs(SSL_CTX *ctx) {
     return true;
 }
 
-// Monitors connection status and handles the AOA Protocol Handshake
+// Monitors connection status and prints neat diagnostics
 void ep0_thread(int ep0) {
     struct usb_functionfs_event event;
     while (true) {
@@ -70,44 +70,13 @@ void ep0_thread(int ep0) {
         switch (event.type) {
             case FUNCTIONFS_BIND: LOG_I("[USB] Gadget Bound to Host"); break;
             case FUNCTIONFS_UNBIND: LOG_I("[USB] Gadget Unbound"); break;
-            case FUNCTIONFS_ENABLE: LOG_I("[USB] Configured & Enabled by Host! Ready for Data!"); break;
-            case FUNCTIONFS_DISABLE: LOG_I("[USB] Disabled by Host (Port Reset/Suspend)"); break;
-            case FUNCTIONFS_SETUP: {
-                auto& setup = event.u.setup;
-                if ((setup.bRequestType & USB_TYPE_MASK) == USB_TYPE_VENDOR) {
-                    if (setup.bRequest == 51) { // AOA GET_PROTOCOL
-                        uint16_t version = 2; // AOA Version 2.0
-                        write(ep0, &version, 2);
-                        LOG_I("[AOA] Answered GET_PROTOCOL (51)");
-                    } else if (setup.bRequest == 52) { // AOA GET_STRING
-                        const char* str = "";
-                        switch (setup.wIndex) {
-                            case 0: str = "Android"; break; // Manufacturer
-                            case 1: str = "Android Auto"; break; // Model
-                            case 2: str = "Android Auto"; break; // Description
-                            case 3: str = "2.0.1"; break; // Version
-                            case 4: str = "https://developer.android.com/auto/index.html"; break; // URI
-                            case 5: str = "HU-AAAAAA001"; break; // Serial
-                        }
-                        int len = strlen(str);
-                        int to_write = std::min((int)setup.wLength, len);
-                        write(ep0, str, to_write);
-                        LOG_I("[AOA] Answered GET_STRING (index " << setup.wIndex << "): " << str);
-                    } else if (setup.bRequest == 53) { // AOA START
-                        read(ep0, nullptr, 0); // ACK the OUT request
-                        LOG_I("[AOA] Received START (53). Triggering immediate morph script!");
-                        // Exactly execute the morph only when the car requests it!
-                        system("sudo /usr/local/bin/morph_to_aa.sh &");
-                    } else {
-                        if (setup.bRequestType & USB_DIR_IN) write(ep0, nullptr, 0); 
-                        else read(ep0, nullptr, 0);
-                    }
-                } else {
-                    if (setup.bRequestType & USB_DIR_IN) write(ep0, nullptr, 0); 
-                    else read(ep0, nullptr, 0);
-                }
+            case FUNCTIONFS_ENABLE: LOG_I("[USB] Configured & Enabled! Waiting for AAP Protocol from Host..."); break;
+            case FUNCTIONFS_DISABLE: LOG_I("[USB] Disabled by Host"); break;
+            case FUNCTIONFS_SETUP: 
+                // Acknowledge standard control requests to keep the Kernel happy
+                if (event.u.setup.bRequestType & USB_DIR_IN) write(ep0, nullptr, 0); 
+                else read(ep0, nullptr, 0);
                 break;
-            }
         }
     }
 }
@@ -161,6 +130,7 @@ int main() {
                 usleep(1000); 
                 continue;
             }
+            // Port suspended / disconnected. Suppress log spam.
             usleep(500000); 
             continue;
         }
