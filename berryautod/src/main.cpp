@@ -104,10 +104,12 @@ void ep0_thread(int ep0) {
                         exit(42);
                         
                     } else {
+                        LOG_I("[EP0] Unknown Vendor Request: Type=" << (int)setup.bRequestType << " Req=" << (int)setup.bRequest << " Val=" << setup.wValue << " Idx=" << setup.wIndex << " Len=" << setup.wLength);
                         if (setup.bRequestType & USB_DIR_IN) write(ep0, &dummy_buf, 0); 
                         else read(ep0, &dummy_buf, 0);
                     }
                 } else {
+                    LOG_I("[EP0] Unknown Standard Request: Type=" << (int)setup.bRequestType << " Req=" << (int)setup.bRequest << " Val=" << setup.wValue << " Idx=" << setup.wIndex << " Len=" << setup.wLength);
                     if (setup.bRequestType & USB_DIR_IN) write(ep0, &dummy_buf, 0); 
                     else read(ep0, &dummy_buf, 0);
                 }
@@ -160,7 +162,6 @@ int main() {
     uint8_t tmp_buf[16384];
 
     while (true) {
-        // Pure blocking read. The kernel will wake this thread the exact millisecond data arrives.
         int r = read(ep_out, tmp_buf, sizeof(tmp_buf));
         
         if (r < 0) {
@@ -168,8 +169,6 @@ int main() {
                 usleep(1000); 
                 continue;
             }
-            // Explicit error logging to catch endpoint disconnections
-            LOG_E("[BULK-RX] Read error: " << strerror(errno));
             usleep(500000); 
             continue;
         }
@@ -178,8 +177,7 @@ int main() {
             continue;
         }
         
-        // Uncomment this to heavily spam the console, but prove data is flowing
-        // LOG_I("[BULK-RX] Received " << r << " bytes from Host");
+        LOG_I("[BULK-RX] Received " << r << " bytes from Host");
         
         usb_rx_buffer.insert(usb_rx_buffer.end(), tmp_buf, tmp_buf + r);
 

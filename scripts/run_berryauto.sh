@@ -16,16 +16,16 @@ USER_HOME=$(getent passwd "$CURRENT_USER" | cut -d: -f6)
 export DISPLAY=:0
 export XAUTHORITY="$USER_HOME/.Xauthority"
 
-# Allow root to access the display
 xhost +SI:localuser:root > /dev/null 2>&1 || true
-
-# Wake up the screen and disable sleep/blanking
 xset s reset > /dev/null 2>&1 || true
 xset s off > /dev/null 2>&1 || true
 xset -dpms > /dev/null 2>&1 || true
 
 # 1. Mount FFS and setup the initial gadget (Google Pixel MTP)
 sudo /usr/local/bin/setup_opengal_gadget.sh
+
+# Force the USB serial to match the AOA serial perfectly!
+echo "HU-AAAAAA001" | sudo tee /sys/kernel/config/usb_gadget/opengal/strings/0x409/serialnumber > /dev/null
 
 # 2. Start the daemon in AOA Listener Mode
 echo "[RUNNER] Starting Daemon to listen for Car's AOA Probe..."
@@ -36,7 +36,7 @@ sleep 1.5
 UDC_NAME=$(ls /sys/class/udc | head -n 1)
 
 if [ -z "$UDC_NAME" ]; then
-    echo "[ERROR] No UDC (USB controller) found. Are you using the OTG port?"
+    echo "[ERROR] No UDC found. Are you using the OTG port?"
     kill -9 $PID1
     exit 1
 fi
@@ -56,9 +56,9 @@ if [ $EXIT_CODE -eq 42 ]; then
     # Morph IDs to Accessory
     echo 0x2D00 | sudo tee /sys/kernel/config/usb_gadget/opengal/idProduct > /dev/null
     
-    # CRITICAL: Strict Automotive USB Hosts require DeviceClass to be 255 (Vendor Specific)
-    echo 255 | sudo tee /sys/kernel/config/usb_gadget/opengal/bDeviceClass > /dev/null
-    echo 255 | sudo tee /sys/kernel/config/usb_gadget/opengal/bDeviceSubClass > /dev/null
+    # CRITICAL: Real phones use DeviceClass 0 in Accessory Mode
+    echo 0 | sudo tee /sys/kernel/config/usb_gadget/opengal/bDeviceClass > /dev/null
+    echo 0 | sudo tee /sys/kernel/config/usb_gadget/opengal/bDeviceSubClass > /dev/null
     echo 0 | sudo tee /sys/kernel/config/usb_gadget/opengal/bDeviceProtocol > /dev/null
     
     echo "Android" | sudo tee /sys/kernel/config/usb_gadget/opengal/strings/0x409/manufacturer > /dev/null
@@ -69,7 +69,6 @@ if [ $EXIT_CODE -eq 42 ]; then
     sudo -E ./berryautod/build/opengal_emitter &
     PID2=$!
     
-    # Wait for the Daemon to open the FFS endpoints
     sleep 1
     
     # Rebind Gadget (Car sees Accessory connect)
