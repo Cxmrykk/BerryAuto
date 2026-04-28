@@ -61,6 +61,7 @@ bool load_hardcoded_certs(SSL_CTX *ctx) {
 }
 
 // Dedicated thread to read and respond to EP0 (Control Endpoint) events
+// This intercepts the Head Unit's AOA (Android Open Accessory) negotiation requests
 void ep0_thread(int ep0) {
     struct usb_functionfs_event event;
     while (true) {
@@ -80,33 +81,41 @@ void ep0_thread(int ep0) {
             case FUNCTIONFS_RESUME: LOG_I("[EP0] Event: RESUME"); break;
             case FUNCTIONFS_SETUP: {
                 auto setup = event.u.setup;
-                LOG_I("[EP0] SETUP Request: bRequestType=0x" << std::hex << (int)setup.bRequestType 
-                      << " bRequest=" << std::dec << (int)setup.bRequest 
-                      << " wValue=" << le16toh(setup.wValue) 
-                      << " wIndex=" << le16toh(setup.wIndex) 
-                      << " wLength=" << le16toh(setup.wLength));
                 
-                // Android Open Accessory (AOA) Negotiation Packets
+                // Intercept Android Open Accessory (AOA) Negotiation
                 if ((setup.bRequestType & USB_TYPE_MASK) == USB_TYPE_VENDOR) {
                     if (setup.bRequest == 51) { // ACC_REQ_GET_PROTOCOL
-                        uint16_t version = htole16(2); // AOA Version 2.0
-                        int w = write(ep0, &version, 2);
-                        LOG_I("   -> Handled ACC_REQ_GET_PROTOCOL (wrote " << w << " bytes)");
+                        LOG_I("[AOA] Car requested protocol version. Sending AOA 2.0");
+                        uint16_t version = htole16(2);
+                        write(ep0, &version, 2);
                     } else if (setup.bRequest == 52) { // ACC_REQ_SEND_STRING
-                        std::vector<uint8_t> buf(le16toh(setup.wLength));
-                        int rr = read(ep0, buf.data(), buf.size());
-                        std::string str(buf.begin(), buf.begin() + (rr > 0 ? rr : 0));
-                        LOG_I("   -> Handled ACC_REQ_SEND_STRING: " << str);
+                        uint16_t len = le16toh(setup.wLength);
+                        if (len > 0) {
+                            std::vector<uint8_t> buf(len);
+                            read(ep0, buf.data(), len);
+                            std::string str(buf.begin(), buf.end());
+                            LOG_I("[AOA] Car sent string (Index " << le16toh(setup.wIndex) << "): " << str);
+                        } else {
+                            read(ep0, nullptr, 0);
+                        }
                     } else if (setup.bRequest == 53) { // ACC_REQ_START
-                        read(ep0, nullptr, 0); // Acknowledge with empty read
-                        LOG_I("   -> Handled ACC_REQ_START");
+                        LOG_I("[AOA] Car requested accessory start!");
+                        read(ep0, nullptr, 0); // ACK the request
+                        
+                        LOG_I(">>> Bouncing USB Gadget to Accessory Mode (0x2D00) <<<");
+                        // Execute the bounce. FunctionFS endpoints survive this rebind!
+                        system("echo \"\" > /sys/kernel/config/usb_gadget/opengal/UDC; "
+                               "sleep 0.5; "
+                               "echo 0x2D00 > /sys/kernel/config/usb_gadget/opengal/idProduct; "
+                               "sleep 0.5; "
+                               "ls /sys/class/udc | head -n 1 > /sys/kernel/config/usb_gadget/opengal/UDC");
                     } else {
-                        LOG_I("   -> Unknown Vendor Request. Stalling.");
+                        // Unknown vendor request, stall
                         if (setup.bRequestType & USB_DIR_IN) read(ep0, nullptr, 0); 
                         else read(ep0, nullptr, 0);
                     }
                 } else {
-                    LOG_I("   -> Non-Vendor Setup Request. Stalling to delegate to kernel.");
+                    // Non-Vendor Setup Request. Stall to delegate standard requests to the kernel.
                     if (setup.bRequestType & USB_DIR_IN) read(ep0, nullptr, 0); 
                     else read(ep0, nullptr, 0); 
                 }
@@ -166,10 +175,14 @@ int main() {
     while (true) {
         int r = read(ep_out, tmp_buf, sizeof(tmp_buf));
         if (r < 0) {
-            // Log the actual error, wait, and retry rather than killing the daemon.
-            // When disconnected, this usually returns errno 108 (ESHUTDOWN).
+            if (errno == EAGAIN || errno == EINTR) {
+                usleep(1000); // 1ms sleep for non-blocking interruptions
+                continue;
+            }
+            // ESHUTDOWN (108) happens when the port suspends or during the AOA bounce.
+            // Just sleep and loop until the connection comes back up.
             LOG_E("[USB IN] Bulk Read failed! Errno: " << errno << " (" << strerror(errno) << ")");
-            usleep(500000); // Wait half a second before trying to read again
+            usleep(500000); 
             continue;
         }
         if (r == 0) {
@@ -207,7 +220,6 @@ int main() {
                             }
                         }
                     }
-                    // Safely flush any data that was pushed to wbio while the lock was held
                     ssl_write_and_flush_unlocked({}, 0, 0x0B, 0); 
                 } else {
                     if (payload.size() >= 2) {

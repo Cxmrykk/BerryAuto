@@ -22,7 +22,7 @@ mkdir -p "$GADGET_DIR"
 cd "$GADGET_DIR" || exit
 
 echo 0x18D1 > idVendor
-echo 0x2D00 > idProduct
+echo 0x4EE1 > idProduct  # Start as a normal phone, not an accessory!
 echo 0x0200 > bcdUSB
 
 mkdir -p strings/0x409
