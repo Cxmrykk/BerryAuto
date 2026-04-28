@@ -79,9 +79,9 @@ void ep0_thread(int ep0) {
                 
                 if ((setup.bRequestType & USB_TYPE_MASK) == USB_TYPE_VENDOR) {
                     if (setup.bRequest == 51) { // AOA GET_PROTOCOL 
-                        uint16_t version = 2; // AOA Version 2.0
+                        uint16_t version = 1; // CRITICAL: Use AOA Version 1.0 for max compatibility
                         write(ep0, &version, 2);
-                        LOG_I("[AOA] Answered GET_PROTOCOL (51)");
+                        LOG_I("[AOA] Answered GET_PROTOCOL (51) with Version 1.0");
                         
                     } else if (setup.bRequest == 52) { // AOA SEND_STRING
                         char str_buf[256];
@@ -99,17 +99,14 @@ void ep0_thread(int ep0) {
                         read(ep0, &dummy_buf, 0); // ACK the START request
                         LOG_I("[AOA] Received START (53). Acknowledging and exiting to trigger morph...");
                         
-                        // Let the Linux kernel flush the ACK to the car before we rip the carpet out
                         usleep(100000); 
                         exit(42);
                         
                     } else {
-                        LOG_I("[EP0] Unknown Vendor Request: Type=" << (int)setup.bRequestType << " Req=" << (int)setup.bRequest << " Val=" << setup.wValue << " Idx=" << setup.wIndex << " Len=" << setup.wLength);
                         if (setup.bRequestType & USB_DIR_IN) write(ep0, &dummy_buf, 0); 
                         else read(ep0, &dummy_buf, 0);
                     }
                 } else {
-                    LOG_I("[EP0] Unknown Standard Request: Type=" << (int)setup.bRequestType << " Req=" << (int)setup.bRequest << " Val=" << setup.wValue << " Idx=" << setup.wIndex << " Len=" << setup.wLength);
                     if (setup.bRequestType & USB_DIR_IN) write(ep0, &dummy_buf, 0); 
                     else read(ep0, &dummy_buf, 0);
                 }
@@ -162,6 +159,7 @@ int main() {
     uint8_t tmp_buf[16384];
 
     while (true) {
+        // Pure blocking read. The kernel will wake this thread the exact millisecond data arrives.
         int r = read(ep_out, tmp_buf, sizeof(tmp_buf));
         
         if (r < 0) {
@@ -169,6 +167,7 @@ int main() {
                 usleep(1000); 
                 continue;
             }
+            LOG_E("[BULK-RX] Read error: " << strerror(errno));
             usleep(500000); 
             continue;
         }
@@ -177,7 +176,8 @@ int main() {
             continue;
         }
         
-        LOG_I("[BULK-RX] Received " << r << " bytes from Host");
+        // Uncomment this if you want to visually see every packet coming from the car
+        // LOG_I("[BULK-RX] Received " << r << " bytes from Host");
         
         usb_rx_buffer.insert(usb_rx_buffer.end(), tmp_buf, tmp_buf + r);
 
