@@ -8,6 +8,11 @@
 #include <atomic>
 #include <algorithm>
 #include <thread>
+#include <string.h>
+#include <errno.h>
+#include <endian.h>
+#include <linux/usb/functionfs.h>
+#include <linux/usb/ch9.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 
@@ -55,6 +60,64 @@ bool load_hardcoded_certs(SSL_CTX *ctx) {
     return true;
 }
 
+// Dedicated thread to read and respond to EP0 (Control Endpoint) events
+void ep0_thread(int ep0) {
+    struct usb_functionfs_event event;
+    while (true) {
+        int r = read(ep0, &event, sizeof(event));
+        if (r < 0) {
+            LOG_E("[EP0] Read failed: " << strerror(errno));
+            usleep(1000000); // Sleep 1s and retry
+            continue; 
+        }
+
+        switch (event.type) {
+            case FUNCTIONFS_BIND: LOG_I("[EP0] Event: BIND"); break;
+            case FUNCTIONFS_UNBIND: LOG_I("[EP0] Event: UNBIND"); break;
+            case FUNCTIONFS_ENABLE: LOG_I("[EP0] Event: ENABLE (Host successfully configured the gadget)"); break;
+            case FUNCTIONFS_DISABLE: LOG_I("[EP0] Event: DISABLE (Host unconfigured the gadget)"); break;
+            case FUNCTIONFS_SUSPEND: LOG_I("[EP0] Event: SUSPEND"); break;
+            case FUNCTIONFS_RESUME: LOG_I("[EP0] Event: RESUME"); break;
+            case FUNCTIONFS_SETUP: {
+                auto setup = event.u.setup;
+                LOG_I("[EP0] SETUP Request: bRequestType=0x" << std::hex << (int)setup.bRequestType 
+                      << " bRequest=" << std::dec << (int)setup.bRequest 
+                      << " wValue=" << le16toh(setup.wValue) 
+                      << " wIndex=" << le16toh(setup.wIndex) 
+                      << " wLength=" << le16toh(setup.wLength));
+                
+                // Android Open Accessory (AOA) Negotiation Packets
+                if ((setup.bRequestType & USB_TYPE_MASK) == USB_TYPE_VENDOR) {
+                    if (setup.bRequest == 51) { // ACC_REQ_GET_PROTOCOL
+                        uint16_t version = htole16(2); // AOA Version 2.0
+                        int w = write(ep0, &version, 2);
+                        LOG_I("   -> Handled ACC_REQ_GET_PROTOCOL (wrote " << w << " bytes)");
+                    } else if (setup.bRequest == 52) { // ACC_REQ_SEND_STRING
+                        std::vector<uint8_t> buf(le16toh(setup.wLength));
+                        int rr = read(ep0, buf.data(), buf.size());
+                        std::string str(buf.begin(), buf.begin() + (rr > 0 ? rr : 0));
+                        LOG_I("   -> Handled ACC_REQ_SEND_STRING: " << str);
+                    } else if (setup.bRequest == 53) { // ACC_REQ_START
+                        read(ep0, nullptr, 0); // Acknowledge with empty read
+                        LOG_I("   -> Handled ACC_REQ_START");
+                    } else {
+                        LOG_I("   -> Unknown Vendor Request. Stalling.");
+                        if (setup.bRequestType & USB_DIR_IN) read(ep0, nullptr, 0); 
+                        else read(ep0, nullptr, 0);
+                    }
+                } else {
+                    LOG_I("   -> Non-Vendor Setup Request. Stalling to delegate to kernel.");
+                    if (setup.bRequestType & USB_DIR_IN) read(ep0, nullptr, 0); 
+                    else read(ep0, nullptr, 0); 
+                }
+                break;
+            }
+            default:
+                LOG_I("[EP0] Unknown Event (" << event.type << ")");
+        }
+    }
+}
+
 int main() {
     LOG_I("Starting OpenGAL Emitter...");
 
@@ -86,8 +149,16 @@ int main() {
     SSL_set_accept_state(ssl); 
 
     int ep0;
-    if (!init_ffs(ep0, ep_in, ep_out)) return 1;
-    LOG_I("USB Endpoints bound successfully. Waiting for Car/Tablet...");
+    if (!init_ffs(ep0, ep_in, ep_out)) {
+        LOG_E("Failed to initialize FFS endpoints!");
+        return 1;
+    }
+    
+    // Spawn the EP0 event thread in the background
+    std::thread ep0_t(ep0_thread, ep0);
+    ep0_t.detach();
+    
+    LOG_I("USB Endpoints bound successfully. Waiting for Car/Tablet to connect...");
 
     std::vector<uint8_t> usb_rx_buffer;
     uint8_t tmp_buf[16384];
@@ -95,8 +166,11 @@ int main() {
     while (true) {
         int r = read(ep_out, tmp_buf, sizeof(tmp_buf));
         if (r < 0) {
-            LOG_E("USB Bulk Read failed! Disconnected?");
-            break;
+            // Log the actual error, wait, and retry rather than killing the daemon.
+            // When disconnected, this usually returns errno 108 (ESHUTDOWN).
+            LOG_E("[USB IN] Bulk Read failed! Errno: " << errno << " (" << strerror(errno) << ")");
+            usleep(500000); // Wait half a second before trying to read again
+            continue;
         }
         if (r == 0) {
             usleep(1000);

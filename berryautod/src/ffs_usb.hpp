@@ -3,6 +3,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <iostream>
+#include <endian.h>
 
 // USB Descriptors telling the Linux Kernel what our endpoints look like
 struct {
