@@ -1,147 +1,207 @@
-# BerryAuto: Native OpenGAL Android Auto Emitter
+# BerryAuto Raspberry Pi Setup Guide
 
-BerryAuto turns your Raspberry Pi into a native Android Auto external display. It creates a virtual monitor (VKMS), captures the Linux Desktop Environment using zero-copy DRM, encodes it to H.264 using hardware acceleration, and streams it to your car's head unit over a trusted TLS 1.2 Android Auto connection.
+This guide provides step-by-step instructions to set up your Raspberry Pi from scratch to act as an Android Auto external display device using the **BerryAuto** daemon.
 
 ## Prerequisites
 
-1. **Hardware:** Raspberry Pi 4 Model B or Raspberry Pi Zero 2 W (must support USB OTG).
-2. **Cable:** A high-quality USB Data cable.
-   - _Pi 4:_ Use the USB-C port.
-   - _Pi Zero 2 W:_ Use the inner micro-USB port marked "USB".
-3. **OS:** Flash an SD card with **Raspberry Pi OS (64-bit) with Desktop**.
+- A Raspberry Pi with USB OTG support (e.g., Raspberry Pi 4, Pi Zero W / 2W).
+  - _Note: On the Raspberry Pi 4, the USB-C power port is also the data/OTG port._
+- A fresh installation of **Raspberry Pi OS (Desktop version)**.
+- Internet access on the Pi for initial setup.
 
 ---
 
-## Step 1: Switch to X11 (Disable Wayland)
+## Step 1: Switch to X11 (For Bookworm OS and newer)
 
-Modern Raspberry Pi OS defaults to Wayland, whose security model blocks the zero-copy GPU screen capture our high-performance encoder uses. We must switch back to X11.
+BerryAuto uses `Xlib` and `XTest` for screen capture and touch injection. Newer versions of Raspberry Pi OS default to Wayland, which will prevent touch inputs and screen grabbing from working properly.
 
-1. Open a terminal and launch the Raspberry Pi configuration tool:
+1. Open the terminal and run the config tool:
    ```bash
    sudo raspi-config
    ```
 2. Navigate to **Advanced Options** -> **Wayland**.
-3. Select **X11** (or "Openbox / X11").
-4. Exit the tool and **Reboot** when prompted.
+3. Select **X11** to disable Wayland.
+4. Exit and allow the Pi to reboot.
 
 ---
 
-## Step 2: Install Build Dependencies
+## Step 2: Configure the Dummy Resolution (Match your Head Unit)
 
-Install the required compilers, cryptography libraries, protobuf tools, and hardware DRM/V4L2 headers:
+BerryAuto works by capturing your Pi's desktop and streaming it to your car. To prevent the image from being stretched or having black bars, the Pi's resolution **must** match one of the standard Android Auto resolutions supported by your car's head unit.
 
-```bash
-sudo apt update
-sudo apt install -y build-essential cmake pkg-config git \
-    libssl-dev libprotobuf-dev protobuf-compiler \
-    libdrm-dev libavcodec-dev libavutil-dev libevdev-dev
-```
+1.  **Identify your resolution:** Most modern cars use **720p** (Case 2), but older units may use **480p** (Case 1), and high-end screens may use **1080p** (Case 3).
+
+2.  **Open the boot configuration file:**
+
+    ```bash
+    sudo nano /boot/firmware/config.txt
+    # (If on an older OS like Bullseye, use /boot/config.txt)
+    ```
+
+3.  **Add the settings:** Look for the `[all]` section and add the following. Adjust the `hdmi_cvt` line based on the table below:
+
+    ```ini
+    # Force dummy HDMI output even without a monitor
+    hdmi_force_hotplug=1
+    hdmi_group=2
+    hdmi_mode=87
+
+    # --- Resolution Pick List (Uncomment ONLY ONE) ---
+    # Case 1: 480p (Standard/Older screens)
+    # hdmi_cvt=800 480 60 6 0 0 0
+
+    # Case 2: 720p (Most common - Recommended)
+    hdmi_cvt=1280 720 60 6 0 0 0
+
+    # Case 3: 1080p (High-end Wide screens)
+    # hdmi_cvt=1920 1080 60 6 0 0 0
+    ```
+
+    | Case  | Resolution  | `hdmi_cvt` parameters  | Aspect      |
+    | :---- | :---------- | :--------------------- | :---------- |
+    | **1** | 800 x 480   | `800 480 60 6 0 0 0`   | 15:9 / 16:9 |
+    | **2** | 1280 x 720  | `1280 720 60 6 0 0 0`  | 16:9        |
+    | **3** | 1920 x 1080 | `1920 1080 60 6 0 0 0` | 16:9        |
+
+4.  **Enable the USB OTG driver:** Ensure this line is present to allow the Pi to act as a USB device:
+
+    ```ini
+    dtoverlay=dwc2,dr_mode=peripheral
+    ```
+
+5.  Save (`Ctrl+O`, `Enter`) and Exit (`Ctrl+X`).
+
+> **Tip:** If the car display appears and looks squashed or stretched, return to this step and try a different Case resolution from the table above.
 
 ---
 
-## Step 3: Configure the Linux Kernel (VKMS & USB OTG)
+## Step 3: Enable Kernel Modules
 
-We need to instruct the Raspberry Pi kernel to enable USB Gadget mode (DWC2) and the Virtual Kernel Mode Setting (VKMS) dummy display.
+You must tell the Linux kernel to load the OTG gadget modules at boot.
 
-1. Open the boot config file:
-
-   ```bash
-   sudo nano /boot/firmware/config.txt
-   ```
-
-   _(Note: On older OS versions, this is `/boot/config.txt`)_
-
-2. Add the following lines to the very bottom:
-   ```ini
-   # Enable USB OTG Support
-   dtoverlay=dwc2,dr_mode=peripheral
-   # Enable Virtual Display (VKMS)
-   dtoverlay=vkms
-   ```
-3. Tell the kernel to load the required modules at boot:
+1. Edit the modules file:
    ```bash
    sudo nano /etc/modules
    ```
-4. Add these lines to the bottom:
+2. Add the following two lines to the end of the file:
    ```text
    dwc2
    libcomposite
-   vkms
-   uinput
+   ```
+3. Save and Exit. **Reboot the Raspberry Pi** now to apply the screen and kernel changes.
+
+---
+
+## Step 4: Install Dependencies & Clone Repository
+
+1. Once the Pi reboots, open a terminal and install the required build tools and libraries:
+
+   ```bash
+   sudo apt update
+   sudo apt install -y git cmake g++ pkg-config libssl-dev \
+       libprotobuf-dev protobuf-compiler libavcodec-dev \
+       libavutil-dev libswscale-dev libx11-dev libxext-dev \
+       libxrandr-dev libxtst-dev
+   ```
+
+2. Clone the repository into your home directory:
+   ```bash
+   cd ~
+   git clone https://github.com/cxmrykk/berryauto.git
+   cd berryauto
    ```
 
 ---
 
-## Step 4: Clone Repository, Configure X11 & USB Gadget Scripts
+## Step 5: Build the Daemon
 
-1. **Clone the repository to your home directory**
-    ```bash
-    git clone https://github.com/Cxmrykk/BerryAuto.git
-    cd BerryAuto/
-    ```
-
-2. **Force X11 to use the Virtual Display:**
-   Copy the provided X11 configuration file so the desktop renders to the virtual monitor instead of the physical HDMI port.
-
+1. Inside the `berryauto` directory, navigate to the daemon folder and build it:
    ```bash
-   sudo mkdir -p /etc/X11/xorg.conf.d/
-   sudo cp config/10-vkms.conf /etc/X11/xorg.conf.d/
+   cd berryautod
+   mkdir build
+   cd build
+   cmake ..
+   make -j$(nproc)
+   ```
+2. Go back to the repository root:
+   ```bash
+   cd ~/berryauto
    ```
 
-3. **Install the USB Gadget Script:**
-   This script makes the Pi disguise itself as a Google Android Auto Accessory (`VID: 0x18D1`, `PID: 0x2D00`).
+---
+
+## Step 6: Install the Setup Script
+
+The `run_berryauto.sh` script expects the gadget setup script to be located in `/usr/local/bin/`.
+
+1. Copy the setup script and make it executable:
    ```bash
    sudo cp scripts/setup_opengal_gadget.sh /usr/local/bin/
    sudo chmod +x /usr/local/bin/setup_opengal_gadget.sh
    ```
-
-**Reboot your Raspberry Pi now so all kernel modules and X11 changes take effect.**
-
-```bash
-sudo reboot
-```
+2. Make the main runner script executable as well:
+   ```bash
+   chmod +x scripts/run_berryauto.sh
+   ```
 
 ---
 
-## Step 5: Build the BerryAuto Daemon
+## Step 7: Setup Systemd Auto-Start Service
 
-Reconnect to your Pi after it reboots. It is now time to compile the C++ `berryautod` application.
+To make BerryAuto start automatically whenever the Pi boots up and the desktop loads, create a systemd service.
 
-1. Navigate to the daemon directory:
+1. Grant your user password-less sudo access. _(Note: If your username is not `pi`, replace `pi` with your actual username)._
+
    ```bash
-   cd ~/BerryAuto/berryautod
+   echo "pi ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/010_pi-nopasswd
    ```
-2. Create a build directory and run CMake:
+
+2. Create a new service file:
    ```bash
-   mkdir build && cd build
-   cmake ..
+   sudo nano /etc/systemd/system/berryauto.service
    ```
-3. Compile the application (using all available CPU cores):
+3. Paste the following configuration. _(Note: If your username is not `pi`, replace `User=pi` and `/home/pi/...` with your actual username and path)._
+
+   ```ini
+   [Unit]
+   Description=BerryAuto Daemon Service
+   After=graphical.target network.target
+   Wants=graphical.target
+
+   [Service]
+   Type=simple
+   User=pi
+   WorkingDirectory=/home/pi/berryauto
+   ExecStart=/home/pi/berryauto/scripts/run_berryauto.sh
+   Restart=always
+   RestartSec=5
+
+   [Install]
+   WantedBy=graphical.target
+   ```
+
+4. Save and Exit.
+5. Reload systemd, enable the service, and start it:
    ```bash
-   make -j$(nproc)
+   sudo systemctl daemon-reload
+   sudo systemctl enable berryauto.service
+   sudo systemctl start berryauto.service
    ```
-   _This will generate the protobuf headers, compile the hardware encoder, the TLS stack, and output the `opengal_emitter` binary._
 
 ---
 
-## Step 6: Execution & Testing in the Car
+## Step 8: Connecting to the Car
 
-You are now ready to project your Linux desktop to your car's head unit.
+You are completely set up!
 
-1. **Plug it in:** Plug your Raspberry Pi into the car's smartphone USB port using your data cable.
-2. SSH into your Raspberry Pi.
-3. **Copy the initializer script:**
-   ```bash
-   cp ~/BerryAuto/scripts/run_berryauto.sh .
-   chmod +x run_berryauto.sh
-   ```
-4. **Start the Daemon:**
-   ```bash
-   ./run_berryauto.sh
-   ```
+1. **Powering the Pi:** Plug a high-quality USB cable into the OTG port of your Raspberry Pi (on the Pi 4, this is the USB-C power port).
+2. **Connecting:** Plug the other end into the Android Auto capable USB port of your vehicle's Head Unit.
+3. The Raspberry Pi will draw power from the car. Once it boots to the desktop, the `berryauto` service will automatically negotiate with the car as an Android Auto device, stream the dummy desktop at the forced resolution, and pass touches back to the Pi!
 
-### Success Verification
+### Troubleshooting
 
-Check your console output. You should see the daemon handle the Cleartext Version Request, negotiate the TLS 1.2 Handshake, parse the Service Discovery (SDP) from your car, and start the `DRM -> V4L2` video pipeline.
-
-Look at your car's screen—it should switch from the native infotainment UI over to the Raspberry Pi Desktop. You can now use your car's touchscreen to control the Pi!
+- **Check Service Logs:** If the car doesn't recognize the device, check the daemon logs by running:
+  ```bash
+  journalctl -u berryauto.service -f
+  ```
+- **Check USB Gadget:** Ensure the `ffs` endpoint is successfully mounting in `/dev/ffs-opengal`. If it fails, double-check that `dtoverlay=dwc2` was applied in `config.txt`.

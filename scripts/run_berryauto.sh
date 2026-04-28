@@ -1,44 +1,40 @@
 #!/bin/bash
-
-# Function to clean up on exit
 cleanup() {
-    echo ""
     echo "[RUNNER] Shutting down..."
-    # Kill the emitter process
     sudo pkill -SIGINT opengal_emitter
     sleep 1
-    # Unbind the USB gadget
-    GADGET_DIR="/sys/kernel/config/usb_gadget/opengal"
-    if [ -d "$GADGET_DIR" ]; then
-        echo "" | sudo tee "$GADGET_DIR/UDC" > /dev/null 2>&1
+    if [ -d "/sys/kernel/config/usb_gadget/opengal" ]; then
+        echo "" | sudo tee "/sys/kernel/config/usb_gadget/opengal/UDC" > /dev/null 2>&1
     fi
-    echo "[RUNNER] Cleaned up. Exiting."
     exit
 }
-
-# Listen for CTRL+C (SIGINT) and call cleanup
 trap cleanup SIGINT
 
-echo "1. Configuring USB Gadget ConfigFS..."
+CURRENT_USER=${SUDO_USER:-$USER}
+USER_HOME=$(getent passwd "$CURRENT_USER" | cut -d: -f6)
+
+export DISPLAY=:0
+export XAUTHORITY="$USER_HOME/.Xauthority"
+
+# Allow root to access the display
+xhost +SI:localuser:root > /dev/null 2>&1 || true
+
+# --- NEW: Wake up the screen and disable sleep/blanking ---
+xset s reset > /dev/null 2>&1 || true
+xset s off > /dev/null 2>&1 || true
+xset -dpms > /dev/null 2>&1 || true
+
 sudo /usr/local/bin/setup_opengal_gadget.sh
 
-echo "2. Starting OpenGAL Emitter in the background..."
-sudo ./opengal_emitter &
+sudo -E ./berryautod/build/opengal_emitter &
 EMITTER_PID=$!
 
-echo "3. Waiting 2 seconds for FunctionFS..."
 sleep 2
-
-echo "4. Binding Gadget to USB Controller..."
 UDC_NAME=$(ls /sys/class/udc | head -n 1)
 if [ -n "$UDC_NAME" ]; then
     echo "$UDC_NAME" | sudo tee /sys/kernel/config/usb_gadget/opengal/UDC > /dev/null
-    echo "SUCCESS: BerryAuto bound to $UDC_NAME"
 else
-    echo "ERROR: No UDC controller found."
     kill $EMITTER_PID
     exit 1
 fi
-
-# Wait for the emitter to finish naturally or via trap
 wait $EMITTER_PID

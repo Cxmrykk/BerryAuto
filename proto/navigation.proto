@@ -1,0 +1,55 @@
+syntax = "proto2";
+
+package com.andrerinas.headunitrevived.aap.protocol.proto;
+option java_outer_classname = "NavigationStatus";
+
+enum NavigationMsgType {
+    NEXTTURNDETAILS = 0x8004;
+    NEXTTURNDISTANCEANDTIME = 0x8005;
+}
+
+message NextTurnDetail
+{
+    enum Side
+    {
+        LEFT = 0x01;
+        RIGHT = 0x02;
+        UNSPECIFIED = 0x03;
+    }
+
+    enum NextEvent
+    {
+        UNKNOWN = 0x00;
+        DEPARTE = 0x01;
+        NAME_CHANGE = 0x02;
+        SLIGHT_TURN = 0x03;
+        TURN = 0x04;
+        SHARP_TURN = 0x05;
+        UTURN = 0x06;
+        ONRAMPE = 0x07;
+        OFFRAMP = 0x08;
+        FORME = 0x09;
+        MERGE = 0x0a;
+        ROUNDABOUT_ENTER = 0x0b;
+        ROUNDABOUT_EXIT = 0x0c;
+        ROUNDABOUT_ENTER_AND_EXIT = 0x0d;
+        STRAIGHTE = 0x0e;
+        FERRY_BOAT = 0x10;
+        FERRY_TRAINE = 0x11;
+        DESTINATION = 0x12;
+    }
+
+    required string road = 1;
+    required Side side = 2;
+    required NextEvent nextturn = 3;
+    optional bytes turngraph = 4;
+    optional uint32 trunnumer = 5;
+    optional uint32 turnangel = 6;
+
+}
+
+message NextTurnDistanceEvent
+{
+    optional uint32 distance = 1;
+    optional uint32 time = 2;
+}

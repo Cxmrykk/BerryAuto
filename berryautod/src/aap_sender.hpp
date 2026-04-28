@@ -1,0 +1,8 @@
+#pragma once
+#include <stdint.h>
+#include <vector>
+#include <google/protobuf/message.h>
+
+void send_unencrypted(uint8_t channel, uint8_t flags, uint16_t type, const std::vector<uint8_t>& payload);
+void ssl_write_and_flush_unlocked(const std::vector<uint8_t>& pt, uint8_t target_channel = 0, uint8_t encrypted_flag = 0x0B, uint32_t unfragmented_size = 0);
+void send_encrypted(uint8_t channel, uint16_t type, const google::protobuf::Message& proto_msg);
