@@ -43,7 +43,6 @@ int global_touch_height = 480;
 std::recursive_mutex aap_mutex;
 std::atomic<int> video_unacked_count{0};
 std::atomic<bool> is_video_streaming{false};
-std::atomic<bool> should_morph{false};
 int max_video_unacked = 16; 
 
 bool load_hardcoded_certs(SSL_CTX *ctx) {
@@ -63,7 +62,9 @@ bool load_hardcoded_certs(SSL_CTX *ctx) {
 // Monitors connection status and handles the AOA Protocol Handshake
 void ep0_thread(int ep0) {
     struct usb_functionfs_event event;
-    while (!should_morph.load()) {
+    char dummy_buf; // Required to properly ACK zero-length requests in Linux VFS
+
+    while (true) {
         int r = read(ep0, &event, sizeof(event));
         if (r < 0) {
             usleep(10000); 
@@ -92,24 +93,27 @@ void ep0_thread(int ep0) {
                             int to_read = std::min((int)setup.wLength, 255);
                             read(ep0, str_buf, to_read);
                         } else {
-                            read(ep0, nullptr, 0);
+                            read(ep0, &dummy_buf, 0); // ACK zero-length
                         }
                         LOG_I("[AOA] Received SEND_STRING (index " << setup.wIndex << "): " << str_buf);
                         
                     } else if (setup.bRequest == 53) { // AOA START (OUT Request - 0 bytes)
-                        read(ep0, nullptr, 0); // ACK the OUT request
-                        LOG_I("[AOA] Received START (53). Telling Daemon to Morph and Restart...");
-                        should_morph = true;
+                        read(ep0, &dummy_buf, 0); // ACK the START request
+                        LOG_I("[AOA] Received START (53). Morphing NOW!");
+                        
+                        // Instantly terminate the daemon to drop the USB endpoints.
+                        // The Bash script will catch code 42 and morph the IDs.
+                        exit(42);
                         
                     } else {
                         // Unhandled Vendor Request - STALL IT gracefully
-                        if (setup.bRequestType & USB_DIR_IN) write(ep0, nullptr, 0); 
-                        else read(ep0, nullptr, 0);
+                        if (setup.bRequestType & USB_DIR_IN) write(ep0, &dummy_buf, 0); 
+                        else read(ep0, &dummy_buf, 0);
                     }
                 } else {
                     // Standard Interface Requests - ACK them
-                    if (setup.bRequestType & USB_DIR_IN) write(ep0, nullptr, 0); 
-                    else read(ep0, nullptr, 0);
+                    if (setup.bRequestType & USB_DIR_IN) write(ep0, &dummy_buf, 0); 
+                    else read(ep0, &dummy_buf, 0);
                 }
                 break;
             }
@@ -159,9 +163,8 @@ int main() {
     std::vector<uint8_t> usb_rx_buffer;
     uint8_t tmp_buf[16384];
 
-    while (!should_morph.load()) {
-        
-        // Use poll() to ensure the read is non-blocking, so we can break the loop if should_morph becomes true
+    while (true) {
+        // Use poll() to prevent blocking indefinitely
         struct pollfd pfd;
         pfd.fd = ep_out;
         pfd.events = POLLIN;
@@ -231,10 +234,5 @@ int main() {
     }
     
     cleanup_input();
-
-    if (should_morph.load()) {
-        return 42; // Signal the bash script that AOA morph is required!
-    }
-
     return 0;
 }

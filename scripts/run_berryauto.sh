@@ -50,7 +50,7 @@ EXIT_CODE=$?
 if [ $EXIT_CODE -eq 42 ]; then
     echo "[BOUNCE] AOA Start received! Morphing to Accessory Mode..."
     
-    # Unbind Gadget (Car sees phone disconnect)
+    # Unbind Gadget (Car sees phone instantly disconnect)
     echo "" | sudo tee /sys/kernel/config/usb_gadget/opengal/UDC > /dev/null
     
     # Morph IDs to Accessory
@@ -63,7 +63,9 @@ if [ $EXIT_CODE -eq 42 ]; then
     sudo -E ./berryautod/build/opengal_emitter &
     PID2=$!
     
-    sleep 1.5
+    # Wait for the Daemon to open the FFS endpoints
+    sleep 1
+    
     # Rebind Gadget (Car sees Accessory connect)
     echo "$UDC_NAME" | sudo tee /sys/kernel/config/usb_gadget/opengal/UDC > /dev/null
     echo "[BOUNCE] Accessory Mode Active!"
