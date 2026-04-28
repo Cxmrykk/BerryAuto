@@ -160,7 +160,7 @@ int main() {
     uint8_t tmp_buf[16384];
 
     while (true) {
-        // Blocking read: wait for data from the Host
+        // Pure blocking read. The kernel will wake this thread the exact millisecond data arrives.
         int r = read(ep_out, tmp_buf, sizeof(tmp_buf));
         
         if (r < 0) {
@@ -176,7 +176,7 @@ int main() {
             continue;
         }
         
-        // LOG_I("[BULK-RX] Received " << r << " bytes from Host");
+        LOG_I("[BULK-RX] Received " << r << " bytes from Host");
         
         usb_rx_buffer.insert(usb_rx_buffer.end(), tmp_buf, tmp_buf + r);
 
