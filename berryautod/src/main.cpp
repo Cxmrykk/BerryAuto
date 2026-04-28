@@ -10,6 +10,7 @@
 #include <thread>
 #include <string.h>
 #include <errno.h>
+#include <poll.h>
 #include <linux/usb/functionfs.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
@@ -42,6 +43,7 @@ int global_touch_height = 480;
 std::recursive_mutex aap_mutex;
 std::atomic<int> video_unacked_count{0};
 std::atomic<bool> is_video_streaming{false};
+std::atomic<bool> should_morph{false};
 int max_video_unacked = 16; 
 
 bool load_hardcoded_certs(SSL_CTX *ctx) {
@@ -58,10 +60,10 @@ bool load_hardcoded_certs(SSL_CTX *ctx) {
     return true;
 }
 
-// Monitors connection status and prints neat diagnostics
+// Monitors connection status and handles the AOA Protocol Handshake
 void ep0_thread(int ep0) {
     struct usb_functionfs_event event;
-    while (true) {
+    while (!should_morph.load()) {
         int r = read(ep0, &event, sizeof(event));
         if (r < 0) {
             usleep(10000); 
@@ -70,13 +72,43 @@ void ep0_thread(int ep0) {
         switch (event.type) {
             case FUNCTIONFS_BIND: LOG_I("[USB] Gadget Bound to Host"); break;
             case FUNCTIONFS_UNBIND: LOG_I("[USB] Gadget Unbound"); break;
-            case FUNCTIONFS_ENABLE: LOG_I("[USB] Configured & Enabled! Waiting for AAP Protocol from Host..."); break;
-            case FUNCTIONFS_DISABLE: LOG_I("[USB] Disabled by Host"); break;
-            case FUNCTIONFS_SETUP: 
-                // Acknowledge standard control requests to keep the Kernel happy
-                if (event.u.setup.bRequestType & USB_DIR_IN) write(ep0, nullptr, 0); 
-                else read(ep0, nullptr, 0);
+            case FUNCTIONFS_ENABLE: LOG_I("[USB] Configured & Enabled!"); break;
+            case FUNCTIONFS_DISABLE: LOG_I("[USB] Disabled by Host (Port Reset/Suspend)"); break;
+            case FUNCTIONFS_SETUP: {
+                auto& setup = event.u.setup;
+                if ((setup.bRequestType & USB_TYPE_MASK) == USB_TYPE_VENDOR) {
+                    if (setup.bRequest == 51) { // AOA GET_PROTOCOL
+                        uint16_t version = 2; // AOA Version 2.0
+                        write(ep0, &version, 2);
+                        LOG_I("[AOA] Answered GET_PROTOCOL (51)");
+                    } else if (setup.bRequest == 52) { // AOA GET_STRING
+                        const char* str = "";
+                        switch (setup.wIndex) {
+                            case 0: str = "Android"; break; // Manufacturer
+                            case 1: str = "Android Auto"; break; // Model
+                            case 2: str = "Android Auto"; break; // Description
+                            case 3: str = "2.0.1"; break; // Version
+                            case 4: str = "https://developer.android.com/auto/index.html"; break; // URI
+                            case 5: str = "HU-AAAAAA001"; break; // Serial
+                        }
+                        int len = strlen(str);
+                        int to_write = std::min((int)setup.wLength, len);
+                        write(ep0, str, to_write);
+                        LOG_I("[AOA] Answered GET_STRING (index " << setup.wIndex << "): " << str);
+                    } else if (setup.bRequest == 53) { // AOA START
+                        read(ep0, nullptr, 0); // ACK the OUT request
+                        LOG_I("[AOA] Received START (53). Telling Daemon to Morph and Restart...");
+                        should_morph = true;
+                    } else {
+                        if (setup.bRequestType & USB_DIR_IN) write(ep0, nullptr, 0); 
+                        else read(ep0, nullptr, 0);
+                    }
+                } else {
+                    if (setup.bRequestType & USB_DIR_IN) write(ep0, nullptr, 0); 
+                    else read(ep0, nullptr, 0);
+                }
                 break;
+            }
         }
     }
 }
@@ -123,14 +155,26 @@ int main() {
     std::vector<uint8_t> usb_rx_buffer;
     uint8_t tmp_buf[16384];
 
-    while (true) {
+    while (!should_morph.load()) {
+        
+        // Use poll() to ensure the read is non-blocking, so we can break the loop if should_morph becomes true
+        struct pollfd pfd;
+        pfd.fd = ep_out;
+        pfd.events = POLLIN;
+        
+        int p = poll(&pfd, 1, 100); // 100ms timeout
+        if (p == 0) continue; 
+        if (p < 0) {
+            usleep(100000);
+            continue;
+        }
+
         int r = read(ep_out, tmp_buf, sizeof(tmp_buf));
         if (r < 0) {
             if (errno == EAGAIN || errno == EINTR) {
                 usleep(1000); 
                 continue;
             }
-            // Port suspended / disconnected. Suppress log spam.
             usleep(500000); 
             continue;
         }
@@ -183,5 +227,10 @@ int main() {
     }
     
     cleanup_input();
+
+    if (should_morph.load()) {
+        return 42; // Signal the bash script that AOA morph is required!
+    }
+
     return 0;
 }
