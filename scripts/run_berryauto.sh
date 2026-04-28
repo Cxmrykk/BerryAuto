@@ -39,7 +39,7 @@ sleep 1.5
 UDC_NAME=$(ls /sys/class/udc | head -n 1)
 
 if [ -z "$UDC_NAME" ]; then
-    echo "[ERROR] No UDC (USB controller) found. Are you using the OTG port?"
+    echo "[ERROR] No UDC found. Are you using the OTG port?"
     kill -9 $PID1
     exit 1
 fi
@@ -56,20 +56,22 @@ if [ $EXIT_CODE -eq 42 ]; then
     # Unbind Gadget (Car sees phone instantly disconnect)
     sudo sh -c "echo '' > /sys/kernel/config/usb_gadget/opengal/UDC" 2>/dev/null || true
     
-    # Morph IDs to Accessory
-    echo 0x2D00 | sudo tee /sys/kernel/config/usb_gadget/opengal/idProduct > /dev/null
+    # Morph IDs to Accessory + ADB (2D01 is widely compatible with Head Units)
+    echo 0x2D01 | sudo tee /sys/kernel/config/usb_gadget/opengal/idProduct > /dev/null
     
-    # CRITICAL: Real phones use DeviceClass 0 in Accessory Mode
     echo 0 | sudo tee /sys/kernel/config/usb_gadget/opengal/bDeviceClass > /dev/null
     echo 0 | sudo tee /sys/kernel/config/usb_gadget/opengal/bDeviceSubClass > /dev/null
     echo 0 | sudo tee /sys/kernel/config/usb_gadget/opengal/bDeviceProtocol > /dev/null
+    
+    # Do not change the manufacturer/product strings! The car expects the same device to return.
+    echo "Google" | sudo tee /sys/kernel/config/usb_gadget/opengal/strings/0x409/manufacturer > /dev/null
+    echo "Pixel 6" | sudo tee /sys/kernel/config/usb_gadget/opengal/strings/0x409/product > /dev/null
     
     # Restart the Daemon to get fresh endpoints!
     echo "[RUNNER] Restarting Daemon for AAP Stream..."
     sudo -E ./berryautod/build/opengal_emitter &
     PID2=$!
     
-    # Wait for the Daemon to open the FFS endpoints
     sleep 1
     
     # Rebind Gadget (Car sees Accessory connect)
