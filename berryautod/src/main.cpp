@@ -10,7 +10,6 @@
 #include <thread>
 #include <string.h>
 #include <errno.h>
-#include <poll.h>
 #include <linux/usb/functionfs.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
@@ -78,14 +77,13 @@ void ep0_thread(int ep0) {
             case FUNCTIONFS_SETUP: {
                 auto& setup = event.u.setup;
                 
-                // Ensure this is a Vendor Request (0x40 / 0xC0)
                 if ((setup.bRequestType & USB_TYPE_MASK) == USB_TYPE_VENDOR) {
-                    if (setup.bRequest == 51) { // AOA GET_PROTOCOL (IN Request - Host wants data)
+                    if (setup.bRequest == 51) { // AOA GET_PROTOCOL 
                         uint16_t version = 2; // AOA Version 2.0
                         write(ep0, &version, 2);
                         LOG_I("[AOA] Answered GET_PROTOCOL (51)");
                         
-                    } else if (setup.bRequest == 52) { // AOA SEND_STRING (OUT Request - Host sends data)
+                    } else if (setup.bRequest == 52) { // AOA SEND_STRING
                         char str_buf[256];
                         memset(str_buf, 0, sizeof(str_buf));
                         
@@ -97,21 +95,19 @@ void ep0_thread(int ep0) {
                         }
                         LOG_I("[AOA] Received SEND_STRING (index " << setup.wIndex << "): " << str_buf);
                         
-                    } else if (setup.bRequest == 53) { // AOA START (OUT Request - 0 bytes)
+                    } else if (setup.bRequest == 53) { // AOA START
                         read(ep0, &dummy_buf, 0); // ACK the START request
-                        LOG_I("[AOA] Received START (53). Morphing NOW!");
+                        LOG_I("[AOA] Received START (53). Acknowledging and exiting to trigger morph...");
                         
-                        // Instantly terminate the daemon to drop the USB endpoints.
-                        // The Bash script will catch code 42 and morph the IDs.
+                        // Let the Linux kernel flush the ACK to the car before we rip the carpet out
+                        usleep(100000); 
                         exit(42);
                         
                     } else {
-                        // Unhandled Vendor Request - STALL IT gracefully
                         if (setup.bRequestType & USB_DIR_IN) write(ep0, &dummy_buf, 0); 
                         else read(ep0, &dummy_buf, 0);
                     }
                 } else {
-                    // Standard Interface Requests - ACK them
                     if (setup.bRequestType & USB_DIR_IN) write(ep0, &dummy_buf, 0); 
                     else read(ep0, &dummy_buf, 0);
                 }
@@ -164,19 +160,9 @@ int main() {
     uint8_t tmp_buf[16384];
 
     while (true) {
-        // Use poll() to prevent blocking indefinitely
-        struct pollfd pfd;
-        pfd.fd = ep_out;
-        pfd.events = POLLIN;
-        
-        int p = poll(&pfd, 1, 100); // 100ms timeout
-        if (p == 0) continue; 
-        if (p < 0) {
-            usleep(100000);
-            continue;
-        }
-
+        // Blocking read: wait for data from the Host
         int r = read(ep_out, tmp_buf, sizeof(tmp_buf));
+        
         if (r < 0) {
             if (errno == EAGAIN || errno == EINTR) {
                 usleep(1000); 
@@ -189,6 +175,8 @@ int main() {
             usleep(1000);
             continue;
         }
+        
+        // LOG_I("[BULK-RX] Received " << r << " bytes from Host");
         
         usb_rx_buffer.insert(usb_rx_buffer.end(), tmp_buf, tmp_buf + r);
 

@@ -4,7 +4,7 @@ cleanup() {
     sudo pkill -9 opengal_emitter 2>/dev/null || true
     sleep 1
     if [ -d "/sys/kernel/config/usb_gadget/opengal" ]; then
-        echo "" | sudo tee "/sys/kernel/config/usb_gadget/opengal/UDC" > /dev/null 2>&1
+        sudo sh -c "echo '' > /sys/kernel/config/usb_gadget/opengal/UDC" 2>/dev/null || true
     fi
     exit
 }
@@ -51,7 +51,7 @@ if [ $EXIT_CODE -eq 42 ]; then
     echo "[BOUNCE] AOA Start received! Morphing to Accessory Mode..."
     
     # Unbind Gadget (Car sees phone instantly disconnect)
-    echo "" | sudo tee /sys/kernel/config/usb_gadget/opengal/UDC > /dev/null
+    sudo sh -c "echo '' > /sys/kernel/config/usb_gadget/opengal/UDC" 2>/dev/null || true
     
     # Morph IDs to Accessory
     echo 0x2D00 | sudo tee /sys/kernel/config/usb_gadget/opengal/idProduct > /dev/null
