@@ -15,8 +15,8 @@ void send_video_frame_internal(const std::vector<uint8_t>& nal_data, uint64_t ti
     const size_t MAX_CHUNK_SIZE = 16384;
     
     std::vector<uint8_t> header;
-    header.push_back(0x00); // MEDIA_MESSAGE_DATA
-    header.push_back(0x00);
+    header.push_back(0x00); // MEDIA_MESSAGE_DATA (msg_type_hi)
+    header.push_back(0x00); // MEDIA_MESSAGE_DATA (msg_type_lo)
     for(int i=7; i>=0; --i) { header.push_back((timestamp >> (i*8)) & 0xFF); }
     
     uint32_t total_size = header.size() + nal_data.size();
@@ -95,13 +95,44 @@ void extract_and_cache_sps_pps(const std::vector<uint8_t>& frame) {
     }
 }
 
+void inject_cached_video_config() {
+    std::vector<uint8_t> config_copy;
+    {
+        std::lock_guard<std::mutex> lock(config_mutex);
+        if (!has_cached_config) return;
+        config_copy = cached_config_nal;
+    }
+    
+    std::vector<uint8_t> pt;
+    pt.push_back(0x00); // msg_type_hi
+    pt.push_back(0x01); // msg_type_lo = 1 (MEDIA_MESSAGE_CODEC_CONFIG)
+    // Codec Config doesn't have a timestamp, it immediately appends the NALs
+    pt.insert(pt.end(), config_copy.begin(), config_copy.end());
+    
+    LOG_I(">>> Sending CODEC_CONFIG (SPS/PPS) to Head Unit... <<<");
+    if (ssl_bypassed) {
+        aap_send_raw(pt, video_channel_id, 0x03, 0); 
+    } else {
+        ssl_write_and_flush_unlocked(pt, video_channel_id, 0x0B, 0); 
+    }
+}
+
 void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp) {
     if (!(is_tls_connected || ssl_bypassed) || !video_channel_ready || !is_video_streaming.load()) {
         return; 
     }
 
+    bool just_extracted = false;
     if (!has_cached_config) {
         extract_and_cache_sps_pps(nal_data);
+        if (has_cached_config) {
+            just_extracted = true;
+        }
+    }
+
+    // If we just intercepted the config, transmit it as a CODEC_CONFIG packet BEFORE sending the frame
+    if (just_extracted) {
+        inject_cached_video_config();
     }
 
     int wait_cycles = 0;
@@ -124,17 +155,4 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp) 
 
 void on_video_nal_ready(const std::vector<uint8_t>& nal_data, uint64_t timestamp) {
     send_video_frame(nal_data, timestamp);
-}
-
-void inject_cached_video_config() {
-    std::vector<uint8_t> config_copy;
-    {
-        std::lock_guard<std::mutex> lock(config_mutex);
-        if (!has_cached_config) return;
-        config_copy = cached_config_nal;
-    }
-    
-    auto now = std::chrono::system_clock::now().time_since_epoch();
-    uint64_t ts = std::chrono::duration_cast<std::chrono::microseconds>(now).count();
-    send_video_frame_internal(config_copy, ts);
 }

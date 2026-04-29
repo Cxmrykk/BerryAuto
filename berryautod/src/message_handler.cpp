@@ -41,7 +41,7 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                 setup.set_type(MediaCodecType::MEDIA_CODEC_VIDEO_H264_BP);
                 send_message(opened_channel, MediaMsgType::MEDIA_MESSAGE_SETUP, setup); 
 
-                // FIX: Force start video stream immediately instead of waiting for a CONFIG response
+                // Force start video stream immediately. 
                 // Many real head units stall if we do not initiate the start proactively.
                 std::cout << ">>> Forcing Video Stream Start... <<<" << std::endl;
                 Start start; 
@@ -70,7 +70,7 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                 }
 
                 video_streamer->force_keyframe();
-                inject_cached_video_config();
+                inject_cached_video_config(); // This safely does nothing on boot because config isn't generated yet
             } 
             else if (ctype == ChannelType::INPUT) {
                 input_channel_ready = true;
@@ -84,14 +84,12 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                 setup.set_type(MediaCodecType::MEDIA_CODEC_AUDIO_PCM);
                 send_message(opened_channel, MediaMsgType::MEDIA_MESSAGE_SETUP, setup);
                 
-                // FIX: Force start audio/mic channels immediately
                 Start start; 
                 start.set_session_id(5678);
                 start.set_configuration_index(0);
                 send_message(opened_channel, MediaMsgType::MEDIA_MESSAGE_START, start);
             }
             else {
-                // Sensors, Nav, BT, Status do not require media setup
                 std::cout << ">>> Service active. No Media Setup required. <<<" << std::endl;
             }
 
@@ -118,7 +116,6 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
             ServiceDiscoveryResponse sdp_resp;
             if (sdp_resp.ParseFromArray(payload_data, payload_len)) {
                 
-                // Clear any existing sequential backlog and map
                 while (!pending_channel_opens.empty()) pending_channel_opens.pop();
                 channel_types.clear();
 
@@ -190,7 +187,6 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                             std::cout << "[INFO] Headunit advertised UNKNOWN SERVICE (Channel " << svc_id << ")" << std::endl;
                         }
 
-                        // Queue ALL valid services to be opened sequentially
                         pending_channel_opens.push(svc_id);
                     }
                 }
@@ -200,7 +196,6 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
             
             LOG_I(">>> Negotiating Channels Sequentially... <<<");
             
-            // Initiate the sequence by opening the first channel ON ITS OWN TARGET CHANNEL
             if (!pending_channel_opens.empty()) {
                 int first_chan = pending_channel_opens.front();
                 ChannelOpenRequest req;
