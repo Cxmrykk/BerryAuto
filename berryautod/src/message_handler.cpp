@@ -117,8 +117,13 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                     KeyBindingRequest bind;
                     send_message(input_channel_id, InputMsgType::BINDINGREQUEST, bind);
                 }
+                else if (opened_channel == 1 || opened_channel == 8 || opened_channel >= 9) {
+                    // Sensors, Bluetooth, Navigation, Status etc. DO NOT receive MediaSetupRequest!
+                    std::cout << ">>> Generic Channel " << opened_channel << " active. Waiting for Head Unit commands... <<<" << std::endl;
+                }
                 else {
-                    // Send a dummy generic Media Setup for audio/sensors to avoid Head Unit stalls
+                    // Audio / Mic channels (Usually 4, 5, 6, 7) need a Media Setup Request to proceed
+                    std::cout << ">>> Sending Dummy Media Setup for Audio Channel " << opened_channel << "... <<<" << std::endl;
                     MediaSetupRequest setup; 
                     setup.set_type(MediaCodecType::MEDIA_CODEC_AUDIO_PCM);
                     send_message(opened_channel, MediaMsgType::MEDIA_MESSAGE_SETUP, setup);
@@ -234,7 +239,7 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
         }
     }
     else {
-        // Answer any rogue setup requests targeting the extra Audio/Sensor channels the head unit explicitly opened
+        // Answer any rogue setup requests targeting the extra Audio channels the head unit explicitly opened
         if (type == MediaMsgType::MEDIA_MESSAGE_CONFIG) {
             Start start; 
             start.set_session_id(5678);
@@ -343,7 +348,8 @@ void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload
         }
     }
     else {
-        LOG_I(">>> Parsing unencrypted packet but KEEPING outbound TLS active! <<<");
+        LOG_I(">>> Received unencrypted packet AFTER handshake! Head Unit must have dropped TLS. Switching to plaintext! <<<");
+        ssl_bypassed = true;
         handle_parsed_payload(channel, type, payload_data, payload_len);
     }
 }
