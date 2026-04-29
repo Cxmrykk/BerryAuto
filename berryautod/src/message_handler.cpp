@@ -23,6 +23,56 @@ void hex_dump(const std::string& prefix, const uint8_t* data, int len) {
 }
 
 void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data, int payload_len) {
+    
+    // ---- GLOBAL CONTROL (Can arrive on any channel) ----
+    if (type == ControlMsgType::MESSAGE_CHANNEL_OPEN_RESPONSE) {
+        if (!pending_channel_opens.empty()) {
+            int opened_channel = pending_channel_opens.front();
+            pending_channel_opens.pop();
+
+            std::cout << ">>> Channel (" << opened_channel << ") Opened! <<<" << std::endl;
+            
+            ChannelType ctype = channel_types[opened_channel];
+
+            if (ctype == ChannelType::VIDEO) {
+                video_channel_ready = true;
+                std::cout << ">>> Sending Media Setup for Video Channel... <<<" << std::endl;
+                MediaSetupRequest setup; 
+                setup.set_type(MediaCodecType::MEDIA_CODEC_VIDEO_H264_BP);
+                send_message(opened_channel, MediaMsgType::MEDIA_MESSAGE_SETUP, setup); 
+            } 
+            else if (ctype == ChannelType::INPUT) {
+                input_channel_ready = true;
+                std::cout << ">>> Sending Touch Binding Request... <<<" << std::endl;
+                KeyBindingRequest bind;
+                send_message(opened_channel, InputMsgType::BINDINGREQUEST, bind);
+            }
+            else if (ctype == ChannelType::AUDIO || ctype == ChannelType::MIC) {
+                std::cout << ">>> Sending Dummy Media Setup for Audio/Mic Channel (" << opened_channel << ")... <<<" << std::endl;
+                MediaSetupRequest setup; 
+                setup.set_type(MediaCodecType::MEDIA_CODEC_AUDIO_PCM);
+                send_message(opened_channel, MediaMsgType::MEDIA_MESSAGE_SETUP, setup);
+            }
+            else {
+                // Sensors, Nav, BT, Status do not require media setup
+                std::cout << ">>> Service active. No Media Setup required. <<<" << std::endl;
+            }
+
+            // If more channels need opening, trigger the next request ON THE TARGET CHANNEL.
+            if (!pending_channel_opens.empty()) {
+                int next_chan = pending_channel_opens.front();
+                ChannelOpenRequest req;
+                req.set_priority(1);
+                req.set_service_id(next_chan);
+                send_message(next_chan, ControlMsgType::MESSAGE_CHANNEL_OPEN_REQUEST, req);
+            } else {
+                LOG_I(">>> All channels opened successfully! <<<");
+            }
+        }
+        return; // Event processed, skip channel-specific routing
+    }
+
+
     // ---- CHANNEL 0 (Control Channel) ----
     if (channel == 0) {
         if (type == ControlMsgType::MESSAGE_SERVICE_DISCOVERY_RESPONSE) {
@@ -113,62 +163,15 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
             
             LOG_I(">>> Negotiating Channels Sequentially... <<<");
             
-            // Initiate the sequence by opening the first channel
-            // CRITICAL FIX: ChannelOpenRequest must ALWAYS be sent on Channel 0
+            // Initiate the sequence by opening the first channel ON ITS OWN TARGET CHANNEL
             if (!pending_channel_opens.empty()) {
                 int first_chan = pending_channel_opens.front();
                 ChannelOpenRequest req;
                 req.set_priority(1);
                 req.set_service_id(first_chan);
-                send_message(0, ControlMsgType::MESSAGE_CHANNEL_OPEN_REQUEST, req);
+                send_message(first_chan, ControlMsgType::MESSAGE_CHANNEL_OPEN_REQUEST, req);
             }
         } 
-        else if (type == ControlMsgType::MESSAGE_CHANNEL_OPEN_RESPONSE) {
-            if (!pending_channel_opens.empty()) {
-                int opened_channel = pending_channel_opens.front();
-                pending_channel_opens.pop();
-
-                std::cout << ">>> Channel (" << opened_channel << ") Opened! <<<" << std::endl;
-                
-                ChannelType ctype = channel_types[opened_channel];
-
-                if (ctype == ChannelType::VIDEO) {
-                    video_channel_ready = true;
-                    std::cout << ">>> Sending Media Setup for Video Channel... <<<" << std::endl;
-                    MediaSetupRequest setup; 
-                    setup.set_type(MediaCodecType::MEDIA_CODEC_VIDEO_H264_BP);
-                    send_message(opened_channel, MediaMsgType::MEDIA_MESSAGE_SETUP, setup); 
-                } 
-                else if (ctype == ChannelType::INPUT) {
-                    input_channel_ready = true;
-                    std::cout << ">>> Sending Touch Binding Request... <<<" << std::endl;
-                    KeyBindingRequest bind;
-                    send_message(opened_channel, InputMsgType::BINDINGREQUEST, bind);
-                }
-                else if (ctype == ChannelType::AUDIO || ctype == ChannelType::MIC) {
-                    std::cout << ">>> Sending Dummy Media Setup for Audio/Mic Channel... <<<" << std::endl;
-                    MediaSetupRequest setup; 
-                    setup.set_type(MediaCodecType::MEDIA_CODEC_AUDIO_PCM);
-                    send_message(opened_channel, MediaMsgType::MEDIA_MESSAGE_SETUP, setup);
-                }
-                else {
-                    // Sensors, Nav, BT, Status do not require media setup
-                    std::cout << ">>> Service active. No Media Setup required. <<<" << std::endl;
-                }
-
-                // If more channels need opening, trigger the next request.
-                // CRITICAL FIX: ChannelOpenRequest must ALWAYS be sent on Channel 0
-                if (!pending_channel_opens.empty()) {
-                    int next_chan = pending_channel_opens.front();
-                    ChannelOpenRequest req;
-                    req.set_priority(1);
-                    req.set_service_id(next_chan);
-                    send_message(0, ControlMsgType::MESSAGE_CHANNEL_OPEN_REQUEST, req);
-                } else {
-                    LOG_I(">>> All channels opened successfully! <<<");
-                }
-            }
-        }
         else if (type == ControlMsgType::MESSAGE_AUDIO_FOCUS_REQUEST) {
             LOG_I(">>> Head Unit requested Audio Focus. Yielding control automatically. <<<");
             AudioFocusNotification afn;
@@ -401,7 +404,6 @@ void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload
         }
     }
     else {
-        // [FIXED BUG]: Do NOT force ssl_bypassed to true. Continue using standard encryption for outbound!
         LOG_I(">>> Parsing unencrypted packet but KEEPING outbound TLS active! <<<");
         handle_parsed_payload(channel, type, payload_data, payload_len);
     }
