@@ -53,8 +53,9 @@ void aap_send_raw(const std::vector<uint8_t>& pt, uint8_t target_channel, uint8_
     out.push_back((len_field >> 8) & 0xFF);
     out.push_back(len_field & 0xFF);
 
-    if (flags == 0x09)
-    { // First Fragment has 4-byte unfragmented size
+    // FIX: Check bottom 2 bits to cover BOTH Encrypted (0x09, 0x0D) and Unencrypted (0x01, 0x05) first fragments
+    if ((flags & 0x03) == 0x01)
+    {
         out.push_back((unfragmented_size >> 24) & 0xFF);
         out.push_back((unfragmented_size >> 16) & 0xFF);
         out.push_back((unfragmented_size >> 8) & 0xFF);
@@ -65,33 +66,27 @@ void aap_send_raw(const std::vector<uint8_t>& pt, uint8_t target_channel, uint8_
     write_to_usb(out);
 }
 
-void ssl_write_and_flush_unlocked(const std::vector<uint8_t>& pt, uint8_t target_channel, uint8_t encrypted_flag,
-                                  uint32_t unfragmented_size)
+void ssl_write_and_flush_unlocked(const std::vector<uint8_t>& pt, uint8_t target_channel, uint8_t base_flags,
+                                  uint32_t unused)
 {
     std::vector<std::vector<uint8_t>> out_packets;
     {
         std::lock_guard<std::recursive_mutex> lock(aap_mutex);
 
-        // Push the payload into the SSL engine
         if (!pt.empty())
         {
             SSL_write(ssl, pt.data(), pt.size());
         }
 
-        // Immediately drain any produced TLS records while STILL holding aap_mutex
-        while (true)
+        int pending = BIO_ctrl_pending(wbio);
+        if (pending > 0)
         {
-            int pending = BIO_ctrl_pending(wbio);
-            if (pending <= 0)
-                break;
-
-            int chunk_size = std::min(pending, 32768);
-            std::vector<uint8_t> tls_record(chunk_size);
-            BIO_read(wbio, tls_record.data(), chunk_size);
+            std::vector<uint8_t> ciphertext(pending);
+            BIO_read(wbio, ciphertext.data(), pending);
 
             if (!is_tls_connected)
             {
-                uint16_t len_field = tls_record.size() + 2;
+                uint16_t len_field = ciphertext.size() + 2;
                 std::vector<uint8_t> out;
                 out.push_back(0);
                 out.push_back(0x03);
@@ -99,37 +94,73 @@ void ssl_write_and_flush_unlocked(const std::vector<uint8_t>& pt, uint8_t target
                 out.push_back(len_field & 0xFF);
                 out.push_back((ControlMsgType::MESSAGE_ENCAPSULATED_SSL >> 8) & 0xFF);
                 out.push_back(ControlMsgType::MESSAGE_ENCAPSULATED_SSL & 0xFF);
-                out.insert(out.end(), tls_record.begin(), tls_record.end());
+                out.insert(out.end(), ciphertext.begin(), ciphertext.end());
                 out_packets.push_back(out);
             }
             else
             {
-                uint16_t len_field = tls_record.size();
-                std::vector<uint8_t> out;
-                out.push_back(target_channel);
-                out.push_back(encrypted_flag);
-                out.push_back((len_field >> 8) & 0xFF);
-                out.push_back(len_field & 0xFF);
-
-                if (encrypted_flag == 0x09)
+                size_t MAX_CHUNK_SIZE = 16384;
+                if (ciphertext.size() <= MAX_CHUNK_SIZE)
                 {
-                    out.push_back((unfragmented_size >> 24) & 0xFF);
-                    out.push_back((unfragmented_size >> 16) & 0xFF);
-                    out.push_back((unfragmented_size >> 8) & 0xFF);
-                    out.push_back(unfragmented_size & 0xFF);
+                    uint16_t len_field = ciphertext.size();
+                    std::vector<uint8_t> out;
+                    out.push_back(target_channel);
+                    out.push_back(base_flags);
+                    out.push_back((len_field >> 8) & 0xFF);
+                    out.push_back(len_field & 0xFF);
+                    out.insert(out.end(), ciphertext.begin(), ciphertext.end());
+                    out_packets.push_back(out);
                 }
+                else
+                {
+                    // FIX: Automatically fragment the resulting Ciphertext payload
+                    size_t offset = 0;
+                    uint32_t total_size = ciphertext.size();
 
-                out.insert(out.end(), tls_record.begin(), tls_record.end());
-                out_packets.push_back(out);
+                    while (offset < total_size)
+                    {
+                        size_t remain = total_size - offset;
+                        size_t chunk_size = std::min(remain, MAX_CHUNK_SIZE);
+
+                        uint8_t flag;
+                        if (offset == 0)
+                            flag = (base_flags & ~0x03) | 0x01; // First Fragment
+                        else if (offset + chunk_size >= total_size)
+                            flag = (base_flags & ~0x03) | 0x02; // Last Fragment
+                        else
+                            flag = (base_flags & ~0x03) | 0x00; // Middle Fragment
+
+                        std::vector<uint8_t> out;
+                        out.push_back(target_channel);
+                        out.push_back(flag);
+
+                        uint16_t len_field = chunk_size;
+                        out.push_back((len_field >> 8) & 0xFF);
+                        out.push_back(len_field & 0xFF);
+
+                        if ((flag & 0x03) == 0x01)
+                        {
+                            out.push_back((total_size >> 24) & 0xFF);
+                            out.push_back((total_size >> 16) & 0xFF);
+                            out.push_back((total_size >> 8) & 0xFF);
+                            out.push_back(total_size & 0xFF);
+                        }
+
+                        out.insert(out.end(), ciphertext.begin() + offset, ciphertext.begin() + offset + chunk_size);
+                        out_packets.push_back(out);
+
+                        offset += chunk_size;
+                    }
+                }
             }
         }
     }
 
-    // Write out the packets using blocking I/O *WITHOUT* holding the vital AAP mutex
     for (const auto& pkt : out_packets)
     {
-        // Only hide logs for actual streaming video payload frames (0x08, 0x09, 0x0A)
-        if (!(target_channel == 2 && (encrypted_flag == 0x08 || encrypted_flag == 0x09 || encrypted_flag == 0x0A)))
+        uint8_t target_channel = pkt[0];
+        uint8_t encrypted_flag = pkt[1];
+        if (!(target_channel == 2 && ((encrypted_flag & 0x03) != 0x03 || encrypted_flag == 0x0B)))
         {
             std::cout << "[DEBUG-TX] Encrypted - Channel: " << (int)target_channel << " Flags: 0x" << std::hex
                       << (int)encrypted_flag << std::dec << " Size: " << pkt.size() << std::endl;
