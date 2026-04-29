@@ -217,10 +217,11 @@ void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload
             (void)BIO_reset(wbio);
         }
 
-        // FIX: Send exactly 4 bytes (major, minor) to match strict AAP response lengths
+        // CORRECTED: The decompiled source shows the phone replies with 6 bytes: Major(2), Minor(2), Status(2)
         std::vector<uint8_t> resp_payload = {
             (uint8_t)(major >> 8), (uint8_t)(major & 0xFF),
-            (uint8_t)(minor >> 8), (uint8_t)(minor & 0xFF)
+            (uint8_t)(minor >> 8), (uint8_t)(minor & 0xFF),
+            0x00, 0x00 // STATUS_SUCCESS = 0
         }; 
         send_unencrypted(0, 0x03, ControlMsgType::MESSAGE_VERSION_RESPONSE, resp_payload);
     } 
@@ -251,8 +252,6 @@ void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload
         }
         
         // Flush the TLS handshake data BEFORE updating is_tls_connected to true.
-        // This guarantees the Server Finished message goes out as unencrypted MESSAGE_ENCAPSULATED_SSL (Type 3)
-        // rather than an encrypted frame.
         ssl_write_and_flush_unlocked({}, 0, 0x0B, 0); 
         
         if (handshake_just_completed) {
@@ -284,6 +283,13 @@ void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload
         sdp_req.set_phone_name("BerryAuto Phone");
         sdp_req.set_phone_brand("Raspberry Pi");
         
-        send_message(0, ControlMsgType::MESSAGE_SERVICE_DISCOVERY_REQUEST, sdp_req);
+        if (ssl_bypassed) {
+            // Force it unencrypted if TLS genuinely failed but we want to try our luck
+            std::vector<uint8_t> serialized(sdp_req.ByteSizeLong());
+            sdp_req.SerializeToArray(serialized.data(), serialized.size());
+            send_unencrypted(0, 0x03, ControlMsgType::MESSAGE_SERVICE_DISCOVERY_REQUEST, serialized);
+        } else {
+            send_message(0, ControlMsgType::MESSAGE_SERVICE_DISCOVERY_REQUEST, sdp_req);
+        }
     }
 }
