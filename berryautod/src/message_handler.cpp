@@ -177,16 +177,18 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
             start.set_configuration_index(0);
             send_message(video_channel_id, MediaMsgType::MEDIA_MESSAGE_START, start);
 
-            // CRITICAL: Request Video Focus & Audio Focus explicitly so the Head Unit drops the "Android Auto is starting..." screen
-            LOG_I(">>> Requesting Video Focus... <<<");
-            VideoFocusRequestNotification vfr;
-            vfr.set_mode(VideoFocusMode::VIDEO_FOCUS_PROJECTED);
-            send_message(video_channel_id, MediaMsgType::MEDIA_MESSAGE_VIDEO_FOCUS_REQUEST, vfr);
+            // CRITICAL: Inform the Head Unit that we are seizing Video and Audio focus to lift the splash screen
+            LOG_I(">>> Asserting Video Focus... <<<");
+            VideoFocusNotification vfn;
+            vfn.set_mode(VideoFocusMode::VIDEO_FOCUS_PROJECTED);
+            vfn.set_unsolicited(true);
+            send_message(video_channel_id, MediaMsgType::MEDIA_MESSAGE_VIDEO_FOCUS_NOTIFICATION, vfn);
 
-            LOG_I(">>> Requesting Default Audio Focus... <<<");
-            AudioFocusRequestNotification afr;
-            afr.set_request(AudioFocusRequestNotification::GAIN);
-            send_message(0, ControlMsgType::MESSAGE_AUDIO_FOCUS_REQUEST, afr);
+            LOG_I(">>> Asserting Default Audio Focus... <<<");
+            AudioFocusNotification afn;
+            afn.set_focus_state(AudioFocusNotification::STATE_GAIN);
+            afn.set_unsolicited(true);
+            send_message(0, ControlMsgType::MESSAGE_AUDIO_FOCUS_NOTIFICATION, afn);
 
             is_video_streaming = true;
             video_unacked_count = 0; 
@@ -348,8 +350,8 @@ void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload
         }
     }
     else {
-        LOG_I(">>> Received unencrypted packet AFTER handshake! Head Unit must have dropped TLS. Switching to plaintext! <<<");
-        ssl_bypassed = true;
+        // [FIXED BUG]: Do NOT force ssl_bypassed to true. Continue using standard encryption for outbound!
+        LOG_I(">>> Parsing unencrypted packet but KEEPING outbound TLS active! <<<");
         handle_parsed_payload(channel, type, payload_data, payload_len);
     }
 }
