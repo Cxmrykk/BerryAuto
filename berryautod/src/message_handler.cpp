@@ -113,12 +113,13 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
             
             LOG_I(">>> Negotiating Channels Sequentially... <<<");
             
+            // Pop the very first channel out and initiate the sequence ON THE TARGET CHANNEL!
             if (!pending_channel_opens.empty()) {
                 int first_chan = pending_channel_opens.front();
                 ChannelOpenRequest req;
                 req.set_priority(1);
                 req.set_service_id(first_chan);
-                send_message(0, ControlMsgType::MESSAGE_CHANNEL_OPEN_REQUEST, req);
+                send_message(first_chan, ControlMsgType::MESSAGE_CHANNEL_OPEN_REQUEST, req);
             }
         } 
         else if (type == ControlMsgType::MESSAGE_CHANNEL_OPEN_RESPONSE) {
@@ -154,23 +155,17 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                     std::cout << ">>> Service active. No Media Setup required. <<<" << std::endl;
                 }
 
-                // If more channels need opening, trigger the next request.
+                // If more channels need opening, trigger the next request ON THE TARGET CHANNEL.
                 if (!pending_channel_opens.empty()) {
                     int next_chan = pending_channel_opens.front();
                     ChannelOpenRequest req;
                     req.set_priority(1);
                     req.set_service_id(next_chan);
-                    send_message(0, ControlMsgType::MESSAGE_CHANNEL_OPEN_REQUEST, req);
+                    send_message(next_chan, ControlMsgType::MESSAGE_CHANNEL_OPEN_REQUEST, req);
                 } else {
                     LOG_I(">>> All channels opened successfully! <<<");
                 }
             }
-        }
-        else if (type == ControlMsgType::MESSAGE_AUDIO_FOCUS_REQUEST) {
-            LOG_I(">>> Head Unit requested Audio Focus. Yielding control automatically. <<<");
-            AudioFocusNotification afn;
-            afn.set_focus_state(AudioFocusNotification::STATE_GAIN);
-            send_message(0, ControlMsgType::MESSAGE_AUDIO_FOCUS_NOTIFICATION, afn);
         }
         else if (type == ControlMsgType::MESSAGE_PING_REQUEST) {
             PingRequest req;
@@ -212,17 +207,16 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                 start.set_configuration_index(0);
                 send_message(channel, MediaMsgType::MEDIA_MESSAGE_START, start);
 
+                // CRITICAL: Request Video Focus (Channel-Specific) & Audio Focus (Channel 0) explicitly to lift the Splash Screen
                 LOG_I(">>> Requesting Video Focus to lift Splash Screen... <<<");
-                VideoFocusNotification vfn;
-                vfn.set_mode(VideoFocusMode::VIDEO_FOCUS_PROJECTED);
-                vfn.set_unsolicited(true);
-                send_message(channel, MediaMsgType::MEDIA_MESSAGE_VIDEO_FOCUS_NOTIFICATION, vfn);
+                VideoFocusRequestNotification vfr;
+                vfr.set_mode(VideoFocusMode::VIDEO_FOCUS_PROJECTED);
+                send_message(channel, MediaMsgType::MEDIA_MESSAGE_VIDEO_FOCUS_REQUEST, vfr);
 
                 LOG_I(">>> Requesting Default Audio Focus... <<<");
-                AudioFocusNotification afn;
-                afn.set_focus_state(AudioFocusNotification::STATE_GAIN);
-                afn.set_unsolicited(true);
-                send_message(0, ControlMsgType::MESSAGE_AUDIO_FOCUS_NOTIFICATION, afn);
+                AudioFocusRequestNotification afr;
+                afr.set_request(AudioFocusRequestNotification::GAIN);
+                send_message(0, ControlMsgType::MESSAGE_AUDIO_FOCUS_REQUEST, afr);
 
                 is_video_streaming = true;
                 video_unacked_count = 0; 
@@ -264,29 +258,6 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
         else if (type == MediaMsgType::MEDIA_MESSAGE_STOP) {
             if (channel_types[channel] == ChannelType::VIDEO) {
                 is_video_streaming = false;
-            }
-        }
-        else if (type == MediaMsgType::MEDIA_MESSAGE_VIDEO_FOCUS_REQUEST) {
-            if (channel_types[channel] == ChannelType::VIDEO) {
-                LOG_I(">>> Head Unit requested Video Focus. Yielding control automatically. <<<");
-                VideoFocusNotification vfn;
-                vfn.set_mode(VideoFocusMode::VIDEO_FOCUS_PROJECTED);
-                send_message(channel, MediaMsgType::MEDIA_MESSAGE_VIDEO_FOCUS_NOTIFICATION, vfn);
-            }
-        }
-        else if (type == MediaMsgType::MEDIA_MESSAGE_VIDEO_FOCUS_NOTIFICATION) {
-            if (channel_types[channel] == ChannelType::VIDEO) {
-                VideoFocusNotification focus_notif;
-                if (focus_notif.ParseFromArray(payload_data, payload_len)) {
-                    if (focus_notif.has_mode() && focus_notif.mode() == VideoFocusMode::VIDEO_FOCUS_PROJECTED) {
-                        is_video_streaming = true;
-                        video_unacked_count = 0; 
-                        if (video_streamer) video_streamer->force_keyframe();
-                        inject_cached_video_config();
-                    } else {
-                        is_video_streaming = false;
-                    }
-                }
             }
         }
     }
@@ -399,7 +370,6 @@ void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload
         }
     }
     else {
-        // Do NOT force ssl_bypassed to true. Continue using standard encryption for outbound!
         LOG_I(">>> Parsing unencrypted packet but KEEPING outbound TLS active! <<<");
         handle_parsed_payload(channel, type, payload_data, payload_len);
     }
