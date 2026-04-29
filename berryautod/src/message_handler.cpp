@@ -14,7 +14,6 @@
 
 using namespace com::andrerinas::headunitrevived::aap::protocol::proto;
 
-// Helper function to print hex dumps for debugging
 void hex_dump(const std::string& prefix, const uint8_t* data, int len) {
     std::cout << prefix << " (" << len << " bytes): ";
     for (int i = 0; i < len; ++i) {
@@ -79,17 +78,35 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
             
             LOG_I(">>> Negotiating Channels... <<<");
             
-            // CHANNEL OPEN REQUESTS MUST BE SENT ON THE TARGET CHANNEL (Not Channel 0)
+            // CHANNEL OPEN REQUESTS MUST BE SENT ON CHANNEL 0
             ChannelOpenRequest vid_req;
             vid_req.set_priority(1);
             vid_req.set_service_id(video_channel_id);
-            send_message(video_channel_id, ControlMsgType::MESSAGE_CHANNEL_OPEN_REQUEST, vid_req);
+            send_message(0, ControlMsgType::MESSAGE_CHANNEL_OPEN_REQUEST, vid_req);
 
             ChannelOpenRequest inp_req;
             inp_req.set_priority(2);
             inp_req.set_service_id(input_channel_id);
-            send_message(input_channel_id, ControlMsgType::MESSAGE_CHANNEL_OPEN_REQUEST, inp_req);
+            send_message(0, ControlMsgType::MESSAGE_CHANNEL_OPEN_REQUEST, inp_req);
         } 
+        else if (type == ControlMsgType::MESSAGE_CHANNEL_OPEN_RESPONSE) {
+            // Because ChannelOpenResponse is returned sequentially on Channel 0 without an ID, we assume order.
+            if (!video_channel_ready) {
+                video_channel_ready = true;
+                std::cout << ">>> Video Channel (" << video_channel_id << ") Opened! Sending Media Setup... <<<" << std::endl;
+                
+                MediaSetupRequest setup; 
+                setup.set_type(MediaCodecType::MEDIA_CODEC_VIDEO_H264_BP);
+                send_message(video_channel_id, MediaMsgType::MEDIA_MESSAGE_SETUP, setup); 
+            } 
+            else if (!input_channel_ready) {
+                input_channel_ready = true;
+                std::cout << ">>> Input Channel (" << input_channel_id << ") Opened! Sending Touch Binding Request... <<<" << std::endl;
+                
+                KeyBindingRequest bind;
+                send_message(input_channel_id, InputMsgType::BINDINGREQUEST, bind);
+            }
+        }
         else if (type == ControlMsgType::MESSAGE_PING_REQUEST) {
             PingRequest req;
             req.ParseFromArray(payload_data, payload_len);
@@ -111,16 +128,7 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
     }
     // ---- DYNAMIC VIDEO CHANNEL ----
     else if (channel == video_channel_id) { 
-        if (type == ControlMsgType::MESSAGE_CHANNEL_OPEN_RESPONSE) {
-            if (!video_channel_ready) {
-                video_channel_ready = true;
-                std::cout << ">>> Video Channel (" << video_channel_id << ") Opened! Sending Media Setup... <<<" << std::endl;
-                MediaSetupRequest setup; 
-                setup.set_type(MediaCodecType::MEDIA_CODEC_VIDEO_H264_BP);
-                send_message(video_channel_id, MediaMsgType::MEDIA_MESSAGE_SETUP, setup); 
-            }
-        }
-        else if (type == MediaMsgType::MEDIA_MESSAGE_CONFIG) { 
+        if (type == MediaMsgType::MEDIA_MESSAGE_CONFIG) { 
             Config config;
             if (config.ParseFromArray(payload_data, payload_len)) {
                 if (config.has_max_unacked()) {
@@ -129,7 +137,7 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                 }
             }
             
-            LOG_I(">>> Video Negotiated. Starting Stream! <<<");
+            LOG_I(">>> Video Configured. Starting Stream! <<<");
             Start start; 
             start.set_session_id(1234);
             start.set_configuration_index(0);
@@ -179,15 +187,7 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
     }
     // ---- DYNAMIC INPUT CHANNEL ----
     else if (channel == input_channel_id) {
-        if (type == ControlMsgType::MESSAGE_CHANNEL_OPEN_RESPONSE) {
-            if (!input_channel_ready) {
-                input_channel_ready = true;
-                std::cout << ">>> Input Channel (" << input_channel_id << ") Opened! Sending Touch Binding Request... <<<" << std::endl;
-                KeyBindingRequest bind;
-                send_message(input_channel_id, InputMsgType::BINDINGREQUEST, bind);
-            }
-        }
-        else if (type == InputMsgType::EVENT) {
+        if (type == InputMsgType::EVENT) {
             InputReport report;
             report.ParseFromArray(payload_data, payload_len);
             handle_touch_event(report);
@@ -294,7 +294,6 @@ void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload
         }
     }
     else {
-        // Fallback for when the head unit completely drops TLS after negotiation
         if (!ssl_bypassed) {
             LOG_I(">>> Received regular message unencrypted! Forcing TLS bypass. <<<");
             ssl_bypassed = true;
