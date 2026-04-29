@@ -145,7 +145,7 @@ void VideoEncoder::cleanup_x11()
     if (img)
     {
         XShmDetach(dpy, &shminfo);
-        XSync(dpy, False); // FIX: Flush the queue before detaching to prevent BadAccess crash
+        XSync(dpy, False);
         XDestroyImage(img);
         shmdt(shminfo.shmaddr);
         shmctl(shminfo.shmid, IPC_RMID, 0);
@@ -160,58 +160,75 @@ void VideoEncoder::cleanup_x11()
 
 bool VideoEncoder::init_encoder()
 {
+    std::vector<std::string> encoder_names;
+
     if (global_video_codec_type == 7) // MEDIA_CODEC_VIDEO_H265
     {
-        codec = avcodec_find_encoder_by_name("hevc_v4l2m2m");
-        if (!codec)
-            codec = avcodec_find_encoder_by_name("libx265");
-        if (!codec)
-            codec = avcodec_find_encoder(AV_CODEC_ID_HEVC);
         std::cout << "[VideoEncoder] Head Unit negotiated HEVC (H.265)." << std::endl;
+        encoder_names = {"hevc_v4l2m2m", "libx265", "hevc"};
     }
-    else // MEDIA_CODEC_VIDEO_H264_BP
+    else // Default H.264
     {
-        codec = avcodec_find_encoder_by_name("h264_v4l2m2m");
-        if (!codec)
-            codec = avcodec_find_encoder_by_name("h264_omx");
-        if (!codec)
-            codec = avcodec_find_encoder_by_name("libx264");
-        if (!codec)
-            codec = avcodec_find_encoder(AV_CODEC_ID_H264);
         std::cout << "[VideoEncoder] Head Unit negotiated H.264." << std::endl;
+        encoder_names = {"h264_v4l2m2m", "h264_omx", "libx264", "h264"};
     }
 
-    if (!codec)
+    // Try encoders sequentially, actually opening them to ensure hardware support exists
+    for (const auto& name : encoder_names)
     {
-        std::cerr << "[VideoEncoder] FATAL: Requested Encoder not found." << std::endl;
+        codec = avcodec_find_encoder_by_name(name.c_str());
+        if (!codec)
+        {
+            if (name == encoder_names.back())
+                codec = avcodec_find_encoder(global_video_codec_type == 7 ? AV_CODEC_ID_HEVC : AV_CODEC_ID_H264);
+            if (!codec)
+                continue;
+        }
+
+        codec_ctx = avcodec_alloc_context3(codec);
+        codec_ctx->width = target_width;
+        codec_ctx->height = target_height;
+        codec_ctx->time_base = {1, 30};
+        codec_ctx->framerate = {30, 1};
+        codec_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
+        codec_ctx->gop_size = 30;
+        codec_ctx->max_b_frames = 0;
+        codec_ctx->bit_rate = 6000000;
+
+        if (std::string(codec->name) == "libx264" || std::string(codec->name) == "libx265")
+        {
+            av_opt_set(codec_ctx->priv_data, "preset", "ultrafast", 0);
+            av_opt_set(codec_ctx->priv_data, "tune", "zerolatency", 0);
+            if (std::string(codec->name) == "libx264")
+                av_opt_set(codec_ctx->priv_data, "profile", "baseline", 0);
+        }
+        else if (std::string(codec->name) == "h264_v4l2m2m" || std::string(codec->name) == "hevc_v4l2m2m")
+        {
+            // Restrict V4L2 DMA buffers to prevent CMA No Space crashes
+            av_opt_set(codec_ctx->priv_data, "num_capture_buffers", "16", 0);
+            av_opt_set(codec_ctx->priv_data, "num_output_buffers", "16", 0);
+        }
+
+        std::cout << "[VideoEncoder] Attempting to open Encoder: " << codec->name << "..." << std::endl;
+        if (avcodec_open2(codec_ctx, codec, NULL) >= 0)
+        {
+            std::cout << "[VideoEncoder] Successfully opened Encoder: " << codec->name << std::endl;
+            break; // Success! It was found AND the hardware accepted it.
+        }
+        else
+        {
+            std::cerr << "[VideoEncoder] Failed to open Encoder: " << codec->name << ", trying fallback..."
+                      << std::endl;
+            avcodec_free_context(&codec_ctx);
+            codec = nullptr;
+        }
+    }
+
+    if (!codec_ctx || !codec)
+    {
+        std::cerr << "[VideoEncoder] FATAL: Could not open any working video encoders for the requested codec."
+                  << std::endl;
         return false;
-    }
-
-    std::cout << "[VideoEncoder] Initializing FFmpeg with Encoder: " << codec->name << std::endl;
-
-    codec_ctx = avcodec_alloc_context3(codec);
-    codec_ctx->width = target_width;
-    codec_ctx->height = target_height;
-
-    codec_ctx->time_base = {1, 30};
-    codec_ctx->framerate = {30, 1};
-    codec_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
-    codec_ctx->gop_size = 30;
-    codec_ctx->max_b_frames = 0;
-    codec_ctx->bit_rate = 6000000;
-
-    if (std::string(codec->name) == "libx264" || std::string(codec->name) == "libx265")
-    {
-        av_opt_set(codec_ctx->priv_data, "preset", "ultrafast", 0);
-        av_opt_set(codec_ctx->priv_data, "tune", "zerolatency", 0);
-        if (std::string(codec->name) == "libx264")
-            av_opt_set(codec_ctx->priv_data, "profile", "baseline", 0);
-    }
-    else if (std::string(codec->name) == "h264_v4l2m2m" || std::string(codec->name) == "hevc_v4l2m2m")
-    {
-        // Limit V4L2 M2M DMA buffer allocations to strictly prevent CMA "No space left on device" crashes
-        av_opt_set(codec_ctx->priv_data, "num_capture_buffers", "16", 0);
-        av_opt_set(codec_ctx->priv_data, "num_output_buffers", "16", 0);
     }
 
     int usable_w = std::max(2, target_width - global_video_margin_w);
@@ -230,9 +247,6 @@ bool VideoEncoder::init_encoder()
     std::cout << "[VideoEncoder] Stretching Capture (" << capture_w << "x" << capture_h
               << ") to fill Usable Area: " << scaled_w << "x" << scaled_h << " (Offset X:" << offset_x
               << " Y:" << offset_y << ")" << std::endl;
-
-    if (avcodec_open2(codec_ctx, codec, NULL) < 0)
-        return false;
 
     frame = av_frame_alloc();
     frame->format = codec_ctx->pix_fmt;

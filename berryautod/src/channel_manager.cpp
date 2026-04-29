@@ -99,6 +99,9 @@ void process_service_discovery_response(uint8_t* payload_data, int payload_len)
                         channel_types[svc_id] = ChannelType::VIDEO;
                         video_channel_id = svc_id;
 
+                        std::cout << "[INFO] Headunit offered " << svc.media_sink_service().video_configs_size()
+                                  << " video configurations:" << std::endl;
+
                         int best_idx = 0;
                         int best_score = -1;
 
@@ -111,45 +114,58 @@ void process_service_discovery_response(uint8_t* payload_data, int payload_len)
                             int res_type = vc.has_codec_resolution() ? vc.codec_resolution() : 1;
 
                             int cfg_w = 800, cfg_h = 480;
+                            std::string res_str = "Unknown";
                             switch (res_type)
                             {
                                 case 1:
                                     cfg_w = 800;
                                     cfg_h = 480;
+                                    res_str = "800x480";
                                     break;
                                 case 2:
                                     cfg_w = 1280;
                                     cfg_h = 720;
+                                    res_str = "1280x720";
                                     break;
                                 case 3:
                                     cfg_w = 1920;
                                     cfg_h = 1080;
+                                    res_str = "1920x1080";
                                     break;
                                 case 4:
                                     cfg_w = 2560;
                                     cfg_h = 1440;
+                                    res_str = "2560x1440";
                                     break;
                                 case 5:
                                     cfg_w = 3840;
                                     cfg_h = 2160;
+                                    res_str = "3840x2160";
                                     break;
                                 case 6:
                                     cfg_w = 720;
                                     cfg_h = 1280;
+                                    res_str = "720x1280";
                                     break;
                                 case 7:
                                     cfg_w = 1080;
                                     cfg_h = 1920;
+                                    res_str = "1080x1920";
                                     break;
                                 case 8:
                                     cfg_w = 1440;
                                     cfg_h = 2560;
+                                    res_str = "1440x2560";
                                     break;
                                 case 9:
                                     cfg_w = 2160;
                                     cfg_h = 3840;
+                                    res_str = "2160x3840";
                                     break;
                             }
+
+                            std::cout << "  - Index " << k << ": Resolution=" << res_str << ", Codec=" << codec
+                                      << std::endl;
 
                             int score = 0;
 
