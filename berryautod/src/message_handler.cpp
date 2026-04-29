@@ -44,28 +44,7 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                 video_channel_ready = true;
                 std::cout << ">>> Sending Media Setup for Video Channel... <<<" << std::endl;
                 MediaSetupRequest setup; 
-                setup.set_type(MediaCodecType::MEDIA_CODEC_VIDEO_H264_BP);
                 send_message(opened_channel, MediaMsgType::MEDIA_MESSAGE_SETUP, setup); 
-
-                std::cout << ">>> Forcing Video Stream Start Request... <<<" << std::endl;
-                Start start; 
-                start.set_session_id(1234);
-                start.set_configuration_index(0);
-                send_message(opened_channel, MediaMsgType::MEDIA_MESSAGE_START, start);
-
-                std::cout << ">>> Requesting Video Focus to lift Splash Screen... <<<" << std::endl;
-                VideoFocusRequestNotification vfr;
-                vfr.set_disp_channel_id(opened_channel);
-                vfr.set_mode(VideoFocusMode::VIDEO_FOCUS_PROJECTED);
-                send_message(opened_channel, MediaMsgType::MEDIA_MESSAGE_VIDEO_FOCUS_REQUEST, vfr);
-
-                std::cout << ">>> Requesting Default Audio Focus... <<<" << std::endl;
-                AudioFocusRequestNotification afr;
-                afr.set_request(AudioFocusRequestNotification::GAIN);
-                send_message(0, ControlMsgType::MESSAGE_AUDIO_FOCUS_REQUEST, afr);
-
-                // [FIX] Removed premature is_video_streaming = true;
-                // Wait for the car to actually grant focus before sending data.
             } 
             else if (ctype == ChannelType::INPUT) {
                 input_channel_ready = true;
@@ -74,15 +53,9 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                 send_message(opened_channel, InputMsgType::BINDINGREQUEST, bind);
             }
             else if (ctype == ChannelType::AUDIO || ctype == ChannelType::MIC) {
-                std::cout << ">>> Sending Dummy Media Setup & Start for Audio/Mic Channel (" << opened_channel << ")... <<<" << std::endl;
+                std::cout << ">>> Sending Media Setup for Audio/Mic Channel (" << opened_channel << ")... <<<" << std::endl;
                 MediaSetupRequest setup; 
-                setup.set_type(MediaCodecType::MEDIA_CODEC_AUDIO_PCM);
                 send_message(opened_channel, MediaMsgType::MEDIA_MESSAGE_SETUP, setup);
-                
-                Start start; 
-                start.set_session_id(5678);
-                start.set_configuration_index(0);
-                send_message(opened_channel, MediaMsgType::MEDIA_MESSAGE_START, start);
             }
             else {
                 std::cout << ">>> Service active. No Media Setup required. <<<" << std::endl;
@@ -96,7 +69,7 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                 req.set_service_id(next_chan);
                 send_message(next_chan, ControlMsgType::MESSAGE_CHANNEL_OPEN_REQUEST, req);
             } else {
-                LOG_I(">>> All channels opened successfully! Waiting for Car to grant Video Focus... <<<");
+                LOG_I(">>> All channels opened successfully! Waiting for Configs... <<<");
             }
         }
         return; 
@@ -224,6 +197,9 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
             is_video_streaming = false;
             video_channel_ready = false;
         }
+        else {
+            // Suppress continuous Ping/Status debug chatter
+        }
     }
     // ---- DYNAMIC MEDIA CHANNELS (Video, Audio, Mic) ----
     else if (ctype == ChannelType::VIDEO || ctype == ChannelType::AUDIO || ctype == ChannelType::MIC) {
@@ -237,9 +213,27 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                         LOG_I(">>> Max Unacked Frames set to " + std::to_string(max_video_unacked));
                     }
                 }
-                LOG_I(">>> Video Configured via Car Response. <<<");
+                LOG_I(">>> Video Configured via Car Response. Requesting Start and Focus... <<<");
+                
+                Start start; 
+                start.set_session_id(1234);
+                start.set_configuration_index(0);
+                send_message(channel, MediaMsgType::MEDIA_MESSAGE_START, start);
+
+                VideoFocusRequestNotification vfr;
+                vfr.set_disp_channel_id(channel);
+                vfr.set_mode(VideoFocusMode::VIDEO_FOCUS_PROJECTED);
+                send_message(channel, MediaMsgType::MEDIA_MESSAGE_VIDEO_FOCUS_REQUEST, vfr);
+
+                AudioFocusRequestNotification afr;
+                afr.set_request(AudioFocusRequestNotification::GAIN);
+                send_message(0, ControlMsgType::MESSAGE_AUDIO_FOCUS_REQUEST, afr);
             } else {
-                LOG_I(">>> Audio/Mic Configured via Car Response. <<<");
+                LOG_I(">>> Audio/Mic Configured via Car Response. Sending Start... <<<");
+                Start start; 
+                start.set_session_id(5678);
+                start.set_configuration_index(0);
+                send_message(channel, MediaMsgType::MEDIA_MESSAGE_START, start);
             }
         }
         else if (type == MediaMsgType::MEDIA_MESSAGE_ACK) {
@@ -254,15 +248,7 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
         else if (type == MediaMsgType::MEDIA_MESSAGE_START) {
             if (ctype == ChannelType::VIDEO) {
                 LOG_I(">>> Video Stream started by car! <<<");
-                is_video_streaming = true;
-                video_unacked_count = 0; 
-                if (video_streamer == nullptr) {
-                    video_streamer = new VideoEncoder(global_video_width, global_video_height, on_video_nal_ready);
-                    video_streamer->start();
-                    std::cout << "[VIDEO] Live Encoding Started (" << global_video_width << "x" << global_video_height << " H.264)." << std::endl;
-                }
-                video_streamer->force_keyframe();
-                inject_cached_video_config();
+                // Fallback start just in case the HU initiates
             }
         }
         else if (type == MediaMsgType::MEDIA_MESSAGE_STOP) {
