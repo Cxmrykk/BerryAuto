@@ -38,18 +38,34 @@ void send_unencrypted(uint8_t channel, uint8_t flags, uint16_t type, const std::
     write_to_usb(out);
 }
 
+void aap_send_raw(const std::vector<uint8_t>& pt, uint8_t target_channel, uint8_t flags, uint32_t unfragmented_size) {
+    std::vector<uint8_t> out;
+    uint16_t len_field = pt.size();
+    out.push_back(target_channel);
+    out.push_back(flags);
+    out.push_back((len_field >> 8) & 0xFF);
+    out.push_back(len_field & 0xFF);
+    
+    if (flags == 0x09) { // First Fragment has 4-byte unfragmented size
+        out.push_back((unfragmented_size >> 24) & 0xFF);
+        out.push_back((unfragmented_size >> 16) & 0xFF);
+        out.push_back((unfragmented_size >> 8) & 0xFF);
+        out.push_back(unfragmented_size & 0xFF);
+    }
+    
+    out.insert(out.end(), pt.begin(), pt.end());
+    write_to_usb(out);
+}
+
 void ssl_write_and_flush_unlocked(const std::vector<uint8_t>& pt, uint8_t target_channel, uint8_t encrypted_flag, uint32_t unfragmented_size) {
     std::vector<std::vector<uint8_t>> out_packets;
     {
         std::lock_guard<std::recursive_mutex> lock(aap_mutex);
         
-        // Push the payload into the SSL engine
         if (!pt.empty()) {
             SSL_write(ssl, pt.data(), pt.size());
         }
 
-        // Immediately drain any produced TLS records while STILL holding aap_mutex
-        // This ensures TLS records match the exact AAP channel/flags they were intended for
         while (true) {
             int pending = BIO_ctrl_pending(wbio);
             if (pending <= 0) break;
@@ -90,20 +106,24 @@ void ssl_write_and_flush_unlocked(const std::vector<uint8_t>& pt, uint8_t target
         }
     }
     
-    // Write out the packets using blocking I/O *WITHOUT* holding the vital AAP mutex
     for (const auto& pkt : out_packets) {
         write_to_usb(pkt);
     }
 }
 
-void send_encrypted(uint8_t channel, uint16_t type, const google::protobuf::Message& proto_msg) {
+// Master wrapper to automatically handle Car TLS Bypasses
+void send_message(uint8_t channel, uint16_t type, const google::protobuf::Message& proto_msg) {
     std::vector<uint8_t> serialized(proto_msg.ByteSizeLong());
     proto_msg.SerializeToArray(serialized.data(), serialized.size());
 
-    std::vector<uint8_t> plaintext;
-    plaintext.push_back((type >> 8) & 0xFF);
-    plaintext.push_back(type & 0xFF);
-    plaintext.insert(plaintext.end(), serialized.begin(), serialized.end());
+    if (ssl_bypassed) {
+        send_unencrypted(channel, 0x03, type, serialized);
+    } else {
+        std::vector<uint8_t> plaintext;
+        plaintext.push_back((type >> 8) & 0xFF);
+        plaintext.push_back(type & 0xFF);
+        plaintext.insert(plaintext.end(), serialized.begin(), serialized.end());
 
-    ssl_write_and_flush_unlocked(plaintext, channel, 0x0B, 0);
+        ssl_write_and_flush_unlocked(plaintext, channel, 0x0B, 0);
+    }
 }

@@ -19,17 +19,27 @@ void send_video_frame_internal(const std::vector<uint8_t>& nal_data, uint64_t ti
     header.push_back(0x00);
     for(int i=7; i>=0; --i) { header.push_back((timestamp >> (i*8)) & 0xFF); }
     
-    uint32_t total_unencrypted_size = header.size() + nal_data.size();
+    uint32_t total_size = header.size() + nal_data.size();
     
-    if (total_unencrypted_size <= MAX_CHUNK_SIZE) {
+    if (total_size <= MAX_CHUNK_SIZE) {
         std::vector<uint8_t> pt = header;
         pt.insert(pt.end(), nal_data.begin(), nal_data.end());
-        ssl_write_and_flush_unlocked(pt, video_channel_id, 0x0B, 0);
+        
+        if (ssl_bypassed) {
+            aap_send_raw(pt, video_channel_id, 0x0B, 0);
+        } else {
+            ssl_write_and_flush_unlocked(pt, video_channel_id, 0x0B, 0);
+        }
     } else {
         size_t data_in_first = MAX_CHUNK_SIZE - header.size();
         std::vector<uint8_t> pt = header;
         pt.insert(pt.end(), nal_data.begin(), nal_data.begin() + data_in_first);
-        ssl_write_and_flush_unlocked(pt, video_channel_id, 0x09, total_unencrypted_size); 
+        
+        if (ssl_bypassed) {
+            aap_send_raw(pt, video_channel_id, 0x09, total_size);
+        } else {
+            ssl_write_and_flush_unlocked(pt, video_channel_id, 0x09, total_size); 
+        }
         
         size_t offset = data_in_first;
         while (offset < nal_data.size()) {
@@ -38,7 +48,12 @@ void send_video_frame_internal(const std::vector<uint8_t>& nal_data, uint64_t ti
             std::vector<uint8_t> pt_chunk(nal_data.begin() + offset, nal_data.begin() + offset + chunk_size);
             
             uint8_t flag = (offset + chunk_size >= nal_data.size()) ? 0x0A : 0x08; 
-            ssl_write_and_flush_unlocked(pt_chunk, video_channel_id, flag, 0);
+            
+            if (ssl_bypassed) {
+                aap_send_raw(pt_chunk, video_channel_id, flag, 0);
+            } else {
+                ssl_write_and_flush_unlocked(pt_chunk, video_channel_id, flag, 0);
+            }
             offset += chunk_size;
         }
     }
@@ -81,7 +96,8 @@ void extract_and_cache_sps_pps(const std::vector<uint8_t>& frame) {
 }
 
 void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp) {
-    if (!is_tls_connected || !video_channel_ready || !is_video_streaming.load()) {
+    // Treat the stream as ready if we are on a valid bypass route or a valid TLS route
+    if (!(is_tls_connected || ssl_bypassed) || !video_channel_ready || !is_video_streaming.load()) {
         return; 
     }
 

@@ -29,6 +29,7 @@ SSL_CTX *ssl_ctx;
 SSL *ssl;
 BIO *rbio, *wbio;
 bool is_tls_connected = false;
+bool ssl_bypassed = false;
 VideoEncoder* video_streamer = nullptr;
 bool video_channel_ready = false;
 bool input_channel_ready = false;
@@ -88,6 +89,7 @@ void ep0_thread(int ep0) {
                 LOG_I("[USB] Disabled/Unbound by Host (Port Reset/Suspend)");
                 std::lock_guard<std::recursive_mutex> lock(aap_mutex);
                 is_tls_connected = false;
+                ssl_bypassed = false;
                 is_video_streaming = false;
                 video_channel_ready = false;
                 input_channel_ready = false;

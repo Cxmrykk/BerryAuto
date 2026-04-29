@@ -60,7 +60,6 @@ void handle_decrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload_d
                             global_touch_height = global_video_height;
                         }
                     }
-                    // Bluetooth Connection Parsing
                     if (svc.has_bluetooth_service()) {
                         std::cout << "[INFO] Headunit expects Bluetooth pairing to MAC: " 
                                   << svc.bluetooth_service().car_address() << std::endl;
@@ -74,14 +73,14 @@ void handle_decrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload_d
                 ChannelOpenRequest vid_req;
                 vid_req.set_priority(1);
                 vid_req.set_service_id(video_channel_id);
-                send_encrypted(video_channel_id, ControlMsgType::MESSAGE_CHANNEL_OPEN_REQUEST, vid_req);
+                send_message(video_channel_id, ControlMsgType::MESSAGE_CHANNEL_OPEN_REQUEST, vid_req);
             }
 
             if (input_channel_id != -1) {
                 ChannelOpenRequest inp_req;
                 inp_req.set_priority(2);
                 inp_req.set_service_id(input_channel_id);
-                send_encrypted(input_channel_id, ControlMsgType::MESSAGE_CHANNEL_OPEN_REQUEST, inp_req);
+                send_message(input_channel_id, ControlMsgType::MESSAGE_CHANNEL_OPEN_REQUEST, inp_req);
             }
         } 
         else if (type == ControlMsgType::MESSAGE_PING_REQUEST) {
@@ -89,14 +88,14 @@ void handle_decrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload_d
             req.ParseFromArray(payload_data, payload_len);
             PingResponse resp;
             resp.set_timestamp(req.timestamp());
-            send_encrypted(0, ControlMsgType::MESSAGE_PING_RESPONSE, resp);
+            send_message(0, ControlMsgType::MESSAGE_PING_RESPONSE, resp);
         }
         else if (type == ControlMsgType::MESSAGE_BYEBYE_REQUEST) {
             is_video_streaming = false;
             video_channel_ready = false;
             input_channel_ready = false;
             ByeByeResponse resp;
-            send_encrypted(0, ControlMsgType::MESSAGE_BYEBYE_RESPONSE, resp);
+            send_message(0, ControlMsgType::MESSAGE_BYEBYE_RESPONSE, resp);
         }
         else if (type == ControlMsgType::MESSAGE_CHANNEL_CLOSE_NOTIFICATION) {
             is_video_streaming = false;
@@ -111,7 +110,7 @@ void handle_decrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload_d
                 LOG_I(">>> Video Channel Opened! Sending Media Setup... <<<");
                 MediaSetupRequest setup; 
                 setup.set_type(MediaCodecType::MEDIA_CODEC_VIDEO_H264_BP);
-                send_encrypted(video_channel_id, MediaMsgType::MEDIA_MESSAGE_SETUP, setup); 
+                send_message(video_channel_id, MediaMsgType::MEDIA_MESSAGE_SETUP, setup); 
             } 
         }
         else if (type == MediaMsgType::MEDIA_MESSAGE_CONFIG) { 
@@ -127,7 +126,7 @@ void handle_decrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload_d
             Start start; 
             start.set_session_id(1234);
             start.set_configuration_index(0);
-            send_encrypted(video_channel_id, MediaMsgType::MEDIA_MESSAGE_START, start);
+            send_message(video_channel_id, MediaMsgType::MEDIA_MESSAGE_START, start);
 
             is_video_streaming = true;
             video_unacked_count = 0; 
@@ -178,7 +177,7 @@ void handle_decrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload_d
                 input_channel_ready = true;
                 LOG_I(">>> Input Channel Opened! Sending Touch Binding Request... <<<");
                 KeyBindingRequest bind;
-                send_encrypted(input_channel_id, InputMsgType::BINDINGREQUEST, bind);
+                send_message(input_channel_id, InputMsgType::BINDINGREQUEST, bind);
             }
         }
         else if (type == InputMsgType::EVENT) {
@@ -194,7 +193,6 @@ void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload
         uint16_t major = 1;
         uint16_t minor = 6;
         
-        // Match the Head Unit's requested AAP protocol version
         if (payload_len >= 4) {
             major = (payload_data[0] << 8) | payload_data[1];
             minor = (payload_data[2] << 8) | payload_data[3];
@@ -205,8 +203,8 @@ void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload
         
         {
             std::lock_guard<std::recursive_mutex> lock(aap_mutex);
-
             is_tls_connected = false;
+            ssl_bypassed = false;
             video_channel_ready = false;
             input_channel_ready = false;
             is_video_streaming = false;
@@ -219,7 +217,6 @@ void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload
             (void)BIO_reset(wbio);
         }
 
-        // CORRECT 6-BYTE VERSION RESPONSE (Major, Minor, Status=0)
         std::vector<uint8_t> resp_payload = {
             (uint8_t)(major >> 8), (uint8_t)(major & 0xFF),
             (uint8_t)(minor >> 8), (uint8_t)(minor & 0xFF),
@@ -251,10 +248,17 @@ void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload
         }
     }
     else if (channel == 0 && type == ControlMsgType::MESSAGE_AUTH_COMPLETE) {
+        if (!is_tls_connected) {
+            ssl_bypassed = true;
+            LOG_I(">>> Head Unit bypassed TLS! Operating in plaintext mode. <<<");
+        }
+        
         LOG_I(">>> Authentication Passed. Sending Service Discovery Request... <<<");
         ServiceDiscoveryRequest sdp_req;
         sdp_req.set_phone_name("BerryAuto Phone");
         sdp_req.set_phone_brand("Raspberry Pi");
-        send_encrypted(0, ControlMsgType::MESSAGE_SERVICE_DISCOVERY_REQUEST, sdp_req);
+        
+        // Since we are inside handle_unencrypted_payload, using send_message handles TLS or Plaintext automatically
+        send_message(0, ControlMsgType::MESSAGE_SERVICE_DISCOVERY_REQUEST, sdp_req);
     }
 }
