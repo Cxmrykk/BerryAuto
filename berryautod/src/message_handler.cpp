@@ -98,7 +98,7 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
 
                 Start start;
                 start.set_session_id(1234);
-                start.set_configuration_index(0);
+                start.set_configuration_index(global_video_config_index);
                 send_message(channel, MediaMsgType::MEDIA_MESSAGE_START, start);
 
                 VideoFocusRequestNotification vfr;
@@ -176,7 +176,7 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                                 new VideoEncoder(global_video_width, global_video_height, on_video_nal_ready);
                             video_streamer->start();
                             std::cout << "[VIDEO] Live Encoding Started (" << global_video_width << "x"
-                                      << global_video_height << " H.264)." << std::endl;
+                                      << global_video_height << ")." << std::endl;
                         }
                         video_streamer->force_keyframe();
                         inject_cached_video_config();

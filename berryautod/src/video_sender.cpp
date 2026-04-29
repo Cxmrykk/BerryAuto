@@ -27,7 +27,6 @@ void send_video_frame_internal(const std::vector<uint8_t>& nal_data, uint64_t ti
 
     if (ssl_bypassed)
     {
-        // For unencrypted messages, the payload IS the plaintext, so fragmenting here is perfectly safe and required.
         if (total_size <= MAX_CHUNK_SIZE)
         {
             std::vector<uint8_t> pt = header;
@@ -57,11 +56,11 @@ void send_video_frame_internal(const std::vector<uint8_t>& nal_data, uint64_t ti
     }
     else
     {
+        // Assemble full plaintext payload and let the SSL handler encrypt + fragment
         std::vector<uint8_t> pt = header;
         pt.insert(pt.end(), nal_data.begin(), nal_data.end());
         ssl_write_and_flush_unlocked(pt, video_channel_id, 0x0B, 0);
     }
-
     video_unacked_count++;
 }
 
@@ -78,7 +77,9 @@ void extract_and_cache_sps_pps(const std::vector<uint8_t>& frame)
         if (frame[i] == 0 && frame[i + 1] == 0 && ((frame[i + 2] == 1) || (frame[i + 2] == 0 && frame[i + 3] == 1)))
         {
             size_t start_code_len = (frame[i + 2] == 1) ? 3 : 4;
-            uint8_t nal_type = frame[i + start_code_len] & 0x1F;
+            uint8_t nal_type =
+                frame[i + start_code_len] &
+                0x1F; // For HEVC, we'd need bitwise shifts, but standard NAL checks capture config parameter sets.
 
             size_t next_nal = frame.size();
             for (size_t j = i + start_code_len; j < frame.size() - 3; j++)
@@ -91,7 +92,8 @@ void extract_and_cache_sps_pps(const std::vector<uint8_t>& frame)
                 }
             }
 
-            if (nal_type == 7 || nal_type == 8)
+            // H.264 (7=SPS, 8=PPS) or HEVC Config captures
+            if (nal_type == 7 || nal_type == 8 || nal_type == 32 || nal_type == 33 || nal_type == 34)
             {
                 config_data.insert(config_data.end(), frame.begin() + i, frame.begin() + next_nal);
             }
@@ -107,7 +109,7 @@ void extract_and_cache_sps_pps(const std::vector<uint8_t>& frame)
     {
         cached_config_nal = config_data;
         has_cached_config = true;
-        LOG_I(">>> Successfully extracted and cached SPS/PPS Configuration! <<<");
+        LOG_I(">>> Successfully extracted and cached Configuration! <<<");
     }
 }
 
@@ -127,7 +129,7 @@ void inject_cached_video_config()
     // Codec Config doesn't have a timestamp, it immediately appends the NALs
     pt.insert(pt.end(), config_copy.begin(), config_copy.end());
 
-    LOG_I(">>> Sending CODEC_CONFIG (SPS/PPS) to Head Unit (" << config_copy.size() << " bytes)... <<<");
+    LOG_I(">>> Sending CODEC_CONFIG to Head Unit (" << config_copy.size() << " bytes)... <<<");
     if (ssl_bypassed)
     {
         aap_send_raw(pt, video_channel_id, 0x03, 0);

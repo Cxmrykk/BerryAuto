@@ -100,7 +100,40 @@ void process_service_discovery_response(uint8_t* payload_data, int payload_len)
                         channel_types[svc_id] = ChannelType::VIDEO;
                         video_channel_id = svc_id;
 
-                        const auto& video_config = svc.media_sink_service().video_configs(0);
+                        int best_idx = 0;
+                        int best_score = -1;
+
+                        // Intelligently score and find the best configuration
+                        for (int k = 0; k < svc.media_sink_service().video_configs_size(); k++)
+                        {
+                            const auto& vc = svc.media_sink_service().video_configs(k);
+                            int codec = vc.has_video_codec_type() ? vc.video_codec_type()
+                                                                  : MediaCodecType::MEDIA_CODEC_VIDEO_H264_BP;
+                            int res_type = vc.has_codec_resolution() ? vc.codec_resolution() : 1;
+
+                            int score = 0;
+                            if (codec == MediaCodecType::MEDIA_CODEC_VIDEO_H264_BP)
+                                score += 1000; // Prefer H.264 natively for Pi hardware
+                            else if (codec == MediaCodecType::MEDIA_CODEC_VIDEO_H265)
+                                score += 800; // Support HEVC fallback
+
+                            if (res_type == 2)
+                                score += 500; // 1st Choice: 720p (Matches Pi Desktop well)
+                            else if (res_type == 3)
+                                score += 300; // 2nd Choice: 1080p
+                            else if (res_type == 1)
+                                score += 100; // 3rd Choice: 480p
+
+                            if (score > best_score)
+                            {
+                                best_score = score;
+                                best_idx = k;
+                            }
+                        }
+
+                        global_video_config_index = best_idx;
+                        const auto& video_config = svc.media_sink_service().video_configs(best_idx);
+
                         int res_type = video_config.has_codec_resolution() ? video_config.codec_resolution() : 1;
                         switch (res_type)
                         {
@@ -154,10 +187,11 @@ void process_service_discovery_response(uint8_t* payload_data, int payload_len)
                         int codec = video_config.has_video_codec_type() ? video_config.video_codec_type()
                                                                         : MediaCodecType::MEDIA_CODEC_VIDEO_H264_BP;
                         channel_codecs[svc_id] = codec;
+                        global_video_codec_type = codec;
 
                         std::cout << "[INFO] Headunit negotiated VIDEO (Channel " << svc_id << ") at "
-                                  << global_video_width << "x" << global_video_height << " (Codec " << codec << ")"
-                                  << std::endl;
+                                  << global_video_width << "x" << global_video_height << " (Codec " << codec
+                                  << ", Index " << best_idx << ")" << std::endl;
                     }
                     else
                     {

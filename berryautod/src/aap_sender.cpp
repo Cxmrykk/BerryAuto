@@ -53,7 +53,7 @@ void aap_send_raw(const std::vector<uint8_t>& pt, uint8_t target_channel, uint8_
     out.push_back((len_field >> 8) & 0xFF);
     out.push_back(len_field & 0xFF);
 
-    // FIX: Check bottom 2 bits to cover BOTH Encrypted (0x09, 0x0D) and Unencrypted (0x01, 0x05) first fragments
+    // Check bottom 2 bits to cover BOTH Encrypted (0x09) and Unencrypted (0x01) first fragments
     if ((flags & 0x03) == 0x01)
     {
         out.push_back((unfragmented_size >> 24) & 0xFF);
@@ -113,7 +113,7 @@ void ssl_write_and_flush_unlocked(const std::vector<uint8_t>& pt, uint8_t target
                 }
                 else
                 {
-                    // FIX: Automatically fragment the resulting Ciphertext payload
+                    // Automatically fragment the resulting Ciphertext payload
                     size_t offset = 0;
                     uint32_t total_size = ciphertext.size();
 
@@ -178,7 +178,7 @@ void send_message(uint8_t channel, uint16_t type, const google::protobuf::Messag
     std::cout << "[DEBUG] SEND Channel: " << (int)channel << " Type: " << type << " Size: " << serialized.size()
               << std::endl;
 
-    // FIX: Only types 1-26 are generic control messages requiring the 0x04 control bit on non-zero channels.
+    // Only types 1-26 are generic control messages requiring the 0x04 control bit on non-zero channels.
     // Media and Sensor setup messages (>32768) are channel-specific and MUST NOT have the control flag.
     bool is_control = (type >= 1 && type <= 26);
 

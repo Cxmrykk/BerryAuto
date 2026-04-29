@@ -41,6 +41,8 @@ int input_channel_id = 3;
 std::queue<int> pending_channel_opens;
 std::map<int, ChannelType> channel_types;
 
+int global_video_config_index = 0;
+int global_video_codec_type = 3; // Defaults to MEDIA_CODEC_VIDEO_H264_BP
 int global_video_width = 800;
 int global_video_height = 480;
 int global_video_margin_w = 0;
