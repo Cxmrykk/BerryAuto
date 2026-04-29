@@ -26,46 +26,52 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
     // ---- CHANNEL 0 (Control Channel) ----
     if (channel == 0) {
         if (type == ControlMsgType::MESSAGE_SERVICE_DISCOVERY_RESPONSE) {
-            LOG_I(">>> Service Discovery Response received. Parsing Display Specs... <<<");
+            LOG_I(">>> Service Discovery Response received. Parsing Services dynamically... <<<");
 
             ServiceDiscoveryResponse sdp_resp;
             if (sdp_resp.ParseFromArray(payload_data, payload_len)) {
-                // Clear any existing sequential backlog
+                
+                // Clear any existing sequential backlog and map
                 while (!pending_channel_opens.empty()) pending_channel_opens.pop();
+                channel_types.clear();
 
                 for (int i = 0; i < sdp_resp.services_size(); i++) {
                     const auto& svc = sdp_resp.services(i);
                     int svc_id = svc.has_id() ? svc.id() : -1;
                     
                     if (svc_id != -1) {
-                        // Video Sink Parsing
-                        if (svc.has_media_sink_service() && svc.media_sink_service().video_configs_size() > 0) {
-                            video_channel_id = svc_id;
-                            const auto& video_config = svc.media_sink_service().video_configs(0);
-                            int res_type = video_config.has_codec_resolution() ? video_config.codec_resolution() : 1;
-                            
-                            switch (res_type) {
-                                case 1: global_video_width = 800;  global_video_height = 480;  break;
-                                case 2: global_video_width = 1280; global_video_height = 720;  break;
-                                case 3: global_video_width = 1920; global_video_height = 1080; break;
-                                case 4: global_video_width = 2560; global_video_height = 1440; break;
-                                case 5: global_video_width = 3840; global_video_height = 2160; break;
-                                case 6: global_video_width = 720;  global_video_height = 1280; break;
-                                case 7: global_video_width = 1080; global_video_height = 1920; break;
-                                case 8: global_video_width = 1440; global_video_height = 2560; break;
-                                case 9: global_video_width = 2160; global_video_height = 3840; break;
-                                default: global_video_width = 800; global_video_height = 480;  break;
-                            }
+                        if (svc.has_media_sink_service()) {
+                            if (svc.media_sink_service().video_configs_size() > 0) {
+                                channel_types[svc_id] = ChannelType::VIDEO;
+                                video_channel_id = svc_id;
+                                
+                                const auto& video_config = svc.media_sink_service().video_configs(0);
+                                int res_type = video_config.has_codec_resolution() ? video_config.codec_resolution() : 1;
+                                switch (res_type) {
+                                    case 1: global_video_width = 800;  global_video_height = 480;  break;
+                                    case 2: global_video_width = 1280; global_video_height = 720;  break;
+                                    case 3: global_video_width = 1920; global_video_height = 1080; break;
+                                    case 4: global_video_width = 2560; global_video_height = 1440; break;
+                                    case 5: global_video_width = 3840; global_video_height = 2160; break;
+                                    case 6: global_video_width = 720;  global_video_height = 1280; break;
+                                    case 7: global_video_width = 1080; global_video_height = 1920; break;
+                                    case 8: global_video_width = 1440; global_video_height = 2560; break;
+                                    case 9: global_video_width = 2160; global_video_height = 3840; break;
+                                    default: global_video_width = 800; global_video_height = 480;  break;
+                                }
 
-                            if (video_config.has_margin_width()) global_video_margin_w = video_config.margin_width();
-                            if (video_config.has_margin_height()) global_video_margin_h = video_config.margin_height();
-                            
-                            std::cout << "[INFO] Headunit negotiated resolution: " 
-                                      << global_video_width << "x" << global_video_height 
-                                      << " | Margins (W: " << global_video_margin_w << " H: " << global_video_margin_h << ")" << std::endl;
-                        }
-                        // Input / Touch Parsing
+                                if (video_config.has_margin_width()) global_video_margin_w = video_config.margin_width();
+                                if (video_config.has_margin_height()) global_video_margin_h = video_config.margin_height();
+                                
+                                std::cout << "[INFO] Headunit negotiated VIDEO (Channel " << svc_id << ") at " 
+                                          << global_video_width << "x" << global_video_height << std::endl;
+                            } else {
+                                channel_types[svc_id] = ChannelType::AUDIO;
+                                std::cout << "[INFO] Headunit advertised AUDIO (Channel " << svc_id << ")" << std::endl;
+                            }
+                        } 
                         else if (svc.has_input_source_service()) {
+                            channel_types[svc_id] = ChannelType::INPUT;
                             input_channel_id = svc_id;
                             if (svc.input_source_service().has_touchscreen()) {
                                 global_touch_width = svc.input_source_service().touchscreen().width();
@@ -74,21 +80,39 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                                 global_touch_width = global_video_width;
                                 global_touch_height = global_video_height;
                             }
+                            std::cout << "[INFO] Headunit negotiated INPUT (Channel " << svc_id << ")" << std::endl;
+                        }
+                        else if (svc.has_media_source_service()) {
+                            channel_types[svc_id] = ChannelType::MIC;
+                            std::cout << "[INFO] Headunit advertised MIC (Channel " << svc_id << ")" << std::endl;
+                        }
+                        else if (svc.has_sensor_source_service()) {
+                            channel_types[svc_id] = ChannelType::SENSOR;
+                            std::cout << "[INFO] Headunit advertised SENSORS (Channel " << svc_id << ")" << std::endl;
+                        }
+                        else if (svc.has_navigation_status_service()) {
+                            channel_types[svc_id] = ChannelType::NAVIGATION;
+                            std::cout << "[INFO] Headunit advertised NAVIGATION (Channel " << svc_id << ")" << std::endl;
+                        }
+                        else if (svc.has_bluetooth_service()) {
+                            channel_types[svc_id] = ChannelType::BLUETOOTH;
+                            std::cout << "[INFO] Headunit advertised BLUETOOTH (Channel " << svc_id << ")" << std::endl;
+                        }
+                        else {
+                            channel_types[svc_id] = ChannelType::UNKNOWN;
+                            std::cout << "[INFO] Headunit advertised UNKNOWN SERVICE (Channel " << svc_id << ")" << std::endl;
                         }
 
-                        // We queue EVERY service ID to be sequentially opened (required by real HUs)
+                        // Queue ALL valid services to be opened sequentially
                         pending_channel_opens.push(svc_id);
                     }
                 }
             } else {
-                LOG_E(">>> [CRITICAL] ParseFromArray FAILED for ServiceDiscoveryResponse! Using default channels... <<<");
-                pending_channel_opens.push(2);
-                pending_channel_opens.push(3);
+                LOG_E(">>> [CRITICAL] ParseFromArray FAILED for ServiceDiscoveryResponse! <<<");
             }
             
             LOG_I(">>> Negotiating Channels Sequentially... <<<");
             
-            // Pop the very first channel out and initiate the sequence
             if (!pending_channel_opens.empty()) {
                 int first_chan = pending_channel_opens.front();
                 ChannelOpenRequest req;
@@ -103,33 +127,34 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                 pending_channel_opens.pop();
 
                 std::cout << ">>> Channel (" << opened_channel << ") Opened! <<<" << std::endl;
+                
+                ChannelType ctype = channel_types[opened_channel];
 
-                if (opened_channel == video_channel_id) {
+                if (ctype == ChannelType::VIDEO) {
                     video_channel_ready = true;
                     std::cout << ">>> Sending Media Setup for Video Channel... <<<" << std::endl;
                     MediaSetupRequest setup; 
                     setup.set_type(MediaCodecType::MEDIA_CODEC_VIDEO_H264_BP);
-                    send_message(video_channel_id, MediaMsgType::MEDIA_MESSAGE_SETUP, setup); 
+                    send_message(opened_channel, MediaMsgType::MEDIA_MESSAGE_SETUP, setup); 
                 } 
-                else if (opened_channel == input_channel_id) {
+                else if (ctype == ChannelType::INPUT) {
                     input_channel_ready = true;
                     std::cout << ">>> Sending Touch Binding Request... <<<" << std::endl;
                     KeyBindingRequest bind;
-                    send_message(input_channel_id, InputMsgType::BINDINGREQUEST, bind);
+                    send_message(opened_channel, InputMsgType::BINDINGREQUEST, bind);
                 }
-                else if (opened_channel == 1 || opened_channel == 8 || opened_channel >= 9) {
-                    // Sensors, Bluetooth, Navigation, Status etc. DO NOT receive MediaSetupRequest!
-                    std::cout << ">>> Generic Channel " << opened_channel << " active. Waiting for Head Unit commands... <<<" << std::endl;
-                }
-                else {
-                    // Audio / Mic channels (Usually 4, 5, 6, 7) need a Media Setup Request to proceed
-                    std::cout << ">>> Sending Dummy Media Setup for Audio Channel " << opened_channel << "... <<<" << std::endl;
+                else if (ctype == ChannelType::AUDIO || ctype == ChannelType::MIC) {
+                    std::cout << ">>> Sending Dummy Media Setup for Audio/Mic Channel... <<<" << std::endl;
                     MediaSetupRequest setup; 
                     setup.set_type(MediaCodecType::MEDIA_CODEC_AUDIO_PCM);
                     send_message(opened_channel, MediaMsgType::MEDIA_MESSAGE_SETUP, setup);
                 }
+                else {
+                    // Sensors, Nav, BT, Status do not require media setup
+                    std::cout << ">>> Service active. No Media Setup required. <<<" << std::endl;
+                }
 
-                // If more channels need opening, trigger the next request sequentially.
+                // If more channels need opening, trigger the next request.
                 if (!pending_channel_opens.empty()) {
                     int next_chan = pending_channel_opens.front();
                     ChannelOpenRequest req;
@@ -140,6 +165,12 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                     LOG_I(">>> All channels opened successfully! <<<");
                 }
             }
+        }
+        else if (type == ControlMsgType::MESSAGE_AUDIO_FOCUS_REQUEST) {
+            LOG_I(">>> Head Unit requested Audio Focus. Yielding control automatically. <<<");
+            AudioFocusNotification afn;
+            afn.set_focus_state(AudioFocusNotification::STATE_GAIN);
+            send_message(0, ControlMsgType::MESSAGE_AUDIO_FOCUS_NOTIFICATION, afn);
         }
         else if (type == ControlMsgType::MESSAGE_PING_REQUEST) {
             PingRequest req;
@@ -160,93 +191,111 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
             video_channel_ready = false;
         }
     }
-    // ---- DYNAMIC VIDEO CHANNEL ----
-    else if (channel == video_channel_id) { 
+    // ---- DYNAMIC MEDIA CHANNELS (Video, Audio, Mic) ----
+    else if (channel_types[channel] == ChannelType::VIDEO || 
+             channel_types[channel] == ChannelType::AUDIO || 
+             channel_types[channel] == ChannelType::MIC) {
+                 
         if (type == MediaMsgType::MEDIA_MESSAGE_CONFIG) { 
-            Config config;
-            if (config.ParseFromArray(payload_data, payload_len)) {
-                if (config.has_max_unacked()) {
-                    max_video_unacked = config.max_unacked();
-                    LOG_I(">>> Max Unacked Frames set to " + std::to_string(max_video_unacked));
+            if (channel_types[channel] == ChannelType::VIDEO) {
+                Config config;
+                if (config.ParseFromArray(payload_data, payload_len)) {
+                    if (config.has_max_unacked()) {
+                        max_video_unacked = config.max_unacked();
+                        LOG_I(">>> Max Unacked Frames set to " + std::to_string(max_video_unacked));
+                    }
                 }
+                
+                LOG_I(">>> Video Configured. Starting Stream! <<<");
+                Start start; 
+                start.set_session_id(1234);
+                start.set_configuration_index(0);
+                send_message(channel, MediaMsgType::MEDIA_MESSAGE_START, start);
+
+                LOG_I(">>> Requesting Video Focus to lift Splash Screen... <<<");
+                VideoFocusNotification vfn;
+                vfn.set_mode(VideoFocusMode::VIDEO_FOCUS_PROJECTED);
+                vfn.set_unsolicited(true);
+                send_message(channel, MediaMsgType::MEDIA_MESSAGE_VIDEO_FOCUS_NOTIFICATION, vfn);
+
+                LOG_I(">>> Requesting Default Audio Focus... <<<");
+                AudioFocusNotification afn;
+                afn.set_focus_state(AudioFocusNotification::STATE_GAIN);
+                afn.set_unsolicited(true);
+                send_message(0, ControlMsgType::MESSAGE_AUDIO_FOCUS_NOTIFICATION, afn);
+
+                is_video_streaming = true;
+                video_unacked_count = 0; 
+                
+                if (video_streamer == nullptr) {
+                    video_streamer = new VideoEncoder(global_video_width, global_video_height, on_video_nal_ready);
+                    video_streamer->start();
+                    std::cout << "[VIDEO] Live Encoding Started (" << global_video_width << "x" << global_video_height << " H.264)." << std::endl;
+                }
+
+                video_streamer->force_keyframe();
+                inject_cached_video_config();
+            } else {
+                // Audio / Mic config received. Send Start to prevent Head Unit from stalling.
+                std::cout << ">>> Audio/Mic Channel (" << (int)channel << ") Configured. Sending Dummy Start! <<<" << std::endl;
+                Start start; 
+                start.set_session_id(5678);
+                start.set_configuration_index(0);
+                send_message(channel, MediaMsgType::MEDIA_MESSAGE_START, start);
             }
-            
-            LOG_I(">>> Video Configured. Starting Stream! <<<");
-            Start start; 
-            start.set_session_id(1234);
-            start.set_configuration_index(0);
-            send_message(video_channel_id, MediaMsgType::MEDIA_MESSAGE_START, start);
-
-            // CRITICAL: Inform the Head Unit that we are seizing Video and Audio focus to lift the splash screen
-            LOG_I(">>> Asserting Video Focus... <<<");
-            VideoFocusNotification vfn;
-            vfn.set_mode(VideoFocusMode::VIDEO_FOCUS_PROJECTED);
-            vfn.set_unsolicited(true);
-            send_message(video_channel_id, MediaMsgType::MEDIA_MESSAGE_VIDEO_FOCUS_NOTIFICATION, vfn);
-
-            LOG_I(">>> Asserting Default Audio Focus... <<<");
-            AudioFocusNotification afn;
-            afn.set_focus_state(AudioFocusNotification::STATE_GAIN);
-            afn.set_unsolicited(true);
-            send_message(0, ControlMsgType::MESSAGE_AUDIO_FOCUS_NOTIFICATION, afn);
-
-            is_video_streaming = true;
-            video_unacked_count = 0; 
-            
-            if (video_streamer == nullptr) {
-                video_streamer = new VideoEncoder(global_video_width, global_video_height, on_video_nal_ready);
-                video_streamer->start();
-                std::cout << "[VIDEO] Live Encoding Started (" << global_video_width << "x" << global_video_height << " H.264)." << std::endl;
-            }
-
-            video_streamer->force_keyframe();
-            inject_cached_video_config();
         }
         else if (type == MediaMsgType::MEDIA_MESSAGE_ACK) {
-            Ack ack_msg;
-            if (ack_msg.ParseFromArray(payload_data, payload_len)) {
-                if (ack_msg.has_ack()) video_unacked_count -= ack_msg.ack();
-                if (video_unacked_count.load() < 0) video_unacked_count = 0;
+            if (channel_types[channel] == ChannelType::VIDEO) {
+                Ack ack_msg;
+                if (ack_msg.ParseFromArray(payload_data, payload_len)) {
+                    if (ack_msg.has_ack()) video_unacked_count -= ack_msg.ack();
+                    if (video_unacked_count.load() < 0) video_unacked_count = 0;
+                }
             }
         }
         else if (type == MediaMsgType::MEDIA_MESSAGE_START) {
-            is_video_streaming = true;
-            video_unacked_count = 0;
-            inject_cached_video_config();
-            if (video_streamer) video_streamer->force_keyframe();
+            if (channel_types[channel] == ChannelType::VIDEO) {
+                is_video_streaming = true;
+                video_unacked_count = 0;
+                inject_cached_video_config();
+                if (video_streamer) video_streamer->force_keyframe();
+            }
         }
         else if (type == MediaMsgType::MEDIA_MESSAGE_STOP) {
-            is_video_streaming = false;
+            if (channel_types[channel] == ChannelType::VIDEO) {
+                is_video_streaming = false;
+            }
+        }
+        else if (type == MediaMsgType::MEDIA_MESSAGE_VIDEO_FOCUS_REQUEST) {
+            if (channel_types[channel] == ChannelType::VIDEO) {
+                LOG_I(">>> Head Unit requested Video Focus. Yielding control automatically. <<<");
+                VideoFocusNotification vfn;
+                vfn.set_mode(VideoFocusMode::VIDEO_FOCUS_PROJECTED);
+                send_message(channel, MediaMsgType::MEDIA_MESSAGE_VIDEO_FOCUS_NOTIFICATION, vfn);
+            }
         }
         else if (type == MediaMsgType::MEDIA_MESSAGE_VIDEO_FOCUS_NOTIFICATION) {
-            VideoFocusNotification focus_notif;
-            if (focus_notif.ParseFromArray(payload_data, payload_len)) {
-                if (focus_notif.has_mode() && focus_notif.mode() == VideoFocusMode::VIDEO_FOCUS_PROJECTED) {
-                    is_video_streaming = true;
-                    video_unacked_count = 0; 
-                    if (video_streamer) video_streamer->force_keyframe();
-                    inject_cached_video_config();
-                } else {
-                    is_video_streaming = false;
+            if (channel_types[channel] == ChannelType::VIDEO) {
+                VideoFocusNotification focus_notif;
+                if (focus_notif.ParseFromArray(payload_data, payload_len)) {
+                    if (focus_notif.has_mode() && focus_notif.mode() == VideoFocusMode::VIDEO_FOCUS_PROJECTED) {
+                        is_video_streaming = true;
+                        video_unacked_count = 0; 
+                        if (video_streamer) video_streamer->force_keyframe();
+                        inject_cached_video_config();
+                    } else {
+                        is_video_streaming = false;
+                    }
                 }
             }
         }
     }
     // ---- DYNAMIC INPUT CHANNEL ----
-    else if (channel == input_channel_id) {
+    else if (channel_types[channel] == ChannelType::INPUT) {
         if (type == InputMsgType::EVENT) {
             InputReport report;
             report.ParseFromArray(payload_data, payload_len);
             handle_touch_event(report);
-        }
-    }
-    else {
-        // Answer any rogue setup requests targeting the extra Audio channels the head unit explicitly opened
-        if (type == MediaMsgType::MEDIA_MESSAGE_CONFIG) {
-            Start start; 
-            start.set_session_id(5678);
-            start.set_configuration_index(0);
-            send_message(channel, MediaMsgType::MEDIA_MESSAGE_START, start);
         }
     }
 }
@@ -350,7 +399,7 @@ void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload
         }
     }
     else {
-        // [FIXED BUG]: Do NOT force ssl_bypassed to true. Continue using standard encryption for outbound!
+        // Do NOT force ssl_bypassed to true. Continue using standard encryption for outbound!
         LOG_I(">>> Parsing unencrypted packet but KEEPING outbound TLS active! <<<");
         handle_parsed_payload(channel, type, payload_data, payload_len);
     }

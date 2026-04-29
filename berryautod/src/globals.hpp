@@ -3,6 +3,7 @@
 #include <atomic>
 #include <iostream>
 #include <queue>
+#include <map>
 #include <openssl/ssl.h>
 
 class VideoEncoder;
@@ -23,7 +24,9 @@ extern bool input_channel_ready;
 extern int video_channel_id;
 extern int input_channel_id;
 
-// Sequential channel open queue
+// Dynamic Channel State Management
+enum class ChannelType { UNKNOWN, VIDEO, AUDIO, MIC, INPUT, SENSOR, BLUETOOTH, NAVIGATION, STATUS };
+extern std::map<int, ChannelType> channel_types;
 extern std::queue<int> pending_channel_opens;
 
 // Video and Touch Globals

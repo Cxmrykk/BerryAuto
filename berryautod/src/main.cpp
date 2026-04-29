@@ -39,6 +39,7 @@ int video_channel_id = 2;
 int input_channel_id = 3;
 
 std::queue<int> pending_channel_opens;
+std::map<int, ChannelType> channel_types;
 
 int global_video_width = 800;
 int global_video_height = 480;
