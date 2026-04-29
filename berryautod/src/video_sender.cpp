@@ -77,9 +77,27 @@ void extract_and_cache_sps_pps(const std::vector<uint8_t>& frame)
         if (frame[i] == 0 && frame[i + 1] == 0 && ((frame[i + 2] == 1) || (frame[i + 2] == 0 && frame[i + 3] == 1)))
         {
             size_t start_code_len = (frame[i + 2] == 1) ? 3 : 4;
-            uint8_t nal_type =
-                frame[i + start_code_len] &
-                0x1F; // For HEVC, we'd need bitwise shifts, but standard NAL checks capture config parameter sets.
+            uint8_t header_byte = frame[i + start_code_len];
+            uint8_t nal_type;
+            bool is_config = false;
+
+            // Apply the correct bit-shifting math depending on the negotiated codec
+            if (global_video_codec_type == 7) // MEDIA_CODEC_VIDEO_H265 (HEVC)
+            {
+                nal_type = (header_byte >> 1) & 0x3F;
+                if (nal_type == 32 || nal_type == 33 || nal_type == 34) // VPS, SPS, PPS
+                {
+                    is_config = true;
+                }
+            }
+            else // MEDIA_CODEC_VIDEO_H264_BP
+            {
+                nal_type = header_byte & 0x1F;
+                if (nal_type == 7 || nal_type == 8) // SPS, PPS
+                {
+                    is_config = true;
+                }
+            }
 
             size_t next_nal = frame.size();
             for (size_t j = i + start_code_len; j < frame.size() - 3; j++)
@@ -92,8 +110,7 @@ void extract_and_cache_sps_pps(const std::vector<uint8_t>& frame)
                 }
             }
 
-            // H.264 (7=SPS, 8=PPS) or HEVC Config captures
-            if (nal_type == 7 || nal_type == 8 || nal_type == 32 || nal_type == 33 || nal_type == 34)
+            if (is_config)
             {
                 config_data.insert(config_data.end(), frame.begin() + i, frame.begin() + next_nal);
             }
@@ -109,7 +126,7 @@ void extract_and_cache_sps_pps(const std::vector<uint8_t>& frame)
     {
         cached_config_nal = config_data;
         has_cached_config = true;
-        LOG_I(">>> Successfully extracted and cached Configuration! <<<");
+        LOG_I(">>> Successfully extracted and cached Configuration! (" << config_data.size() << " bytes) <<<");
     }
 }
 
