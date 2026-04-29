@@ -179,7 +179,6 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                                       << global_video_height << ")." << std::endl;
                         }
                         video_streamer->force_keyframe();
-                        inject_cached_video_config();
                     }
                     else
                     {
