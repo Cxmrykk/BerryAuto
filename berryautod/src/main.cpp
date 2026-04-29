@@ -207,6 +207,10 @@ int main() {
             continue;
         }
         
+        if (!is_video_streaming.load()) {
+            LOG_I("[BULK-RX] Read " << r << " raw bytes from USB.");
+        }
+        
         usb_rx_buffer.insert(usb_rx_buffer.end(), tmp_buf, tmp_buf + r);
 
         while (usb_rx_buffer.size() >= 4) {
@@ -241,6 +245,8 @@ int main() {
                                     if (dec_bytes >= 2) {
                                         uint16_t type = (dec_buf[0] << 8) | dec_buf[1];
                                         handle_decrypted_payload(channel, type, dec_buf + 2, dec_bytes - 2);
+                                    } else {
+                                        LOG_I("[DEBUG] SSL_read output too small for AAP header: " << dec_bytes << " bytes");
                                     }
                                 } else {
                                     int err = SSL_get_error(ssl, dec_bytes);
@@ -257,6 +263,8 @@ int main() {
                     if (payload.size() >= 2) {
                         uint16_t type = (payload[0] << 8) | payload[1];
                         handle_unencrypted_payload(channel, type, payload.data() + 2, payload.size() - 2);
+                    } else {
+                        LOG_I("[DEBUG] Unencrypted payload too small for AAP header: " << payload.size() << " bytes");
                     }
                 }
             } else {

@@ -196,6 +196,9 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
             is_video_streaming = false;
             video_channel_ready = false;
         }
+        else {
+            LOG_I("[WARNING] Unhandled message on Channel 0. Type: " << type << " (0x" << std::hex << type << std::dec << ")");
+        }
     }
     // ---- DYNAMIC MEDIA CHANNELS (Video, Audio, Mic) ----
     else if (channel_types[channel] == ChannelType::VIDEO || 
@@ -294,6 +297,9 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                 }
             }
         }
+        else {
+            LOG_I("[WARNING] Unhandled message on Media Channel " << (int)channel << ". Type: " << type << " (0x" << std::hex << type << std::dec << ")");
+        }
     }
     // ---- DYNAMIC INPUT CHANNEL ----
     else if (channel_types[channel] == ChannelType::INPUT) {
@@ -302,15 +308,29 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
             report.ParseFromArray(payload_data, payload_len);
             handle_touch_event(report);
         }
+        else if (type == InputMsgType::BINDINGRESPONSE) {
+            LOG_I(">>> Touch Binding Response Received on Channel " << (int)channel << " <<<");
+        }
+        else {
+            LOG_I("[WARNING] Unhandled message on Input Channel " << (int)channel << ". Type: " << type << " (0x" << std::hex << type << std::dec << ")");
+        }
+    }
+    else {
+        LOG_I("[WARNING] Unhandled message on unknown Channel " << (int)channel << " (Type: " << type << " / 0x" << std::hex << type << std::dec << ")");
     }
 }
 
 void handle_decrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload_data, int payload_len) {
+    std::cout << "[DEBUG] >> Decrypted Packet Received | CH: " << (int)channel 
+              << " | TYPE: " << type << " (0x" << std::hex << type << std::dec << ")"
+              << " | LEN: " << payload_len << std::endl;
     handle_parsed_payload(channel, type, payload_data, payload_len);
 }
 
 void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload_data, int payload_len) {
-    LOG_I("[DEBUG] Received Unencrypted Message. Channel: " << (int)channel << " Type: " << type << " Len: " << payload_len);
+    std::cout << "[DEBUG] >> Unencrypted Packet Received | CH: " << (int)channel 
+              << " | TYPE: " << type << " (0x" << std::hex << type << std::dec << ")"
+              << " | LEN: " << payload_len << std::endl;
     
     if (channel == 0 && type == ControlMsgType::MESSAGE_VERSION_REQUEST) {
         uint16_t major = 1;
