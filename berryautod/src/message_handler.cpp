@@ -41,6 +41,38 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                 MediaSetupRequest setup; 
                 setup.set_type(MediaCodecType::MEDIA_CODEC_VIDEO_H264_BP);
                 send_message(opened_channel, MediaMsgType::MEDIA_MESSAGE_SETUP, setup); 
+
+                // Force start video stream immediately. 
+                // Many real head units stall if we do not initiate the start proactively.
+                std::cout << ">>> Forcing Video Stream Start... <<<" << std::endl;
+                Start start; 
+                start.set_session_id(1234);
+                start.set_configuration_index(0);
+                send_message(opened_channel, MediaMsgType::MEDIA_MESSAGE_START, start);
+
+                // CRITICAL: Request Video Focus & Audio Focus explicitly to lift the Splash Screen
+                std::cout << ">>> Requesting Video Focus to lift Splash Screen... <<<" << std::endl;
+                VideoFocusRequestNotification vfr;
+                vfr.set_disp_channel_id(opened_channel);
+                vfr.set_mode(VideoFocusMode::VIDEO_FOCUS_PROJECTED);
+                send_message(opened_channel, MediaMsgType::MEDIA_MESSAGE_VIDEO_FOCUS_REQUEST, vfr);
+
+                std::cout << ">>> Requesting Default Audio Focus... <<<" << std::endl;
+                AudioFocusRequestNotification afr;
+                afr.set_request(AudioFocusRequestNotification::GAIN);
+                send_message(0, ControlMsgType::MESSAGE_AUDIO_FOCUS_REQUEST, afr);
+
+                is_video_streaming = true;
+                video_unacked_count = 0; 
+                
+                if (video_streamer == nullptr) {
+                    video_streamer = new VideoEncoder(global_video_width, global_video_height, on_video_nal_ready);
+                    video_streamer->start();
+                    std::cout << "[VIDEO] Live Encoding Started (" << global_video_width << "x" << global_video_height << " H.264)." << std::endl;
+                }
+
+                video_streamer->force_keyframe();
+                inject_cached_video_config(); // Harmless if not cached yet
             } 
             else if (ctype == ChannelType::INPUT) {
                 input_channel_ready = true;
@@ -49,10 +81,15 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                 send_message(opened_channel, InputMsgType::BINDINGREQUEST, bind);
             }
             else if (ctype == ChannelType::AUDIO || ctype == ChannelType::MIC) {
-                std::cout << ">>> Sending Media Setup for Audio/Mic Channel (" << opened_channel << ")... <<<" << std::endl;
+                std::cout << ">>> Sending Dummy Media Setup & Start for Audio/Mic Channel (" << opened_channel << ")... <<<" << std::endl;
                 MediaSetupRequest setup; 
                 setup.set_type(MediaCodecType::MEDIA_CODEC_AUDIO_PCM);
                 send_message(opened_channel, MediaMsgType::MEDIA_MESSAGE_SETUP, setup);
+                
+                Start start; 
+                start.set_session_id(5678);
+                start.set_configuration_index(0);
+                send_message(opened_channel, MediaMsgType::MEDIA_MESSAGE_START, start);
             }
             else {
                 std::cout << ">>> Service active. No Media Setup required. <<<" << std::endl;
@@ -69,9 +106,8 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                 LOG_I(">>> All channels opened successfully! <<<");
             }
         }
-        return; // Event processed, skip channel-specific routing
+        return; 
     }
-
 
     // ---- ROUTE BY CHANNEL TYPE ----
     ChannelType ctype = channel_types[channel];
@@ -196,10 +232,12 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
             video_channel_ready = false;
         }
         else {
-            LOG_I("[WARNING] Unhandled Control message on Channel 0. Type: " << type << " (0x" << std::hex << type << std::dec << ")");
+            // Suppress continuous Ping/Status debug chatter
         }
     }
+    // ---- DYNAMIC MEDIA CHANNELS (Video, Audio, Mic) ----
     else if (ctype == ChannelType::VIDEO || ctype == ChannelType::AUDIO || ctype == ChannelType::MIC) {
+                 
         if (type == MediaMsgType::MEDIA_MESSAGE_CONFIG) { 
             if (ctype == ChannelType::VIDEO) {
                 Config config;
@@ -209,30 +247,9 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                         LOG_I(">>> Max Unacked Frames set to " + std::to_string(max_video_unacked));
                     }
                 }
-                LOG_I(">>> Video Configured via Car Response. Sending Start! <<<");
-                
-                Start start; 
-                start.set_session_id(1234);
-                start.set_configuration_index(0);
-                send_message(channel, MediaMsgType::MEDIA_MESSAGE_START, start);
-
-                LOG_I(">>> Requesting Video Focus to lift Splash Screen... <<<");
-                VideoFocusRequestNotification vfr;
-                vfr.set_disp_channel_id(channel); // Crucial! Head Unit needs to know which channel requests focus.
-                vfr.set_mode(VideoFocusMode::VIDEO_FOCUS_PROJECTED);
-                send_message(channel, MediaMsgType::MEDIA_MESSAGE_VIDEO_FOCUS_REQUEST, vfr);
-
-                LOG_I(">>> Requesting Default Audio Focus... <<<");
-                AudioFocusRequestNotification afr;
-                afr.set_request(AudioFocusRequestNotification::GAIN);
-                send_message(0, ControlMsgType::MESSAGE_AUDIO_FOCUS_REQUEST, afr);
-
+                LOG_I(">>> Video Configured via Car Response. <<<");
             } else {
-                LOG_I(">>> Audio/Mic Configured via Car Response. Sending Start! <<<");
-                Start start; 
-                start.set_session_id(5678);
-                start.set_configuration_index(0);
-                send_message(channel, MediaMsgType::MEDIA_MESSAGE_START, start);
+                LOG_I(">>> Audio/Mic Configured via Car Response. <<<");
             }
         }
         else if (type == MediaMsgType::MEDIA_MESSAGE_ACK) {
@@ -294,9 +311,6 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                 send_message(channel, MediaMsgType::MEDIA_MESSAGE_MICROPHONE_RESPONSE, mr);
             }
         }
-        else {
-            LOG_I("[WARNING] Unhandled message on Media Channel " << (int)channel << ". Type: " << type << " (0x" << std::hex << type << std::dec << ")");
-        }
     }
     else if (ctype == ChannelType::SENSOR) {
         if (type == SensorsMsgType::SENSOR_STARTREQUEST) {
@@ -308,7 +322,7 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
             resp.set_status(MessageStatus::STATUS_SUCCESS);
             send_message(channel, SensorsMsgType::SENSOR_STARTRESPONSE, resp);
 
-            // Send initial values for required sensors
+            // Send initial values for required sensors to appease strict headunits
             if (req.type() == SensorType::DRIVING_STATUS) {
                 SensorBatch batch;
                 auto* driving = batch.add_driving_status();
@@ -334,26 +348,14 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
         else if (type == InputMsgType::BINDINGRESPONSE) {
             LOG_I(">>> Touch Binding Response Received on Channel " << (int)channel << " <<<");
         }
-        else {
-            LOG_I("[WARNING] Unhandled message on Input Channel " << (int)channel << ". Type: " << type << " (0x" << std::hex << type << std::dec << ")");
-        }
-    }
-    else {
-        LOG_I("[WARNING] Unhandled message on unknown Channel " << (int)channel << " (Type: " << type << " / 0x" << std::hex << type << std::dec << ")");
     }
 }
 
 void handle_decrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload_data, int payload_len) {
-    // std::cout << "[DEBUG] >> Decrypted Packet Received | CH: " << (int)channel 
-    //           << " | TYPE: " << type << " (0x" << std::hex << type << std::dec << ")"
-    //           << " | LEN: " << payload_len << std::endl;
     handle_parsed_payload(channel, type, payload_data, payload_len);
 }
 
 void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload_data, int payload_len) {
-    // std::cout << "[DEBUG] >> Unencrypted Packet Received | CH: " << (int)channel 
-    //           << " | TYPE: " << type << " (0x" << std::hex << type << std::dec << ")"
-    //           << " | LEN: " << payload_len << std::endl;
     
     if (channel == 0 && type == ControlMsgType::MESSAGE_VERSION_REQUEST) {
         uint16_t major = 1;
@@ -447,7 +449,6 @@ void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload
         }
     }
     else {
-        LOG_I(">>> Parsing unencrypted packet but KEEPING outbound TLS active! <<<");
         handle_parsed_payload(channel, type, payload_data, payload_len);
     }
 }

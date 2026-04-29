@@ -109,7 +109,7 @@ void inject_cached_video_config() {
     // Codec Config doesn't have a timestamp, it immediately appends the NALs
     pt.insert(pt.end(), config_copy.begin(), config_copy.end());
     
-    LOG_I(">>> Sending CODEC_CONFIG (SPS/PPS) to Head Unit... <<<");
+    LOG_I(">>> Sending CODEC_CONFIG (SPS/PPS) to Head Unit (" << config_copy.size() << " bytes)... <<<");
     if (ssl_bypassed) {
         aap_send_raw(pt, video_channel_id, 0x03, 0); 
     } else {
@@ -130,7 +130,7 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp) 
         }
     }
 
-    // If we just intercepted the config, transmit it as a CODEC_CONFIG packet BEFORE sending the frame
+    // Send config right before the first frame
     if (just_extracted) {
         inject_cached_video_config();
     }
