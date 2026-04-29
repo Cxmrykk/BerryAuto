@@ -259,7 +259,8 @@ void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload
         if (auth_resp.ParseFromArray(payload_data, payload_len)) {
             if (auth_resp.status() != 0) {
                 LOG_E(">>> Handshake FAILED with Head Unit error code: " + std::to_string(auth_resp.status()) + " <<<");
-                return;
+                LOG_I(">>> IGNORING Auth Failure! Attempting to forcefully bypass and proceed... <<<");
+                // Do not return. Fall through to forcefully send the Service Discovery Request.
             }
         }
 
@@ -268,7 +269,7 @@ void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload
             LOG_I(">>> Head Unit bypassed TLS! Operating in plaintext mode. <<<");
         }
         
-        LOG_I(">>> Authentication Passed. Sending Service Discovery Request... <<<");
+        LOG_I(">>> Sending Service Discovery Request... <<<");
         ServiceDiscoveryRequest sdp_req;
         sdp_req.set_phone_name("BerryAuto Phone");
         sdp_req.set_phone_brand("Raspberry Pi");

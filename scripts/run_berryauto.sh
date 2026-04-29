@@ -64,9 +64,10 @@ if [ $EXIT_CODE -eq 42 ]; then
     echo 0 | sudo tee /sys/kernel/config/usb_gadget/opengal/bDeviceSubClass > /dev/null
     echo 0 | sudo tee /sys/kernel/config/usb_gadget/opengal/bDeviceProtocol > /dev/null
     
-    # Do not change the manufacturer/product strings! The car expects the same device to return.
-    echo "Google" | sudo tee /sys/kernel/config/usb_gadget/opengal/strings/0x409/manufacturer > /dev/null
-    echo "Pixel 6" | sudo tee /sys/kernel/config/usb_gadget/opengal/strings/0x409/product > /dev/null
+    # FIX: The AOA protocol mandates we adopt the strings the car sent us during the probe!
+    # Real cars will reject the USB device if it continues to identify as a Pixel 6 here.
+    echo "Android" | sudo tee /sys/kernel/config/usb_gadget/opengal/strings/0x409/manufacturer > /dev/null
+    echo "Android Auto" | sudo tee /sys/kernel/config/usb_gadget/opengal/strings/0x409/product > /dev/null
     
     # Restart the Daemon to get fresh endpoints!
     echo "[RUNNER] Restarting Daemon for AAP Stream..."
