@@ -12,16 +12,18 @@
 using namespace com::andrerinas::headunitrevived::aap::protocol::proto;
 
 void handle_decrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload_data, int payload_len) {
+    // ---- CHANNEL 0 (Control Channel) ----
     if (channel == 0) {
         if (type == ControlMsgType::MESSAGE_SERVICE_DISCOVERY_RESPONSE) {
-            LOG_I(">>> Service Discovery Response received. Parsing Display Specs... <<<");
+            LOG_I(">>> Service Discovery Response received. Parsing Display Specs & Channels... <<<");
 
             ServiceDiscoveryResponse sdp_resp;
             if (sdp_resp.ParseFromArray(payload_data, payload_len)) {
                 for (int i = 0; i < sdp_resp.services_size(); i++) {
                     const auto& svc = sdp_resp.services(i);
                     // Video Sink Parsing
-                    if (svc.id() == 2 && svc.has_media_sink_service()) {
+                    if (svc.has_media_sink_service()) {
+                        video_channel_id = svc.id();
                         if (svc.media_sink_service().video_configs_size() > 0) {
                             const auto& video_config = svc.media_sink_service().video_configs(0);
                             int res_type = video_config.codec_resolution();
@@ -48,7 +50,8 @@ void handle_decrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload_d
                         }
                     }
                     // Input / Touch Parsing
-                    if (svc.id() == 3 && svc.has_input_source_service()) {
+                    if (svc.has_input_source_service()) {
+                        input_channel_id = svc.id();
                         if (svc.input_source_service().has_touchscreen()) {
                             global_touch_width = svc.input_source_service().touchscreen().width();
                             global_touch_height = svc.input_source_service().touchscreen().height();
@@ -58,42 +61,30 @@ void handle_decrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload_d
                         }
                     }
                     // Bluetooth Connection Parsing
-                    if (svc.id() == 8 && svc.has_bluetooth_service()) {
+                    if (svc.has_bluetooth_service()) {
                         std::cout << "[INFO] Headunit expects Bluetooth pairing to MAC: " 
                                   << svc.bluetooth_service().car_address() << std::endl;
-                        std::cout << "[INFO] Notice: Bluetooth is not fatal to the USB stream. "
-                                  << "Audio will route via USB automatically. Pair the Pi to the car manually if you desire." << std::endl;
                     }
                 }
             } 
             
             LOG_I(">>> Negotiating Channels... <<<");
             
-            ChannelOpenRequest vid_req;
-            vid_req.set_priority(1);
-            vid_req.set_service_id(2);
-            send_encrypted(0, ControlMsgType::MESSAGE_CHANNEL_OPEN_REQUEST, vid_req);
-
-            ChannelOpenRequest inp_req;
-            inp_req.set_priority(2);
-            inp_req.set_service_id(3);
-            send_encrypted(0, ControlMsgType::MESSAGE_CHANNEL_OPEN_REQUEST, inp_req);
-        } 
-        else if (type == ControlMsgType::MESSAGE_CHANNEL_OPEN_RESPONSE) {
-            if (!video_channel_ready) {
-                video_channel_ready = true;
-                LOG_I(">>> Video Channel (2) Opened! Sending Media Setup... <<<");
-                MediaSetupRequest setup; 
-                setup.set_type(MediaCodecType::MEDIA_CODEC_VIDEO_H264_BP);
-                send_encrypted(2, MEDIA_MESSAGE_SETUP, setup); 
-            } 
-            else if (!input_channel_ready) {
-                input_channel_ready = true;
-                LOG_I(">>> Input Channel (3) Opened! Sending Touch Binding Request... <<<");
-                KeyBindingRequest bind;
-                send_encrypted(3, InputMsgType::BINDINGREQUEST, bind);
+            // In AAP, the Channel Open Request is dispatched on the Target Channel!
+            if (video_channel_id != -1) {
+                ChannelOpenRequest vid_req;
+                vid_req.set_priority(1);
+                vid_req.set_service_id(video_channel_id);
+                send_encrypted(video_channel_id, ControlMsgType::MESSAGE_CHANNEL_OPEN_REQUEST, vid_req);
             }
-        }
+
+            if (input_channel_id != -1) {
+                ChannelOpenRequest inp_req;
+                inp_req.set_priority(2);
+                inp_req.set_service_id(input_channel_id);
+                send_encrypted(input_channel_id, ControlMsgType::MESSAGE_CHANNEL_OPEN_REQUEST, inp_req);
+            }
+        } 
         else if (type == ControlMsgType::MESSAGE_PING_REQUEST) {
             PingRequest req;
             req.ParseFromArray(payload_data, payload_len);
@@ -113,8 +104,18 @@ void handle_decrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload_d
             video_channel_ready = false;
         }
     }
-    else if (channel == 2) { 
-        if (type == MediaMsgType::MEDIA_MESSAGE_CONFIG) { 
+    // ---- DYNAMIC VIDEO CHANNEL ----
+    else if (channel == video_channel_id && video_channel_id != -1) { 
+        if (type == ControlMsgType::MESSAGE_CHANNEL_OPEN_RESPONSE) {
+            if (!video_channel_ready) {
+                video_channel_ready = true;
+                LOG_I(">>> Video Channel Opened! Sending Media Setup... <<<");
+                MediaSetupRequest setup; 
+                setup.set_type(MediaCodecType::MEDIA_CODEC_VIDEO_H264_BP);
+                send_encrypted(video_channel_id, MediaMsgType::MEDIA_MESSAGE_SETUP, setup); 
+            } 
+        }
+        else if (type == MediaMsgType::MEDIA_MESSAGE_CONFIG) { 
             Config config;
             if (config.ParseFromArray(payload_data, payload_len)) {
                 if (config.has_max_unacked()) {
@@ -127,7 +128,7 @@ void handle_decrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload_d
             Start start; 
             start.set_session_id(1234);
             start.set_configuration_index(0);
-            send_encrypted(2, MEDIA_MESSAGE_START, start);
+            send_encrypted(video_channel_id, MediaMsgType::MEDIA_MESSAGE_START, start);
 
             is_video_streaming = true;
             video_unacked_count = 0; 
@@ -172,10 +173,21 @@ void handle_decrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload_d
             }
         }
     }
-    else if (channel == 3 && type == InputMsgType::EVENT) {
-        InputReport report;
-        report.ParseFromArray(payload_data, payload_len);
-        handle_touch_event(report);
+    // ---- DYNAMIC INPUT CHANNEL ----
+    else if (channel == input_channel_id && input_channel_id != -1) {
+        if (type == ControlMsgType::MESSAGE_CHANNEL_OPEN_RESPONSE) {
+            if (!input_channel_ready) {
+                input_channel_ready = true;
+                LOG_I(">>> Input Channel Opened! Sending Touch Binding Request... <<<");
+                KeyBindingRequest bind;
+                send_encrypted(input_channel_id, InputMsgType::BINDINGREQUEST, bind);
+            }
+        }
+        else if (type == InputMsgType::EVENT) {
+            InputReport report;
+            report.ParseFromArray(payload_data, payload_len);
+            handle_touch_event(report);
+        }
     }
 }
 

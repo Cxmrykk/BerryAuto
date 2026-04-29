@@ -33,6 +33,10 @@ VideoEncoder* video_streamer = nullptr;
 bool video_channel_ready = false;
 bool input_channel_ready = false;
 
+// Dynamic Channel Assignments
+int video_channel_id = -1;
+int input_channel_id = -1;
+
 int global_video_width = 800;
 int global_video_height = 480;
 int global_video_margin_w = 0;

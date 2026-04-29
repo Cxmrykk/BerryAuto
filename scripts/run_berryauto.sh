@@ -55,9 +55,10 @@ if [ $EXIT_CODE -eq 42 ]; then
     
     # Unbind Gadget (Car sees phone instantly disconnect)
     sudo sh -c "echo '' > /sys/kernel/config/usb_gadget/opengal/UDC" 2>/dev/null || true
+    sleep 1 # Vital for real head units to flush their USB disconnection interrupt
     
-    # Morph IDs to Accessory + ADB (2D01 is widely compatible with Head Units)
-    echo 0x2D01 | sudo tee /sys/kernel/config/usb_gadget/opengal/idProduct > /dev/null
+    # Morph IDs to Accessory Mode ONLY (2D00 matches our 1-interface ffs descriptors)
+    echo 0x2D00 | sudo tee /sys/kernel/config/usb_gadget/opengal/idProduct > /dev/null
     
     echo 0 | sudo tee /sys/kernel/config/usb_gadget/opengal/bDeviceClass > /dev/null
     echo 0 | sudo tee /sys/kernel/config/usb_gadget/opengal/bDeviceSubClass > /dev/null
@@ -72,7 +73,7 @@ if [ $EXIT_CODE -eq 42 ]; then
     sudo -E ./berryautod/build/opengal_emitter &
     PID2=$!
     
-    sleep 1
+    sleep 2 # Let the daemon thoroughly attach FFS before UDC binding
     
     # Rebind Gadget (Car sees Accessory connect)
     echo "$UDC_NAME" | sudo tee /sys/kernel/config/usb_gadget/opengal/UDC > /dev/null

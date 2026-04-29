@@ -17,6 +17,10 @@ extern VideoEncoder* video_streamer;
 extern bool video_channel_ready;
 extern bool input_channel_ready;
 
+// Dynamic AAP Channels
+extern int video_channel_id;
+extern int input_channel_id;
+
 // Video and Touch Globals
 extern int global_video_width;
 extern int global_video_height;

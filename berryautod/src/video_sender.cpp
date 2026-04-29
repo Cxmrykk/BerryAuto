@@ -1,7 +1,7 @@
 #include "video_sender.hpp"
 #include "globals.hpp"
 #include "aap_sender.hpp"
-#include "video_encoder.hpp" // FIX: Added missing include for VideoEncoder class definition
+#include "video_encoder.hpp" 
 #include <chrono>
 #include <thread>
 #include <unistd.h>
@@ -24,12 +24,12 @@ void send_video_frame_internal(const std::vector<uint8_t>& nal_data, uint64_t ti
     if (total_unencrypted_size <= MAX_CHUNK_SIZE) {
         std::vector<uint8_t> pt = header;
         pt.insert(pt.end(), nal_data.begin(), nal_data.end());
-        ssl_write_and_flush_unlocked(pt, 2, 0x0B, 0);
+        ssl_write_and_flush_unlocked(pt, video_channel_id, 0x0B, 0);
     } else {
         size_t data_in_first = MAX_CHUNK_SIZE - header.size();
         std::vector<uint8_t> pt = header;
         pt.insert(pt.end(), nal_data.begin(), nal_data.begin() + data_in_first);
-        ssl_write_and_flush_unlocked(pt, 2, 0x09, total_unencrypted_size); 
+        ssl_write_and_flush_unlocked(pt, video_channel_id, 0x09, total_unencrypted_size); 
         
         size_t offset = data_in_first;
         while (offset < nal_data.size()) {
@@ -38,7 +38,7 @@ void send_video_frame_internal(const std::vector<uint8_t>& nal_data, uint64_t ti
             std::vector<uint8_t> pt_chunk(nal_data.begin() + offset, nal_data.begin() + offset + chunk_size);
             
             uint8_t flag = (offset + chunk_size >= nal_data.size()) ? 0x0A : 0x08; 
-            ssl_write_and_flush_unlocked(pt_chunk, 2, flag, 0);
+            ssl_write_and_flush_unlocked(pt_chunk, video_channel_id, flag, 0);
             offset += chunk_size;
         }
     }
@@ -100,7 +100,6 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp) 
     
     if (wait_cycles >= 500) {
         LOG_E("[WARNING] Video ACK timeout (1000ms). Stream bottlenecked, dropping frame to relieve pipeline...");
-        // Force a keyframe request on the encoder so the video stream recovers immediately 
         if (video_streamer) video_streamer->force_keyframe();
         return; 
     }
