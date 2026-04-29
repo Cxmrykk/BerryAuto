@@ -35,8 +35,8 @@ bool video_channel_ready = false;
 bool input_channel_ready = false;
 
 // Dynamic Channel Assignments
-int video_channel_id = -1;
-int input_channel_id = -1;
+int video_channel_id = 2; // Defaults, overridden by ServiceDiscoveryResponse
+int input_channel_id = 3;
 
 int global_video_width = 800;
 int global_video_height = 480;
@@ -65,9 +65,6 @@ bool load_hardcoded_certs(SSL_CTX *ctx) {
 }
 
 int dummy_verify_cb(int preverify_ok, X509_STORE_CTX *ctx) {
-    // Android Auto requires Mutual TLS (mTLS). We must request a certificate
-    // from the Head Unit, but we don't actually care to cryptographically 
-    // verify the car's manufacturer CA. Always return 1 (Accept).
     (void)preverify_ok;
     (void)ctx;
     return 1;
@@ -158,10 +155,7 @@ int main() {
     SSL_CTX_set_options(ssl_ctx, options);
     SSL_CTX_set_max_proto_version(ssl_ctx, TLS1_2_VERSION);
     SSL_CTX_set_min_proto_version(ssl_ctx, TLS1_2_VERSION);
-
-    // Force Mutual TLS (mTLS) - AAP strictly requires the Phone to request the Car's certificate
     SSL_CTX_set_verify(ssl_ctx, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, dummy_verify_cb);
-
     SSL_CTX_set_session_id_context(ssl_ctx, (const unsigned char*)"AA", 2);
     SSL_CTX_set_session_cache_mode(ssl_ctx, SSL_SESS_CACHE_SERVER);
     SSL_CTX_set_tlsext_ticket_keys(ssl_ctx, aa_ticket_keys, sizeof(aa_ticket_keys));
@@ -222,21 +216,34 @@ int main() {
                 
                 usb_rx_buffer.erase(usb_rx_buffer.begin(), usb_rx_buffer.begin() + 4 + len);
 
-                if (flags == 0x0B || flags == 0x08 || flags == 0x0A || flags == 0x09) {
+                // Use robust bitmasking to detect encrypted messages
+                if ((flags & 0x08) != 0) {
                     {
                         std::lock_guard<std::recursive_mutex> lock(aap_mutex);
-                        BIO_write(rbio, payload.data(), payload.size());
                         
-                        uint8_t dec_buf[16384];
-                        while (true) {
-                            int dec_bytes = SSL_read(ssl, dec_buf, sizeof(dec_buf));
-                            if (dec_bytes > 0) {
-                                if (dec_bytes >= 2) {
-                                    uint16_t type = (dec_buf[0] << 8) | dec_buf[1];
-                                    handle_decrypted_payload(channel, type, dec_buf + 2, dec_bytes - 2);
+                        // First-fragment encrypted packets have a 4-byte unfragmented size prefix BEFORE the TLS payload.
+                        // We must strip it out before feeding the raw data into OpenSSL.
+                        size_t offset = 0;
+                        if ((flags & 0x01) != 0 && (flags & 0x02) == 0) { // 0x09
+                            if (payload.size() >= 4) {
+                                offset = 4;
+                            }
+                        }
+
+                        if (payload.size() > offset) {
+                            BIO_write(rbio, payload.data() + offset, payload.size() - offset);
+                            
+                            uint8_t dec_buf[16384];
+                            while (true) {
+                                int dec_bytes = SSL_read(ssl, dec_buf, sizeof(dec_buf));
+                                if (dec_bytes > 0) {
+                                    if (dec_bytes >= 2) {
+                                        uint16_t type = (dec_buf[0] << 8) | dec_buf[1];
+                                        handle_decrypted_payload(channel, type, dec_buf + 2, dec_bytes - 2);
+                                    }
+                                } else {
+                                    break; 
                                 }
-                            } else {
-                                break; 
                             }
                         }
                     }

@@ -14,7 +14,6 @@
 
 using namespace com::andrerinas::headunitrevived::aap::protocol::proto;
 
-// Helper function to print hex dumps for debugging
 void hex_dump(const std::string& prefix, const uint8_t* data, int len) {
     std::cout << prefix << " (" << len << " bytes): ";
     for (int i = 0; i < len; ++i) {
@@ -23,8 +22,7 @@ void hex_dump(const std::string& prefix, const uint8_t* data, int len) {
     std::cout << std::dec << std::endl;
 }
 
-void handle_decrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload_data, int payload_len) {
-    // ---- CHANNEL 0 (Control Channel) ----
+void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data, int payload_len) {
     if (channel == 0) {
         if (type == ControlMsgType::MESSAGE_SERVICE_DISCOVERY_RESPONSE) {
             LOG_I(">>> Service Discovery Response received. Parsing Display Specs... <<<");
@@ -34,7 +32,8 @@ void handle_decrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload_d
                 for (int i = 0; i < sdp_resp.services_size(); i++) {
                     const auto& svc = sdp_resp.services(i);
                     // Video Sink Parsing
-                    if (svc.id() == 2 && svc.has_media_sink_service()) {
+                    if (svc.has_media_sink_service()) {
+                        video_channel_id = svc.id();
                         if (svc.media_sink_service().video_configs_size() > 0) {
                             const auto& video_config = svc.media_sink_service().video_configs(0);
                             int res_type = video_config.codec_resolution();
@@ -61,7 +60,8 @@ void handle_decrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload_d
                         }
                     }
                     // Input / Touch Parsing
-                    if (svc.id() == 3 && svc.has_input_source_service()) {
+                    if (svc.has_input_source_service()) {
+                        input_channel_id = svc.id();
                         if (svc.input_source_service().has_touchscreen()) {
                             global_touch_width = svc.input_source_service().touchscreen().width();
                             global_touch_height = svc.input_source_service().touchscreen().height();
@@ -77,27 +77,27 @@ void handle_decrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload_d
             
             ChannelOpenRequest vid_req;
             vid_req.set_priority(1);
-            vid_req.set_service_id(2);
+            vid_req.set_service_id(video_channel_id);
             send_message(0, ControlMsgType::MESSAGE_CHANNEL_OPEN_REQUEST, vid_req);
 
             ChannelOpenRequest inp_req;
             inp_req.set_priority(2);
-            inp_req.set_service_id(3);
+            inp_req.set_service_id(input_channel_id);
             send_message(0, ControlMsgType::MESSAGE_CHANNEL_OPEN_REQUEST, inp_req);
         } 
         else if (type == ControlMsgType::MESSAGE_CHANNEL_OPEN_RESPONSE) {
             if (!video_channel_ready) {
                 video_channel_ready = true;
-                LOG_I(">>> Video Channel (2) Opened! Sending Media Setup... <<<");
+                std::cout << ">>> Video Channel (" << video_channel_id << ") Opened! Sending Media Setup... <<<" << std::endl;
                 MediaSetupRequest setup; 
                 setup.set_type(MediaCodecType::MEDIA_CODEC_VIDEO_H264_BP);
-                send_message(2, MediaMsgType::MEDIA_MESSAGE_SETUP, setup); 
+                send_message(video_channel_id, MediaMsgType::MEDIA_MESSAGE_SETUP, setup); 
             } 
             else if (!input_channel_ready) {
                 input_channel_ready = true;
-                LOG_I(">>> Input Channel (3) Opened! Sending Touch Binding Request... <<<");
+                std::cout << ">>> Input Channel (" << input_channel_id << ") Opened! Sending Touch Binding Request... <<<" << std::endl;
                 KeyBindingRequest bind;
-                send_message(3, InputMsgType::BINDINGREQUEST, bind);
+                send_message(input_channel_id, InputMsgType::BINDINGREQUEST, bind);
             }
         }
         else if (type == ControlMsgType::MESSAGE_PING_REQUEST) {
@@ -119,8 +119,7 @@ void handle_decrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload_d
             video_channel_ready = false;
         }
     }
-    // ---- DYNAMIC VIDEO CHANNEL ----
-    else if (channel == 2) { 
+    else if (channel == video_channel_id) { 
         if (type == MediaMsgType::MEDIA_MESSAGE_CONFIG) { 
             Config config;
             if (config.ParseFromArray(payload_data, payload_len)) {
@@ -134,7 +133,7 @@ void handle_decrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload_d
             Start start; 
             start.set_session_id(1234);
             start.set_configuration_index(0);
-            send_message(2, MediaMsgType::MEDIA_MESSAGE_START, start);
+            send_message(video_channel_id, MediaMsgType::MEDIA_MESSAGE_START, start);
 
             is_video_streaming = true;
             video_unacked_count = 0; 
@@ -178,15 +177,18 @@ void handle_decrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload_d
             }
         }
     }
-    else if (channel == 3 && type == InputMsgType::EVENT) {
+    else if (channel == input_channel_id && type == InputMsgType::EVENT) {
         InputReport report;
         report.ParseFromArray(payload_data, payload_len);
         handle_touch_event(report);
     }
 }
 
+void handle_decrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload_data, int payload_len) {
+    handle_parsed_payload(channel, type, payload_data, payload_len);
+}
+
 void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload_data, int payload_len) {
-    
     LOG_I("[DEBUG] Received Unencrypted Message. Channel: " << (int)channel << " Type: " << type << " Len: " << payload_len);
     
     if (channel == 0 && type == ControlMsgType::MESSAGE_VERSION_REQUEST) {
@@ -217,7 +219,6 @@ void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload
             (void)BIO_reset(wbio);
         }
 
-        // CORRECTED: The decompiled source shows the phone replies with 6 bytes: Major(2), Minor(2), Status(2)
         std::vector<uint8_t> resp_payload = {
             (uint8_t)(major >> 8), (uint8_t)(major & 0xFF),
             (uint8_t)(minor >> 8), (uint8_t)(minor & 0xFF),
@@ -228,8 +229,6 @@ void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload
     else if (channel == 0 && type == ControlMsgType::MESSAGE_ENCAPSULATED_SSL) {
         bool handshake_just_completed = false;
         
-        hex_dump("[DEBUG] Encapsulated SSL Data IN", payload_data, std::min(payload_len, 32));
-
         {
             std::lock_guard<std::recursive_mutex> lock(aap_mutex);
             BIO_write(rbio, payload_data, payload_len);
@@ -243,15 +242,11 @@ void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload
                     int err = SSL_get_error(ssl, ret);
                     if (err != SSL_ERROR_WANT_READ && err != SSL_ERROR_WANT_WRITE) {
                         LOG_E(">>> SSL_accept Error: " << err << " <<<");
-                        char err_buf[256];
-                        ERR_error_string_n(ERR_get_error(), err_buf, sizeof(err_buf));
-                        LOG_E(">>> SSL Details: " << err_buf << " <<<");
                     }
                 }
             }
         }
         
-        // Flush the TLS handshake data BEFORE updating is_tls_connected to true.
         ssl_write_and_flush_unlocked({}, 0, 0x0B, 0); 
         
         if (handshake_just_completed) {
@@ -260,13 +255,9 @@ void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload
         }
     }
     else if (channel == 0 && type == ControlMsgType::MESSAGE_AUTH_COMPLETE) {
-        
         AuthCompleteResponse auth_resp;
         if (auth_resp.ParseFromArray(payload_data, payload_len)) {
             if (auth_resp.status() != 0) {
-                LOG_E(">>> Handshake FAILED with Head Unit error code: " + std::to_string(auth_resp.status()) + " <<<");
-                LOG_E(">>> This almost certainly means the Head Unit rejected the Pi's SSL Certificate (AAP_CERT) <<<");
-                LOG_E(">>> Real head units require a certificate signed by Google Play Services. <<<");
                 LOG_I(">>> IGNORING Auth Failure! Attempting to forcefully bypass and proceed... <<<");
             } else {
                 LOG_I(">>> Head Unit sent AuthComplete(0) - Authentication SUCCESS! <<<");
@@ -284,12 +275,19 @@ void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload
         sdp_req.set_phone_brand("Raspberry Pi");
         
         if (ssl_bypassed) {
-            // Force it unencrypted if TLS genuinely failed but we want to try our luck
             std::vector<uint8_t> serialized(sdp_req.ByteSizeLong());
             sdp_req.SerializeToArray(serialized.data(), serialized.size());
             send_unencrypted(0, 0x03, ControlMsgType::MESSAGE_SERVICE_DISCOVERY_REQUEST, serialized);
         } else {
             send_message(0, ControlMsgType::MESSAGE_SERVICE_DISCOVERY_REQUEST, sdp_req);
         }
+    }
+    else {
+        // Fallback for when the head unit completely drops TLS after negotiation
+        if (!ssl_bypassed) {
+            LOG_I(">>> Received regular message unencrypted! Forcing TLS bypass. <<<");
+            ssl_bypassed = true;
+        }
+        handle_parsed_payload(channel, type, payload_data, payload_len);
     }
 }

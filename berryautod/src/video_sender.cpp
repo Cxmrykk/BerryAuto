@@ -26,7 +26,7 @@ void send_video_frame_internal(const std::vector<uint8_t>& nal_data, uint64_t ti
         pt.insert(pt.end(), nal_data.begin(), nal_data.end());
         
         if (ssl_bypassed) {
-            aap_send_raw(pt, video_channel_id, 0x0B, 0);
+            aap_send_raw(pt, video_channel_id, 0x03, 0);
         } else {
             ssl_write_and_flush_unlocked(pt, video_channel_id, 0x0B, 0);
         }
@@ -36,7 +36,7 @@ void send_video_frame_internal(const std::vector<uint8_t>& nal_data, uint64_t ti
         pt.insert(pt.end(), nal_data.begin(), nal_data.begin() + data_in_first);
         
         if (ssl_bypassed) {
-            aap_send_raw(pt, video_channel_id, 0x09, total_size);
+            aap_send_raw(pt, video_channel_id, 0x01, total_size); // Unencrypted First Fragment
         } else {
             ssl_write_and_flush_unlocked(pt, video_channel_id, 0x09, total_size); 
         }
@@ -47,11 +47,11 @@ void send_video_frame_internal(const std::vector<uint8_t>& nal_data, uint64_t ti
             size_t chunk_size = std::min(remain, MAX_CHUNK_SIZE);
             std::vector<uint8_t> pt_chunk(nal_data.begin() + offset, nal_data.begin() + offset + chunk_size);
             
-            uint8_t flag = (offset + chunk_size >= nal_data.size()) ? 0x0A : 0x08; 
-            
             if (ssl_bypassed) {
+                uint8_t flag = (offset + chunk_size >= nal_data.size()) ? 0x02 : 0x00; 
                 aap_send_raw(pt_chunk, video_channel_id, flag, 0);
             } else {
+                uint8_t flag = (offset + chunk_size >= nal_data.size()) ? 0x0A : 0x08; 
                 ssl_write_and_flush_unlocked(pt_chunk, video_channel_id, flag, 0);
             }
             offset += chunk_size;
@@ -96,7 +96,6 @@ void extract_and_cache_sps_pps(const std::vector<uint8_t>& frame) {
 }
 
 void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp) {
-    // Treat the stream as ready if we are on a valid bypass route or a valid TLS route
     if (!(is_tls_connected || ssl_bypassed) || !video_channel_ready || !is_video_streaming.load()) {
         return; 
     }
