@@ -70,7 +70,6 @@ void handle_decrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload_d
             
             LOG_I(">>> Negotiating Channels... <<<");
             
-            // In AAP, the Channel Open Request is dispatched on the Target Channel!
             if (video_channel_id != -1) {
                 ChannelOpenRequest vid_req;
                 vid_req.set_priority(1);
@@ -139,7 +138,6 @@ void handle_decrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload_d
                 std::cout << "[VIDEO] Live Encoding Started (" << global_video_width << "x" << global_video_height << " H.264)." << std::endl;
             }
 
-            // Push initial keyframe and configs
             video_streamer->force_keyframe();
             inject_cached_video_config();
         }
@@ -192,10 +190,17 @@ void handle_decrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload_d
 }
 
 void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload_data, int payload_len) {
-    (void)payload_data; // Silence unused warning
-    (void)payload_len;
-
     if (channel == 0 && type == ControlMsgType::MESSAGE_VERSION_REQUEST) {
+        uint16_t major = 1;
+        uint16_t minor = 6;
+        
+        // Match the Head Unit's requested AAP protocol version
+        if (payload_len >= 4) {
+            major = (payload_data[0] << 8) | payload_data[1];
+            minor = (payload_data[2] << 8) | payload_data[3];
+        }
+        
+        std::cout << "[INFO] Head Unit requested AAP Version " << major << "." << minor << std::endl;
         LOG_I(">>> Version Request Received. Initiating AAP Handshake... <<<");
         
         {
@@ -214,7 +219,12 @@ void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload
             (void)BIO_reset(wbio);
         }
 
-        std::vector<uint8_t> resp_payload = {0x00, 0x01, 0x00, 0x01}; 
+        // CORRECT 6-BYTE VERSION RESPONSE (Major, Minor, Status=0)
+        std::vector<uint8_t> resp_payload = {
+            (uint8_t)(major >> 8), (uint8_t)(major & 0xFF),
+            (uint8_t)(minor >> 8), (uint8_t)(minor & 0xFF),
+            0x00, 0x00 // STATUS_SUCCESS = 0
+        }; 
         send_unencrypted(0, 0x03, ControlMsgType::MESSAGE_VERSION_RESPONSE, resp_payload);
     } 
     else if (channel == 0 && type == ControlMsgType::MESSAGE_ENCAPSULATED_SSL) {
@@ -233,7 +243,6 @@ void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload
             }
         }
         
-        // Flush the TLS handshake data BEFORE updating is_tls_connected to true.
         ssl_write_and_flush_unlocked({}, 0, 0x0B, 0); 
         
         if (handshake_just_completed) {

@@ -63,7 +63,6 @@ bool load_hardcoded_certs(SSL_CTX *ctx) {
     return true;
 }
 
-// Helper to force a zero-length read/write to the Kernel, bypassing glibc optimizations
 void force_zero_ack(int ep0, bool is_in) {
     if (is_in) {
         syscall(SYS_write, ep0, NULL, 0);
@@ -72,7 +71,6 @@ void force_zero_ack(int ep0, bool is_in) {
     }
 }
 
-// Monitors connection status and handles the AOA Protocol Handshake
 void ep0_thread(int ep0) {
     struct usb_functionfs_event event;
 
@@ -84,19 +82,28 @@ void ep0_thread(int ep0) {
         }
         switch (event.type) {
             case FUNCTIONFS_BIND: LOG_I("[USB] Gadget Bound to Host"); break;
-            case FUNCTIONFS_UNBIND: LOG_I("[USB] Gadget Unbound"); break;
             case FUNCTIONFS_ENABLE: LOG_I("[USB] Configured & Enabled!"); break;
-            case FUNCTIONFS_DISABLE: LOG_I("[USB] Disabled by Host (Port Reset/Suspend)"); break;
+            case FUNCTIONFS_DISABLE:
+            case FUNCTIONFS_UNBIND: {
+                LOG_I("[USB] Disabled/Unbound by Host (Port Reset/Suspend)");
+                std::lock_guard<std::recursive_mutex> lock(aap_mutex);
+                is_tls_connected = false;
+                is_video_streaming = false;
+                video_channel_ready = false;
+                input_channel_ready = false;
+                video_unacked_count = 0;
+                break;
+            }
             case FUNCTIONFS_SETUP: {
                 auto& setup = event.u.setup;
                 
                 if ((setup.bRequestType & USB_TYPE_MASK) == USB_TYPE_VENDOR) {
-                    if (setup.bRequest == 51) { // AOA GET_PROTOCOL 
-                        uint16_t version = 1; // AOA Version 1.0 (Maximum compatibility)
+                    if (setup.bRequest == 51) { 
+                        uint16_t version = 1;
                         write(ep0, &version, 2);
                         LOG_I("[AOA] Answered GET_PROTOCOL (51) with Version 1.0");
                         
-                    } else if (setup.bRequest == 52) { // AOA SEND_STRING
+                    } else if (setup.bRequest == 52) { 
                         char str_buf[256];
                         memset(str_buf, 0, sizeof(str_buf));
                         
@@ -108,12 +115,9 @@ void ep0_thread(int ep0) {
                         }
                         LOG_I("[AOA] Received SEND_STRING (index " << setup.wIndex << "): " << str_buf);
                         
-                    } else if (setup.bRequest == 53) { // AOA START
-                        // Must use raw syscall so the Kernel actually sends the ACK to the car!
+                    } else if (setup.bRequest == 53) { 
                         force_zero_ack(ep0, false);
                         LOG_I("[AOA] Received START (53). Acknowledged. Waiting 500ms to flush, then morphing...");
-                        
-                        // Give the Host Controller plenty of time to process the ACK
                         usleep(500000); 
                         exit(42);
                         
@@ -179,21 +183,19 @@ int main() {
                 usleep(1000); 
                 continue;
             }
+            if (errno == ESHUTDOWN || errno == ENODEV) {
+                // USB bus reset/disconnected, gracefully ignore since ep0_thread handles logic
+                usleep(10000);
+                continue;
+            }
             LOG_E("[BULK-RX] Read error: " << strerror(errno));
-            usleep(500000); 
+            usleep(100000); 
             continue;
         }
         if (r == 0) {
             usleep(1000);
             continue;
         }
-        
-        // Print the raw bytes so we can see exactly what the car is trying to send
-        std::cout << "[BULK-RX] Received " << r << " bytes. Hex: ";
-        for (int i = 0; i < std::min(r, 16); i++) {
-            std::cout << std::hex << std::setw(2) << std::setfill('0') << (int)tmp_buf[i] << " ";
-        }
-        std::cout << std::dec << std::endl;
         
         usb_rx_buffer.insert(usb_rx_buffer.end(), tmp_buf, tmp_buf + r);
 
