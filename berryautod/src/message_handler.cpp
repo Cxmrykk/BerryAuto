@@ -44,6 +44,7 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                 video_channel_ready = true;
                 std::cout << ">>> Sending Media Setup for Video Channel... <<<" << std::endl;
                 MediaSetupRequest setup; 
+                setup.set_type(MediaCodecType::MEDIA_CODEC_VIDEO_H264_BP);
                 send_message(opened_channel, MediaMsgType::MEDIA_MESSAGE_SETUP, setup); 
             } 
             else if (ctype == ChannelType::INPUT) {
@@ -55,6 +56,7 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
             else if (ctype == ChannelType::AUDIO || ctype == ChannelType::MIC) {
                 std::cout << ">>> Sending Media Setup for Audio/Mic Channel (" << opened_channel << ")... <<<" << std::endl;
                 MediaSetupRequest setup; 
+                setup.set_type(MediaCodecType::MEDIA_CODEC_AUDIO_PCM);
                 send_message(opened_channel, MediaMsgType::MEDIA_MESSAGE_SETUP, setup);
             }
             else {
@@ -196,9 +198,6 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
         else if (type == ControlMsgType::MESSAGE_CHANNEL_CLOSE_NOTIFICATION) {
             is_video_streaming = false;
             video_channel_ready = false;
-        }
-        else {
-            // Suppress continuous Ping/Status debug chatter
         }
     }
     // ---- DYNAMIC MEDIA CHANNELS (Video, Audio, Mic) ----

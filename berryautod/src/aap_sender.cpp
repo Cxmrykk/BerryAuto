@@ -111,7 +111,8 @@ void ssl_write_and_flush_unlocked(const std::vector<uint8_t>& pt, uint8_t target
     
     // Write out the packets using blocking I/O *WITHOUT* holding the vital AAP mutex
     for (const auto& pkt : out_packets) {
-        if (target_channel != 2) { // Skip logging video frames
+        // Only hide logs for actual streaming video payload frames (0x08, 0x09, 0x0A)
+        if (!(target_channel == 2 && (encrypted_flag == 0x08 || encrypted_flag == 0x09 || encrypted_flag == 0x0A))) { 
             std::cout << "[DEBUG-TX] Encrypted - Channel: " << (int)target_channel << " Flags: 0x" << std::hex << (int)encrypted_flag << std::dec << " Size: " << pkt.size() << std::endl;
         }
         write_to_usb(pkt);
