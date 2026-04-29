@@ -43,6 +43,9 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
             ChannelType ctype = channel_types[opened_channel];
 
             if (ctype == ChannelType::VIDEO || ctype == ChannelType::AUDIO || ctype == ChannelType::MIC) {
+                if (ctype == ChannelType::VIDEO) {
+                    video_channel_ready = true; // RESTORED FIX
+                }
                 std::cout << ">>> Sending Media Setup for Channel " << opened_channel << "... <<<" << std::endl;
                 MediaSetupRequest setup; 
                 setup.set_type((MediaCodecType)channel_codecs[opened_channel]);
@@ -69,13 +72,13 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                 std::cout << ">>> Service active. No Media Setup required. <<<" << std::endl;
             }
 
-            // If more channels need opening, trigger the next request ON THE TARGET CHANNEL.
+            // If more channels need opening, trigger the next request ON CHANNEL 0.
             if (!pending_channel_opens.empty()) {
                 int next_chan = pending_channel_opens.front();
                 ChannelOpenRequest req;
                 req.set_priority(1);
                 req.set_service_id(next_chan);
-                send_message(next_chan, ControlMsgType::MESSAGE_CHANNEL_OPEN_REQUEST, req);
+                send_message(0, ControlMsgType::MESSAGE_CHANNEL_OPEN_REQUEST, req);
             } else {
                 LOG_I(">>> All channels opened successfully! Waiting for Configs... <<<");
             }
@@ -186,7 +189,7 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                 ChannelOpenRequest req;
                 req.set_priority(1);
                 req.set_service_id(first_chan);
-                send_message(first_chan, ControlMsgType::MESSAGE_CHANNEL_OPEN_REQUEST, req);
+                send_message(0, ControlMsgType::MESSAGE_CHANNEL_OPEN_REQUEST, req);
             }
         } 
         else if (type == ControlMsgType::MESSAGE_AUDIO_FOCUS_REQUEST) {

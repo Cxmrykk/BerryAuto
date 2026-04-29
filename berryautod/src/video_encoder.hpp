@@ -279,12 +279,22 @@ private:
         }
 
         int ret = avcodec_send_frame(codec_ctx, frame);
-        if (ret < 0) return;
+        if (ret < 0) {
+            char errbuf[128];
+            av_strerror(ret, errbuf, sizeof(errbuf));
+            std::cerr << "[VideoEncoder] avcodec_send_frame failed: " << errbuf << std::endl;
+            return;
+        }
 
         while (ret >= 0) {
             ret = avcodec_receive_packet(codec_ctx, pkt);
             if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) break;
-            if (ret < 0) break;
+            if (ret < 0) {
+                char errbuf[128];
+                av_strerror(ret, errbuf, sizeof(errbuf));
+                std::cerr << "[VideoEncoder] avcodec_receive_packet failed: " << errbuf << std::endl;
+                break;
+            }
 
             auto now = std::chrono::system_clock::now().time_since_epoch();
             uint64_t ts = std::chrono::duration_cast<std::chrono::microseconds>(now).count();
