@@ -223,6 +223,10 @@ int main() {
                 
                 usb_rx_buffer.erase(usb_rx_buffer.begin(), usb_rx_buffer.begin() + 4 + len);
 
+                if (channel != 2) {
+                    std::cout << "[DEBUG-RX] Raw Packet - Channel: " << (int)channel << " Flags: 0x" << std::hex << (int)flags << std::dec << " Len: " << len << std::endl;
+                }
+
                 // Use robust bitmasking to detect encrypted messages
                 if ((flags & 0x08) != 0) {
                     {

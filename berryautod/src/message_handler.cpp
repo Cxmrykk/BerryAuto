@@ -25,6 +25,11 @@ void hex_dump(const std::string& prefix, const uint8_t* data, int len) {
 
 void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data, int payload_len) {
     
+    // Ignore Video ACKs to prevent log flooding
+    if (channel != 2 || type != MediaMsgType::MEDIA_MESSAGE_ACK) { 
+        std::cout << "[DEBUG-RX] Parsed - Channel: " << (int)channel << " Type: " << type << " Len: " << payload_len << std::endl;
+    }
+
     // ---- GLOBAL CONTROL (Can arrive on any channel) ----
     if (type == ControlMsgType::MESSAGE_CHANNEL_OPEN_RESPONSE) {
         if (!pending_channel_opens.empty()) {
@@ -42,15 +47,12 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                 setup.set_type(MediaCodecType::MEDIA_CODEC_VIDEO_H264_BP);
                 send_message(opened_channel, MediaMsgType::MEDIA_MESSAGE_SETUP, setup); 
 
-                // Force start video stream immediately. 
-                // Many real head units stall if we do not initiate the start proactively.
-                std::cout << ">>> Forcing Video Stream Start... <<<" << std::endl;
+                std::cout << ">>> Forcing Video Stream Start Request... <<<" << std::endl;
                 Start start; 
                 start.set_session_id(1234);
                 start.set_configuration_index(0);
                 send_message(opened_channel, MediaMsgType::MEDIA_MESSAGE_START, start);
 
-                // CRITICAL: Request Video Focus & Audio Focus explicitly to lift the Splash Screen
                 std::cout << ">>> Requesting Video Focus to lift Splash Screen... <<<" << std::endl;
                 VideoFocusRequestNotification vfr;
                 vfr.set_disp_channel_id(opened_channel);
@@ -62,17 +64,8 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                 afr.set_request(AudioFocusRequestNotification::GAIN);
                 send_message(0, ControlMsgType::MESSAGE_AUDIO_FOCUS_REQUEST, afr);
 
-                is_video_streaming = true;
-                video_unacked_count = 0; 
-                
-                if (video_streamer == nullptr) {
-                    video_streamer = new VideoEncoder(global_video_width, global_video_height, on_video_nal_ready);
-                    video_streamer->start();
-                    std::cout << "[VIDEO] Live Encoding Started (" << global_video_width << "x" << global_video_height << " H.264)." << std::endl;
-                }
-
-                video_streamer->force_keyframe();
-                inject_cached_video_config(); // Harmless if not cached yet
+                // [FIX] Removed premature is_video_streaming = true;
+                // Wait for the car to actually grant focus before sending data.
             } 
             else if (ctype == ChannelType::INPUT) {
                 input_channel_ready = true;
@@ -103,7 +96,7 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                 req.set_service_id(next_chan);
                 send_message(next_chan, ControlMsgType::MESSAGE_CHANNEL_OPEN_REQUEST, req);
             } else {
-                LOG_I(">>> All channels opened successfully! <<<");
+                LOG_I(">>> All channels opened successfully! Waiting for Car to grant Video Focus... <<<");
             }
         }
         return; 
@@ -231,9 +224,6 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
             is_video_streaming = false;
             video_channel_ready = false;
         }
-        else {
-            // Suppress continuous Ping/Status debug chatter
-        }
     }
     // ---- DYNAMIC MEDIA CHANNELS (Video, Audio, Mic) ----
     else if (ctype == ChannelType::VIDEO || ctype == ChannelType::AUDIO || ctype == ChannelType::MIC) {
@@ -264,6 +254,15 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
         else if (type == MediaMsgType::MEDIA_MESSAGE_START) {
             if (ctype == ChannelType::VIDEO) {
                 LOG_I(">>> Video Stream started by car! <<<");
+                is_video_streaming = true;
+                video_unacked_count = 0; 
+                if (video_streamer == nullptr) {
+                    video_streamer = new VideoEncoder(global_video_width, global_video_height, on_video_nal_ready);
+                    video_streamer->start();
+                    std::cout << "[VIDEO] Live Encoding Started (" << global_video_width << "x" << global_video_height << " H.264)." << std::endl;
+                }
+                video_streamer->force_keyframe();
+                inject_cached_video_config();
             }
         }
         else if (type == MediaMsgType::MEDIA_MESSAGE_STOP) {

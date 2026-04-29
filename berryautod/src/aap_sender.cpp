@@ -35,6 +35,7 @@ void send_unencrypted(uint8_t channel, uint8_t flags, uint16_t type, const std::
     out.push_back(type & 0xFF);
     out.insert(out.end(), payload.begin(), payload.end());
     
+    std::cout << "[DEBUG-TX] Unencrypted - Channel: " << (int)channel << " Type: " << type << " Size: " << out.size() << std::endl;
     write_to_usb(out);
 }
 
@@ -110,6 +111,9 @@ void ssl_write_and_flush_unlocked(const std::vector<uint8_t>& pt, uint8_t target
     
     // Write out the packets using blocking I/O *WITHOUT* holding the vital AAP mutex
     for (const auto& pkt : out_packets) {
+        if (target_channel != 2) { // Skip logging video frames
+            std::cout << "[DEBUG-TX] Encrypted - Channel: " << (int)target_channel << " Flags: 0x" << std::hex << (int)encrypted_flag << std::dec << " Size: " << pkt.size() << std::endl;
+        }
         write_to_usb(pkt);
     }
 }
@@ -118,6 +122,8 @@ void ssl_write_and_flush_unlocked(const std::vector<uint8_t>& pt, uint8_t target
 void send_message(uint8_t channel, uint16_t type, const google::protobuf::Message& proto_msg) {
     std::vector<uint8_t> serialized(proto_msg.ByteSizeLong());
     proto_msg.SerializeToArray(serialized.data(), serialized.size());
+
+    std::cout << "[DEBUG] SEND Channel: " << (int)channel << " Type: " << type << " Size: " << serialized.size() << std::endl;
 
     // Protocol requirement: Control messages sent on Media channels (like Setup/Start) MUST have the Control bit (0x04) set in the flags.
     bool is_control = (type <= 255 || (type >= 32768 && type <= 32799) || type >= 65504);
