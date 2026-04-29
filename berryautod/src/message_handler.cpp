@@ -15,6 +15,8 @@
 
 using namespace com::andrerinas::headunitrevived::aap::protocol::proto;
 
+std::map<int, int> channel_codecs;
+
 void hex_dump(const std::string& prefix, const uint8_t* data, int len) {
     std::cout << prefix << " (" << len << " bytes): ";
     for (int i = 0; i < len; ++i) {
@@ -40,11 +42,10 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
             
             ChannelType ctype = channel_types[opened_channel];
 
-            if (ctype == ChannelType::VIDEO) {
-                video_channel_ready = true;
-                std::cout << ">>> Sending Media Setup for Video Channel... <<<" << std::endl;
+            if (ctype == ChannelType::VIDEO || ctype == ChannelType::AUDIO || ctype == ChannelType::MIC) {
+                std::cout << ">>> Sending Media Setup for Channel " << opened_channel << "... <<<" << std::endl;
                 MediaSetupRequest setup; 
-                setup.set_type(MediaCodecType::MEDIA_CODEC_VIDEO_H264_BP);
+                setup.set_type((MediaCodecType)channel_codecs[opened_channel]);
                 send_message(opened_channel, MediaMsgType::MEDIA_MESSAGE_SETUP, setup); 
             } 
             else if (ctype == ChannelType::INPUT) {
@@ -53,11 +54,18 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                 KeyBindingRequest bind;
                 send_message(opened_channel, InputMsgType::BINDINGREQUEST, bind);
             }
-            else if (ctype == ChannelType::AUDIO || ctype == ChannelType::MIC) {
-                std::cout << ">>> Sending Media Setup for Audio/Mic Channel (" << opened_channel << ")... <<<" << std::endl;
-                MediaSetupRequest setup; 
-                setup.set_type(MediaCodecType::MEDIA_CODEC_AUDIO_PCM);
-                send_message(opened_channel, MediaMsgType::MEDIA_MESSAGE_SETUP, setup);
+            else if (ctype == ChannelType::SENSOR) {
+                std::cout << ">>> Sending Sensor Start Requests... <<<" << std::endl;
+                
+                // Real Head Units will refuse to send MEDIA_CONFIG and start video if 
+                // DRIVING_STATUS isn't requested first (Safety Lockout)
+                SensorRequest req_driving;
+                req_driving.set_type(SensorType::DRIVING_STATUS);
+                send_message(opened_channel, SensorsMsgType::SENSOR_STARTREQUEST, req_driving);
+
+                SensorRequest req_night;
+                req_night.set_type(SensorType::NIGHT);
+                send_message(opened_channel, SensorsMsgType::SENSOR_STARTREQUEST, req_night);
             }
             else {
                 std::cout << ">>> Service active. No Media Setup required. <<<" << std::endl;
@@ -89,6 +97,7 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                 
                 while (!pending_channel_opens.empty()) pending_channel_opens.pop();
                 channel_types.clear();
+                channel_codecs.clear();
 
                 for (int i = 0; i < sdp_resp.services_size(); i++) {
                     const auto& svc = sdp_resp.services(i);
@@ -118,11 +127,16 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                                 if (video_config.has_margin_width()) global_video_margin_w = video_config.margin_width();
                                 if (video_config.has_margin_height()) global_video_margin_h = video_config.margin_height();
                                 
+                                int codec = video_config.has_video_codec_type() ? video_config.video_codec_type() : MediaCodecType::MEDIA_CODEC_VIDEO_H264_BP;
+                                channel_codecs[svc_id] = codec;
+
                                 std::cout << "[INFO] Headunit negotiated VIDEO (Channel " << svc_id << ") at " 
-                                          << global_video_width << "x" << global_video_height << std::endl;
+                                          << global_video_width << "x" << global_video_height << " (Codec " << codec << ")" << std::endl;
                             } else {
                                 channel_types[svc_id] = ChannelType::AUDIO;
-                                std::cout << "[INFO] Headunit advertised AUDIO (Channel " << svc_id << ")" << std::endl;
+                                int codec = svc.media_sink_service().has_available_type() ? svc.media_sink_service().available_type() : MediaCodecType::MEDIA_CODEC_AUDIO_PCM;
+                                channel_codecs[svc_id] = codec;
+                                std::cout << "[INFO] Headunit advertised AUDIO (Channel " << svc_id << ", Codec " << codec << ")" << std::endl;
                             }
                         } 
                         else if (svc.has_input_source_service()) {
@@ -139,7 +153,9 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                         }
                         else if (svc.has_media_source_service()) {
                             channel_types[svc_id] = ChannelType::MIC;
-                            std::cout << "[INFO] Headunit advertised MIC (Channel " << svc_id << ")" << std::endl;
+                            int codec = svc.media_source_service().has_type() ? svc.media_source_service().type() : MediaCodecType::MEDIA_CODEC_AUDIO_PCM;
+                            channel_codecs[svc_id] = codec;
+                            std::cout << "[INFO] Headunit advertised MIC (Channel " << svc_id << ", Codec " << codec << ")" << std::endl;
                         }
                         else if (svc.has_sensor_source_service()) {
                             channel_types[svc_id] = ChannelType::SENSOR;
@@ -198,6 +214,9 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
         else if (type == ControlMsgType::MESSAGE_CHANNEL_CLOSE_NOTIFICATION) {
             is_video_streaming = false;
             video_channel_ready = false;
+        }
+        else {
+            // Suppress continuous Ping/Status debug chatter
         }
     }
     // ---- DYNAMIC MEDIA CHANNELS (Video, Audio, Mic) ----
