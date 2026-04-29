@@ -35,7 +35,7 @@ bool video_channel_ready = false;
 bool input_channel_ready = false;
 
 // Dynamic Channel Assignments
-int video_channel_id = 2; // Defaults, overridden by ServiceDiscoveryResponse
+int video_channel_id = 2; 
 int input_channel_id = 3;
 
 int global_video_width = 800;
@@ -221,8 +221,6 @@ int main() {
                     {
                         std::lock_guard<std::recursive_mutex> lock(aap_mutex);
                         
-                        // First-fragment encrypted packets have a 4-byte unfragmented size prefix BEFORE the TLS payload.
-                        // We must strip it out before feeding the raw data into OpenSSL.
                         size_t offset = 0;
                         if ((flags & 0x01) != 0 && (flags & 0x02) == 0) { // 0x09
                             if (payload.size() >= 4) {
@@ -242,6 +240,10 @@ int main() {
                                         handle_decrypted_payload(channel, type, dec_buf + 2, dec_bytes - 2);
                                     }
                                 } else {
+                                    int err = SSL_get_error(ssl, dec_bytes);
+                                    if (err != SSL_ERROR_WANT_READ && err != SSL_ERROR_WANT_WRITE) {
+                                        LOG_E(">>> SSL_read Decryption Error: " << err << " <<<");
+                                    }
                                     break; 
                                 }
                             }

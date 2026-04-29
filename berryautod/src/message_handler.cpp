@@ -14,7 +14,6 @@
 
 using namespace com::andrerinas::headunitrevived::aap::protocol::proto;
 
-// Helper function to print hex dumps for debugging
 void hex_dump(const std::string& prefix, const uint8_t* data, int len) {
     std::cout << prefix << " (" << len << " bytes): ";
     for (int i = 0; i < len; ++i) {
@@ -293,11 +292,9 @@ void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload
         }
     }
     else {
-        // Fallback for when the head unit completely drops TLS after negotiation
-        if (!ssl_bypassed) {
-            LOG_I(">>> Received regular message unencrypted! Forcing TLS bypass. <<<");
-            ssl_bypassed = true;
-        }
+        // [FIX] The head unit sent this one packet unencrypted due to a known bug in its parser, 
+        // BUT we must continue to send outgoing requests encrypted so they are accepted!
+        LOG_I(">>> Parsing unencrypted packet but KEEPING outbound TLS active! <<<");
         handle_parsed_payload(channel, type, payload_data, payload_len);
     }
 }

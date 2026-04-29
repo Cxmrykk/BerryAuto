@@ -119,16 +119,23 @@ void send_message(uint8_t channel, uint16_t type, const google::protobuf::Messag
     std::vector<uint8_t> serialized(proto_msg.ByteSizeLong());
     proto_msg.SerializeToArray(serialized.data(), serialized.size());
 
+    // Protocol requirement: Control messages sent on Media channels (like Setup/Start) MUST have the Control bit (0x04) set in the flags.
+    bool is_control = (type <= 255 || (type >= 32768 && type <= 32799) || type >= 65504);
+
     if (ssl_bypassed) {
-        // Unencrypted Base Protobuf Flag
-        send_unencrypted(channel, 0x03, type, serialized);
+        uint8_t flags = 0x03; // Base Unencrypted
+        if (channel != 0 && is_control) flags = 0x07; 
+
+        send_unencrypted(channel, flags, type, serialized);
     } else {
-        // Encrypted Base Protobuf Flag
+        uint8_t flags = 0x0B; // Base Encrypted
+        if (channel != 0 && is_control) flags = 0x0F;
+
         std::vector<uint8_t> plaintext;
         plaintext.push_back((type >> 8) & 0xFF);
         plaintext.push_back(type & 0xFF);
         plaintext.insert(plaintext.end(), serialized.begin(), serialized.end());
 
-        ssl_write_and_flush_unlocked(plaintext, channel, 0x0B, 0);
+        ssl_write_and_flush_unlocked(plaintext, channel, flags, 0);
     }
 }
