@@ -64,6 +64,15 @@ bool load_hardcoded_certs(SSL_CTX *ctx) {
     return true;
 }
 
+int dummy_verify_cb(int preverify_ok, X509_STORE_CTX *ctx) {
+    // Android Auto requires Mutual TLS (mTLS). We must request a certificate
+    // from the Head Unit, but we don't actually care to cryptographically 
+    // verify the car's manufacturer CA. Always return 1 (Accept).
+    (void)preverify_ok;
+    (void)ctx;
+    return 1;
+}
+
 void force_zero_ack(int ep0, bool is_in) {
     if (is_in) {
         syscall(SYS_write, ep0, NULL, 0);
@@ -150,6 +159,9 @@ int main() {
     SSL_CTX_set_max_proto_version(ssl_ctx, TLS1_2_VERSION);
     SSL_CTX_set_min_proto_version(ssl_ctx, TLS1_2_VERSION);
 
+    // Force Mutual TLS (mTLS) - AAP strictly requires the Phone to request the Car's certificate
+    SSL_CTX_set_verify(ssl_ctx, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, dummy_verify_cb);
+
     SSL_CTX_set_session_id_context(ssl_ctx, (const unsigned char*)"AA", 2);
     SSL_CTX_set_session_cache_mode(ssl_ctx, SSL_SESS_CACHE_SERVER);
     SSL_CTX_set_tlsext_ticket_keys(ssl_ctx, aa_ticket_keys, sizeof(aa_ticket_keys));
@@ -186,7 +198,6 @@ int main() {
                 continue;
             }
             if (errno == ESHUTDOWN || errno == ENODEV) {
-                // USB bus reset/disconnected, gracefully ignore since ep0_thread handles logic
                 usleep(10000);
                 continue;
             }

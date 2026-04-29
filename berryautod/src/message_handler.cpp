@@ -5,6 +5,8 @@
 #include "input_handler.hpp"
 #include "video_encoder.hpp"
 
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 #include "control.pb.h"
 #include "media.pb.h"
 #include "input.pb.h"
@@ -59,11 +61,6 @@ void handle_decrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload_d
                             global_touch_width = global_video_width;
                             global_touch_height = global_video_height;
                         }
-                    }
-                    // Bluetooth Connection Parsing
-                    if (svc.has_bluetooth_service()) {
-                        std::cout << "[INFO] Headunit expects Bluetooth pairing to MAC: " 
-                                  << svc.bluetooth_service().car_address() << std::endl;
                     }
                 }
             } 
@@ -218,12 +215,10 @@ void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload
             (void)BIO_reset(wbio);
         }
 
-        // PERFECT 6-BYTE VERSION RESPONSE (Major, Minor, Status=0)
-        // Note: send_unencrypted automatically prepends the 0x00 0x02 Type ID.
         std::vector<uint8_t> resp_payload = {
             (uint8_t)(major >> 8), (uint8_t)(major & 0xFF),
             (uint8_t)(minor >> 8), (uint8_t)(minor & 0xFF),
-            0x00, 0x00 // STATUS_SUCCESS = 0
+            0x00, 0x00 
         }; 
         send_unencrypted(0, 0x03, ControlMsgType::MESSAGE_VERSION_RESPONSE, resp_payload);
     } 
@@ -239,6 +234,14 @@ void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload
                 if (ret == 1) {
                     LOG_I(">>> TLS Handshake Complete! <<<");
                     handshake_just_completed = true;
+                } else {
+                    int err = SSL_get_error(ssl, ret);
+                    if (err != SSL_ERROR_WANT_READ && err != SSL_ERROR_WANT_WRITE) {
+                        LOG_E(">>> SSL_accept Error: " << err << " <<<");
+                        char err_buf[256];
+                        ERR_error_string_n(ERR_get_error(), err_buf, sizeof(err_buf));
+                        LOG_E(">>> SSL Details: " << err_buf << " <<<");
+                    }
                 }
             }
         }
@@ -252,12 +255,11 @@ void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload
     }
     else if (channel == 0 && type == ControlMsgType::MESSAGE_AUTH_COMPLETE) {
         
-        // Parse the protobuf to see if the Head Unit accepted our response
         AuthCompleteResponse auth_resp;
         if (auth_resp.ParseFromArray(payload_data, payload_len)) {
             if (auth_resp.status() != 0) {
                 LOG_E(">>> Handshake FAILED with Head Unit error code: " + std::to_string(auth_resp.status()) + " <<<");
-                return; // Wait for the car to reset the port
+                return;
             }
         }
 
@@ -271,7 +273,6 @@ void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload
         sdp_req.set_phone_name("BerryAuto Phone");
         sdp_req.set_phone_brand("Raspberry Pi");
         
-        // Since we are inside handle_unencrypted_payload, using send_message handles TLS or Plaintext automatically
         send_message(0, ControlMsgType::MESSAGE_SERVICE_DISCOVERY_REQUEST, sdp_req);
     }
 }
