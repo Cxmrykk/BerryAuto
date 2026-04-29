@@ -1,4 +1,3 @@
-#include <X11/Xlib.h>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -23,6 +22,7 @@
 #include "input_handler.hpp"
 #include "message_handler.hpp"
 #include "video_encoder.hpp"
+#include "x11_wrapper.hpp" // FIX: Use the wrapper to prevent the X11 'Status' macro collision
 
 // Global Instantiations
 int ep_in, ep_out;

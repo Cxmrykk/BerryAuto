@@ -67,7 +67,7 @@ void aap_send_raw(const std::vector<uint8_t>& pt, uint8_t target_channel, uint8_
 }
 
 void ssl_write_and_flush_unlocked(const std::vector<uint8_t>& pt, uint8_t target_channel, uint8_t base_flags,
-                                  uint32_t unused)
+                                  uint32_t /*unused*/) // FIX: Silenced unused variable warning
 {
     std::vector<std::vector<uint8_t>> out_packets;
     {
