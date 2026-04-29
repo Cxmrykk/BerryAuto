@@ -14,6 +14,7 @@
 
 using namespace com::andrerinas::headunitrevived::aap::protocol::proto;
 
+// Helper function to print hex dumps for debugging
 void hex_dump(const std::string& prefix, const uint8_t* data, int len) {
     std::cout << prefix << " (" << len << " bytes): ";
     for (int i = 0; i < len; ++i) {
@@ -94,7 +95,6 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
             if (!video_channel_ready) {
                 video_channel_ready = true;
                 std::cout << ">>> Video Channel (" << video_channel_id << ") Opened! Sending Media Setup... <<<" << std::endl;
-                
                 MediaSetupRequest setup; 
                 setup.set_type(MediaCodecType::MEDIA_CODEC_VIDEO_H264_BP);
                 send_message(video_channel_id, MediaMsgType::MEDIA_MESSAGE_SETUP, setup); 
@@ -102,7 +102,6 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
             else if (!input_channel_ready) {
                 input_channel_ready = true;
                 std::cout << ">>> Input Channel (" << input_channel_id << ") Opened! Sending Touch Binding Request... <<<" << std::endl;
-                
                 KeyBindingRequest bind;
                 send_message(input_channel_id, InputMsgType::BINDINGREQUEST, bind);
             }
@@ -294,6 +293,7 @@ void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload
         }
     }
     else {
+        // Fallback for when the head unit completely drops TLS after negotiation
         if (!ssl_bypassed) {
             LOG_I(">>> Received regular message unencrypted! Forcing TLS bypass. <<<");
             ssl_bypassed = true;
