@@ -40,6 +40,37 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                 MediaSetupRequest setup; 
                 setup.set_type(MediaCodecType::MEDIA_CODEC_VIDEO_H264_BP);
                 send_message(opened_channel, MediaMsgType::MEDIA_MESSAGE_SETUP, setup); 
+
+                // FIX: Force start video stream immediately instead of waiting for a CONFIG response
+                // Many real head units stall if we do not initiate the start proactively.
+                std::cout << ">>> Forcing Video Stream Start... <<<" << std::endl;
+                Start start; 
+                start.set_session_id(1234);
+                start.set_configuration_index(0);
+                send_message(opened_channel, MediaMsgType::MEDIA_MESSAGE_START, start);
+
+                // CRITICAL: Request Video Focus & Audio Focus explicitly to lift the Splash Screen
+                std::cout << ">>> Requesting Video Focus to lift Splash Screen... <<<" << std::endl;
+                VideoFocusRequestNotification vfr;
+                vfr.set_mode(VideoFocusMode::VIDEO_FOCUS_PROJECTED);
+                send_message(opened_channel, MediaMsgType::MEDIA_MESSAGE_VIDEO_FOCUS_REQUEST, vfr);
+
+                std::cout << ">>> Requesting Default Audio Focus... <<<" << std::endl;
+                AudioFocusRequestNotification afr;
+                afr.set_request(AudioFocusRequestNotification::GAIN);
+                send_message(0, ControlMsgType::MESSAGE_AUDIO_FOCUS_REQUEST, afr);
+
+                is_video_streaming = true;
+                video_unacked_count = 0; 
+                
+                if (video_streamer == nullptr) {
+                    video_streamer = new VideoEncoder(global_video_width, global_video_height, on_video_nal_ready);
+                    video_streamer->start();
+                    std::cout << "[VIDEO] Live Encoding Started (" << global_video_width << "x" << global_video_height << " H.264)." << std::endl;
+                }
+
+                video_streamer->force_keyframe();
+                inject_cached_video_config();
             } 
             else if (ctype == ChannelType::INPUT) {
                 input_channel_ready = true;
@@ -48,10 +79,16 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                 send_message(opened_channel, InputMsgType::BINDINGREQUEST, bind);
             }
             else if (ctype == ChannelType::AUDIO || ctype == ChannelType::MIC) {
-                std::cout << ">>> Sending Dummy Media Setup for Audio/Mic Channel (" << opened_channel << ")... <<<" << std::endl;
+                std::cout << ">>> Sending Dummy Media Setup & Start for Audio/Mic Channel (" << opened_channel << ")... <<<" << std::endl;
                 MediaSetupRequest setup; 
                 setup.set_type(MediaCodecType::MEDIA_CODEC_AUDIO_PCM);
                 send_message(opened_channel, MediaMsgType::MEDIA_MESSAGE_SETUP, setup);
+                
+                // FIX: Force start audio/mic channels immediately
+                Start start; 
+                start.set_session_id(5678);
+                start.set_configuration_index(0);
+                send_message(opened_channel, MediaMsgType::MEDIA_MESSAGE_START, start);
             }
             else {
                 // Sensors, Nav, BT, Status do not require media setup
@@ -214,42 +251,9 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                         LOG_I(">>> Max Unacked Frames set to " + std::to_string(max_video_unacked));
                     }
                 }
-                
-                LOG_I(">>> Video Configured. Starting Stream! <<<");
-                Start start; 
-                start.set_session_id(1234);
-                start.set_configuration_index(0);
-                send_message(channel, MediaMsgType::MEDIA_MESSAGE_START, start);
-
-                // CRITICAL: Request Video Focus (Channel-Specific) & Audio Focus (Channel 0) explicitly to lift the Splash Screen
-                LOG_I(">>> Requesting Video Focus to lift Splash Screen... <<<");
-                VideoFocusRequestNotification vfr;
-                vfr.set_mode(VideoFocusMode::VIDEO_FOCUS_PROJECTED);
-                send_message(channel, MediaMsgType::MEDIA_MESSAGE_VIDEO_FOCUS_REQUEST, vfr);
-
-                LOG_I(">>> Requesting Default Audio Focus... <<<");
-                AudioFocusRequestNotification afr;
-                afr.set_request(AudioFocusRequestNotification::GAIN);
-                send_message(0, ControlMsgType::MESSAGE_AUDIO_FOCUS_REQUEST, afr);
-
-                is_video_streaming = true;
-                video_unacked_count = 0; 
-                
-                if (video_streamer == nullptr) {
-                    video_streamer = new VideoEncoder(global_video_width, global_video_height, on_video_nal_ready);
-                    video_streamer->start();
-                    std::cout << "[VIDEO] Live Encoding Started (" << global_video_width << "x" << global_video_height << " H.264)." << std::endl;
-                }
-
-                video_streamer->force_keyframe();
-                inject_cached_video_config();
+                LOG_I(">>> Video Configured via Car Response. <<<");
             } else {
-                // Audio / Mic config received. Send Start to prevent Head Unit from stalling.
-                std::cout << ">>> Audio/Mic Channel (" << (int)channel << ") Configured. Sending Dummy Start! <<<" << std::endl;
-                Start start; 
-                start.set_session_id(5678);
-                start.set_configuration_index(0);
-                send_message(channel, MediaMsgType::MEDIA_MESSAGE_START, start);
+                LOG_I(">>> Audio/Mic Configured via Car Response. <<<");
             }
         }
         else if (type == MediaMsgType::MEDIA_MESSAGE_ACK) {
