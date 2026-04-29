@@ -78,12 +78,12 @@ void handle_decrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload_d
             ChannelOpenRequest vid_req;
             vid_req.set_priority(1);
             vid_req.set_service_id(2);
-            send_encrypted(0, ControlMsgType::MESSAGE_CHANNEL_OPEN_REQUEST, vid_req);
+            send_message(0, ControlMsgType::MESSAGE_CHANNEL_OPEN_REQUEST, vid_req);
 
             ChannelOpenRequest inp_req;
             inp_req.set_priority(2);
             inp_req.set_service_id(3);
-            send_encrypted(0, ControlMsgType::MESSAGE_CHANNEL_OPEN_REQUEST, inp_req);
+            send_message(0, ControlMsgType::MESSAGE_CHANNEL_OPEN_REQUEST, inp_req);
         } 
         else if (type == ControlMsgType::MESSAGE_CHANNEL_OPEN_RESPONSE) {
             if (!video_channel_ready) {
@@ -91,13 +91,13 @@ void handle_decrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload_d
                 LOG_I(">>> Video Channel (2) Opened! Sending Media Setup... <<<");
                 MediaSetupRequest setup; 
                 setup.set_type(MediaCodecType::MEDIA_CODEC_VIDEO_H264_BP);
-                send_encrypted(2, MEDIA_MESSAGE_SETUP, setup); 
+                send_message(2, MediaMsgType::MEDIA_MESSAGE_SETUP, setup); 
             } 
             else if (!input_channel_ready) {
                 input_channel_ready = true;
                 LOG_I(">>> Input Channel (3) Opened! Sending Touch Binding Request... <<<");
                 KeyBindingRequest bind;
-                send_encrypted(3, InputMsgType::BINDINGREQUEST, bind);
+                send_message(3, InputMsgType::BINDINGREQUEST, bind);
             }
         }
         else if (type == ControlMsgType::MESSAGE_PING_REQUEST) {
@@ -105,14 +105,14 @@ void handle_decrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload_d
             req.ParseFromArray(payload_data, payload_len);
             PingResponse resp;
             resp.set_timestamp(req.timestamp());
-            send_encrypted(0, ControlMsgType::MESSAGE_PING_RESPONSE, resp);
+            send_message(0, ControlMsgType::MESSAGE_PING_RESPONSE, resp);
         }
         else if (type == ControlMsgType::MESSAGE_BYEBYE_REQUEST) {
             is_video_streaming = false;
             video_channel_ready = false;
             input_channel_ready = false;
             ByeByeResponse resp;
-            send_encrypted(0, ControlMsgType::MESSAGE_BYEBYE_RESPONSE, resp);
+            send_message(0, ControlMsgType::MESSAGE_BYEBYE_RESPONSE, resp);
         }
         else if (type == ControlMsgType::MESSAGE_CHANNEL_CLOSE_NOTIFICATION) {
             is_video_streaming = false;
@@ -134,7 +134,7 @@ void handle_decrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload_d
             Start start; 
             start.set_session_id(1234);
             start.set_configuration_index(0);
-            send_encrypted(2, MEDIA_MESSAGE_START, start);
+            send_message(2, MediaMsgType::MEDIA_MESSAGE_START, start);
 
             is_video_streaming = true;
             video_unacked_count = 0; 
@@ -250,6 +250,9 @@ void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload
             }
         }
         
+        // Flush the TLS handshake data BEFORE updating is_tls_connected to true.
+        // This guarantees the Server Finished message goes out as unencrypted MESSAGE_ENCAPSULATED_SSL (Type 3)
+        // rather than an encrypted frame.
         ssl_write_and_flush_unlocked({}, 0, 0x0B, 0); 
         
         if (handshake_just_completed) {
@@ -281,13 +284,6 @@ void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload
         sdp_req.set_phone_name("BerryAuto Phone");
         sdp_req.set_phone_brand("Raspberry Pi");
         
-        if (ssl_bypassed) {
-            // Force it unencrypted if TLS genuinely failed but we want to try our luck
-            std::vector<uint8_t> serialized(sdp_req.ByteSizeLong());
-            sdp_req.SerializeToArray(serialized.data(), serialized.size());
-            send_unencrypted(0, 0x03, ControlMsgType::MESSAGE_SERVICE_DISCOVERY_REQUEST, serialized);
-        } else {
-            send_encrypted(0, ControlMsgType::MESSAGE_SERVICE_DISCOVERY_REQUEST, sdp_req);
-        }
+        send_message(0, ControlMsgType::MESSAGE_SERVICE_DISCOVERY_REQUEST, sdp_req);
     }
 }

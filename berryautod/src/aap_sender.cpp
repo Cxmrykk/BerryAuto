@@ -62,10 +62,12 @@ void ssl_write_and_flush_unlocked(const std::vector<uint8_t>& pt, uint8_t target
     {
         std::lock_guard<std::recursive_mutex> lock(aap_mutex);
         
+        // Push the payload into the SSL engine
         if (!pt.empty()) {
             SSL_write(ssl, pt.data(), pt.size());
         }
 
+        // Immediately drain any produced TLS records while STILL holding aap_mutex
         while (true) {
             int pending = BIO_ctrl_pending(wbio);
             if (pending <= 0) break;
@@ -106,6 +108,7 @@ void ssl_write_and_flush_unlocked(const std::vector<uint8_t>& pt, uint8_t target
         }
     }
     
+    // Write out the packets using blocking I/O *WITHOUT* holding the vital AAP mutex
     for (const auto& pkt : out_packets) {
         write_to_usb(pkt);
     }
