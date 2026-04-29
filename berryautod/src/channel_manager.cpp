@@ -10,7 +10,6 @@
 
 using namespace com::andrerinas::headunitrevived::aap::protocol::proto;
 
-// Abstracted away from the rest of the application
 static std::map<int, int> channel_codecs;
 
 void handle_channel_open_response()
@@ -103,7 +102,7 @@ void process_service_discovery_response(uint8_t* payload_data, int payload_len)
                         int best_idx = 0;
                         int best_score = -1;
 
-                        // Intelligently score and find the best configuration
+                        // Dynamically score configs based on exact OS resolution matching and Pi Hardware (H.264)
                         for (int k = 0; k < svc.media_sink_service().video_configs_size(); k++)
                         {
                             const auto& vc = svc.media_sink_service().video_configs(k);
@@ -111,18 +110,64 @@ void process_service_discovery_response(uint8_t* payload_data, int payload_len)
                                                                   : MediaCodecType::MEDIA_CODEC_VIDEO_H264_BP;
                             int res_type = vc.has_codec_resolution() ? vc.codec_resolution() : 1;
 
-                            int score = 0;
-                            if (codec == MediaCodecType::MEDIA_CODEC_VIDEO_H264_BP)
-                                score += 1000; // Prefer H.264 natively for Pi hardware
-                            else if (codec == MediaCodecType::MEDIA_CODEC_VIDEO_H265)
-                                score += 800; // Support HEVC fallback
+                            int cfg_w = 800, cfg_h = 480;
+                            switch (res_type)
+                            {
+                                case 1:
+                                    cfg_w = 800;
+                                    cfg_h = 480;
+                                    break;
+                                case 2:
+                                    cfg_w = 1280;
+                                    cfg_h = 720;
+                                    break;
+                                case 3:
+                                    cfg_w = 1920;
+                                    cfg_h = 1080;
+                                    break;
+                                case 4:
+                                    cfg_w = 2560;
+                                    cfg_h = 1440;
+                                    break;
+                                case 5:
+                                    cfg_w = 3840;
+                                    cfg_h = 2160;
+                                    break;
+                                case 6:
+                                    cfg_w = 720;
+                                    cfg_h = 1280;
+                                    break;
+                                case 7:
+                                    cfg_w = 1080;
+                                    cfg_h = 1920;
+                                    break;
+                                case 8:
+                                    cfg_w = 1440;
+                                    cfg_h = 2560;
+                                    break;
+                                case 9:
+                                    cfg_w = 2160;
+                                    cfg_h = 3840;
+                                    break;
+                            }
 
-                            if (res_type == 2)
-                                score += 500; // 1st Choice: 720p (Matches Pi Desktop well)
+                            int score = 0;
+
+                            // Massively prefer H.264 natively since Pi lacks HEVC encode hardware
+                            if (codec == MediaCodecType::MEDIA_CODEC_VIDEO_H264_BP)
+                                score += 10000;
+                            else if (codec == MediaCodecType::MEDIA_CODEC_VIDEO_H265)
+                                score += 1000;
+
+                            // Strongly prefer an EXACT resolution match to prevent distortion and black bars
+                            if (cfg_w == os_desktop_width && cfg_h == os_desktop_height)
+                                score += 5000;
+                            else if (res_type == 2)
+                                score += 500; // 720p 2nd Choice
                             else if (res_type == 3)
-                                score += 300; // 2nd Choice: 1080p
+                                score += 300; // 1080p 3rd Choice
                             else if (res_type == 1)
-                                score += 100; // 3rd Choice: 480p
+                                score += 100; // 480p 4th Choice
 
                             if (score > best_score)
                             {

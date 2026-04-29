@@ -1,3 +1,4 @@
+#include <X11/Xlib.h>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -41,8 +42,11 @@ int input_channel_id = 3;
 std::queue<int> pending_channel_opens;
 std::map<int, ChannelType> channel_types;
 
+int os_desktop_width = 800;
+int os_desktop_height = 480;
+
 int global_video_config_index = 0;
-int global_video_codec_type = 3; // Defaults to MEDIA_CODEC_VIDEO_H264_BP
+int global_video_codec_type = 3;
 int global_video_width = 800;
 int global_video_height = 480;
 int global_video_margin_w = 0;
@@ -178,6 +182,26 @@ int main()
 {
     LOG_I("Starting OpenGAL Emitter...");
 
+    const char* disp_env = getenv("DISPLAY");
+    if (!disp_env)
+        setenv("DISPLAY", ":0", 1);
+
+    Display* d = XOpenDisplay(NULL);
+    if (d)
+    {
+        int screen = DefaultScreen(d);
+        os_desktop_width = DisplayWidth(d, screen);
+        os_desktop_height = DisplayHeight(d, screen);
+        XCloseDisplay(d);
+        LOG_I("Detected OS Desktop Resolution: " << os_desktop_width << "x" << os_desktop_height);
+    }
+    else
+    {
+        LOG_E("Failed to open X11 Display. Defaulting to 800x480.");
+        os_desktop_width = 800;
+        os_desktop_height = 480;
+    }
+
     SSL_library_init();
     SSL_load_error_strings();
     ssl_ctx = SSL_CTX_new(TLS_server_method());
@@ -270,7 +294,6 @@ int main()
                               << (int)flags << std::dec << " Len: " << len << std::endl;
                 }
 
-                // Use robust bitmasking to detect encrypted messages
                 if ((flags & 0x08) != 0)
                 {
                     {
@@ -280,9 +303,7 @@ int main()
                         if ((flags & 0x01) != 0 && (flags & 0x02) == 0)
                         { // 0x09
                             if (payload.size() >= 4)
-                            {
                                 offset = 4;
-                            }
                         }
 
                         if (payload.size() > offset)
@@ -299,11 +320,6 @@ int main()
                                     {
                                         uint16_t type = (dec_buf[0] << 8) | dec_buf[1];
                                         handle_decrypted_payload(channel, type, dec_buf + 2, dec_bytes - 2);
-                                    }
-                                    else
-                                    {
-                                        LOG_I("[DEBUG] SSL_read output too small for AAP header: " << dec_bytes
-                                                                                                   << " bytes");
                                     }
                                 }
                                 else
@@ -326,10 +342,6 @@ int main()
                     {
                         uint16_t type = (payload[0] << 8) | payload[1];
                         handle_unencrypted_payload(channel, type, payload.data() + 2, payload.size() - 2);
-                    }
-                    else
-                    {
-                        LOG_I("[DEBUG] Unencrypted payload too small for AAP header: " << payload.size() << " bytes");
                     }
                 }
             }

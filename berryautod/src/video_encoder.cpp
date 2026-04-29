@@ -145,6 +145,7 @@ void VideoEncoder::cleanup_x11()
     if (img)
     {
         XShmDetach(dpy, &shminfo);
+        XSync(dpy, False); // FIX: Flush the queue before detaching to prevent BadAccess crash
         XDestroyImage(img);
         shmdt(shminfo.shmaddr);
         shmctl(shminfo.shmid, IPC_RMID, 0);
@@ -163,14 +164,18 @@ bool VideoEncoder::init_encoder()
     {
         codec = avcodec_find_encoder_by_name("hevc_v4l2m2m");
         if (!codec)
+            codec = avcodec_find_encoder_by_name("libx265");
+        if (!codec)
             codec = avcodec_find_encoder(AV_CODEC_ID_HEVC);
         std::cout << "[VideoEncoder] Head Unit negotiated HEVC (H.265)." << std::endl;
     }
-    else // Default to H.264 Fallback
+    else // MEDIA_CODEC_VIDEO_H264_BP
     {
         codec = avcodec_find_encoder_by_name("h264_v4l2m2m");
         if (!codec)
             codec = avcodec_find_encoder_by_name("h264_omx");
+        if (!codec)
+            codec = avcodec_find_encoder_by_name("libx264");
         if (!codec)
             codec = avcodec_find_encoder(AV_CODEC_ID_H264);
         std::cout << "[VideoEncoder] Head Unit negotiated H.264." << std::endl;
@@ -204,7 +209,7 @@ bool VideoEncoder::init_encoder()
     }
     else if (std::string(codec->name) == "h264_v4l2m2m" || std::string(codec->name) == "hevc_v4l2m2m")
     {
-        // Reduce V4L2 M2M DMA buffer allocations to strictly prevent CMA "No space left on device" crashes
+        // Limit V4L2 M2M DMA buffer allocations to strictly prevent CMA "No space left on device" crashes
         av_opt_set(codec_ctx->priv_data, "num_capture_buffers", "16", 0);
         av_opt_set(codec_ctx->priv_data, "num_output_buffers", "16", 0);
     }
