@@ -30,12 +30,17 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
 
             ServiceDiscoveryResponse sdp_resp;
             if (sdp_resp.ParseFromArray(payload_data, payload_len)) {
+                // Clear any existing sequential backlog
+                while (!pending_channel_opens.empty()) pending_channel_opens.pop();
+
                 for (int i = 0; i < sdp_resp.services_size(); i++) {
                     const auto& svc = sdp_resp.services(i);
-                    // Video Sink Parsing
-                    if (svc.has_media_sink_service()) {
-                        if (svc.has_id()) video_channel_id = svc.id();
-                        if (svc.media_sink_service().video_configs_size() > 0) {
+                    int svc_id = svc.has_id() ? svc.id() : -1;
+                    
+                    if (svc_id != -1) {
+                        // Video Sink Parsing
+                        if (svc.has_media_sink_service() && svc.media_sink_service().video_configs_size() > 0) {
+                            video_channel_id = svc_id;
                             const auto& video_config = svc.media_sink_service().video_configs(0);
                             int res_type = video_config.has_codec_resolution() ? video_config.codec_resolution() : 1;
                             
@@ -59,50 +64,76 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                                       << global_video_width << "x" << global_video_height 
                                       << " | Margins (W: " << global_video_margin_w << " H: " << global_video_margin_h << ")" << std::endl;
                         }
-                    }
-                    // Input / Touch Parsing
-                    if (svc.has_input_source_service()) {
-                        if (svc.has_id()) input_channel_id = svc.id();
-                        if (svc.input_source_service().has_touchscreen()) {
-                            global_touch_width = svc.input_source_service().touchscreen().width();
-                            global_touch_height = svc.input_source_service().touchscreen().height();
-                        } else {
-                            global_touch_width = global_video_width;
-                            global_touch_height = global_video_height;
+                        // Input / Touch Parsing
+                        else if (svc.has_input_source_service()) {
+                            input_channel_id = svc_id;
+                            if (svc.input_source_service().has_touchscreen()) {
+                                global_touch_width = svc.input_source_service().touchscreen().width();
+                                global_touch_height = svc.input_source_service().touchscreen().height();
+                            } else {
+                                global_touch_width = global_video_width;
+                                global_touch_height = global_video_height;
+                            }
                         }
+
+                        // We queue EVERY service ID to be sequentially opened (required by real HUs)
+                        pending_channel_opens.push(svc_id);
                     }
                 }
             } else {
                 LOG_E(">>> [CRITICAL] ParseFromArray FAILED for ServiceDiscoveryResponse! Using default channels... <<<");
+                pending_channel_opens.push(2);
+                pending_channel_opens.push(3);
             }
             
-            LOG_I(">>> Negotiating Channels... <<<");
+            LOG_I(">>> Negotiating Channels Sequentially... <<<");
             
-            // CHANNEL OPEN REQUESTS MUST BE SENT ON CHANNEL 0
-            ChannelOpenRequest vid_req;
-            vid_req.set_priority(1);
-            vid_req.set_service_id(video_channel_id);
-            send_message(0, ControlMsgType::MESSAGE_CHANNEL_OPEN_REQUEST, vid_req);
-
-            ChannelOpenRequest inp_req;
-            inp_req.set_priority(2);
-            inp_req.set_service_id(input_channel_id);
-            send_message(0, ControlMsgType::MESSAGE_CHANNEL_OPEN_REQUEST, inp_req);
+            // Pop the very first channel out and initiate the sequence
+            if (!pending_channel_opens.empty()) {
+                int first_chan = pending_channel_opens.front();
+                ChannelOpenRequest req;
+                req.set_priority(1);
+                req.set_service_id(first_chan);
+                send_message(0, ControlMsgType::MESSAGE_CHANNEL_OPEN_REQUEST, req);
+            }
         } 
         else if (type == ControlMsgType::MESSAGE_CHANNEL_OPEN_RESPONSE) {
-            // Because ChannelOpenResponse is returned sequentially on Channel 0 without an ID, we assume order.
-            if (!video_channel_ready) {
-                video_channel_ready = true;
-                std::cout << ">>> Video Channel (" << video_channel_id << ") Opened! Sending Media Setup... <<<" << std::endl;
-                MediaSetupRequest setup; 
-                setup.set_type(MediaCodecType::MEDIA_CODEC_VIDEO_H264_BP);
-                send_message(video_channel_id, MediaMsgType::MEDIA_MESSAGE_SETUP, setup); 
-            } 
-            else if (!input_channel_ready) {
-                input_channel_ready = true;
-                std::cout << ">>> Input Channel (" << input_channel_id << ") Opened! Sending Touch Binding Request... <<<" << std::endl;
-                KeyBindingRequest bind;
-                send_message(input_channel_id, InputMsgType::BINDINGREQUEST, bind);
+            if (!pending_channel_opens.empty()) {
+                int opened_channel = pending_channel_opens.front();
+                pending_channel_opens.pop();
+
+                std::cout << ">>> Channel (" << opened_channel << ") Opened! <<<" << std::endl;
+
+                if (opened_channel == video_channel_id) {
+                    video_channel_ready = true;
+                    std::cout << ">>> Sending Media Setup for Video Channel... <<<" << std::endl;
+                    MediaSetupRequest setup; 
+                    setup.set_type(MediaCodecType::MEDIA_CODEC_VIDEO_H264_BP);
+                    send_message(video_channel_id, MediaMsgType::MEDIA_MESSAGE_SETUP, setup); 
+                } 
+                else if (opened_channel == input_channel_id) {
+                    input_channel_ready = true;
+                    std::cout << ">>> Sending Touch Binding Request... <<<" << std::endl;
+                    KeyBindingRequest bind;
+                    send_message(input_channel_id, InputMsgType::BINDINGREQUEST, bind);
+                }
+                else {
+                    // Send a dummy generic Media Setup for audio/sensors to avoid Head Unit stalls
+                    MediaSetupRequest setup; 
+                    setup.set_type(MediaCodecType::MEDIA_CODEC_AUDIO_PCM);
+                    send_message(opened_channel, MediaMsgType::MEDIA_MESSAGE_SETUP, setup);
+                }
+
+                // If more channels need opening, trigger the next request sequentially.
+                if (!pending_channel_opens.empty()) {
+                    int next_chan = pending_channel_opens.front();
+                    ChannelOpenRequest req;
+                    req.set_priority(1);
+                    req.set_service_id(next_chan);
+                    send_message(0, ControlMsgType::MESSAGE_CHANNEL_OPEN_REQUEST, req);
+                } else {
+                    LOG_I(">>> All channels opened successfully! <<<");
+                }
             }
         }
         else if (type == ControlMsgType::MESSAGE_PING_REQUEST) {
@@ -140,6 +171,17 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
             start.set_session_id(1234);
             start.set_configuration_index(0);
             send_message(video_channel_id, MediaMsgType::MEDIA_MESSAGE_START, start);
+
+            // CRITICAL: Request Video Focus & Audio Focus explicitly so the Head Unit drops the "Android Auto is starting..." screen
+            LOG_I(">>> Requesting Video Focus... <<<");
+            VideoFocusRequestNotification vfr;
+            vfr.set_mode(VideoFocusMode::VIDEO_FOCUS_PROJECTED);
+            send_message(video_channel_id, MediaMsgType::MEDIA_MESSAGE_VIDEO_FOCUS_REQUEST, vfr);
+
+            LOG_I(">>> Requesting Default Audio Focus... <<<");
+            AudioFocusRequestNotification afr;
+            afr.set_request(AudioFocusRequestNotification::GAIN);
+            send_message(0, ControlMsgType::MESSAGE_AUDIO_FOCUS_REQUEST, afr);
 
             is_video_streaming = true;
             video_unacked_count = 0; 
@@ -189,6 +231,15 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
             InputReport report;
             report.ParseFromArray(payload_data, payload_len);
             handle_touch_event(report);
+        }
+    }
+    else {
+        // Answer any rogue setup requests targeting the extra Audio/Sensor channels the head unit explicitly opened
+        if (type == MediaMsgType::MEDIA_MESSAGE_CONFIG) {
+            Start start; 
+            start.set_session_id(5678);
+            start.set_configuration_index(0);
+            send_message(channel, MediaMsgType::MEDIA_MESSAGE_START, start);
         }
     }
 }
@@ -292,8 +343,6 @@ void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload
         }
     }
     else {
-        // [FIX] The head unit sent this one packet unencrypted due to a known bug in its parser, 
-        // BUT we must continue to send outgoing requests encrypted so they are accepted!
         LOG_I(">>> Parsing unencrypted packet but KEEPING outbound TLS active! <<<");
         handle_parsed_payload(channel, type, payload_data, payload_len);
     }

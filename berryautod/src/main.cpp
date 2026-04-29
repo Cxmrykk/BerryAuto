@@ -38,6 +38,8 @@ bool input_channel_ready = false;
 int video_channel_id = 2; 
 int input_channel_id = 3;
 
+std::queue<int> pending_channel_opens;
+
 int global_video_width = 800;
 int global_video_height = 480;
 int global_video_margin_w = 0;

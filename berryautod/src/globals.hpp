@@ -2,6 +2,7 @@
 #include <mutex>
 #include <atomic>
 #include <iostream>
+#include <queue>
 #include <openssl/ssl.h>
 
 class VideoEncoder;
@@ -21,6 +22,9 @@ extern bool input_channel_ready;
 // Dynamic AAP Channels
 extern int video_channel_id;
 extern int input_channel_id;
+
+// Sequential channel open queue
+extern std::queue<int> pending_channel_opens;
 
 // Video and Touch Globals
 extern int global_video_width;
