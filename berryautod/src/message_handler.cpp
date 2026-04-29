@@ -57,8 +57,6 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
             else if (ctype == ChannelType::SENSOR) {
                 std::cout << ">>> Sending Sensor Start Requests... <<<" << std::endl;
                 
-                // Real Head Units will refuse to send MEDIA_CONFIG and start video if 
-                // DRIVING_STATUS isn't requested first (Safety Lockout)
                 SensorRequest req_driving;
                 req_driving.set_type(SensorType::DRIVING_STATUS);
                 send_message(opened_channel, SensorsMsgType::SENSOR_STARTREQUEST, req_driving);
@@ -71,13 +69,14 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                 std::cout << ">>> Service active. No Media Setup required. <<<" << std::endl;
             }
 
-            // If more channels need opening, trigger the next request ON THE TARGET CHANNEL.
+            // If more channels need opening, trigger the next request ON CHANNEL 0.
             if (!pending_channel_opens.empty()) {
                 int next_chan = pending_channel_opens.front();
                 ChannelOpenRequest req;
                 req.set_priority(1);
                 req.set_service_id(next_chan);
-                send_message(next_chan, ControlMsgType::MESSAGE_CHANNEL_OPEN_REQUEST, req);
+                // Protocol strictness: Open requests must be sent on Channel 0
+                send_message(0, ControlMsgType::MESSAGE_CHANNEL_OPEN_REQUEST, req);
             } else {
                 LOG_I(">>> All channels opened successfully! Waiting for Configs... <<<");
             }
@@ -188,7 +187,8 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                 ChannelOpenRequest req;
                 req.set_priority(1);
                 req.set_service_id(first_chan);
-                send_message(first_chan, ControlMsgType::MESSAGE_CHANNEL_OPEN_REQUEST, req);
+                // Send on channel 0
+                send_message(0, ControlMsgType::MESSAGE_CHANNEL_OPEN_REQUEST, req);
             }
         } 
         else if (type == ControlMsgType::MESSAGE_AUDIO_FOCUS_REQUEST) {

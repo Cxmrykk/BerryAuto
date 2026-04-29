@@ -126,8 +126,9 @@ void send_message(uint8_t channel, uint16_t type, const google::protobuf::Messag
 
     std::cout << "[DEBUG] SEND Channel: " << (int)channel << " Type: " << type << " Size: " << serialized.size() << std::endl;
 
-    // Protocol requirement: Control messages sent on Media channels (like Setup/Start) MUST have the Control bit (0x04) set in the flags.
-    bool is_control = (type <= 255 || (type >= 32768 && type <= 32799) || type >= 65504);
+    // FIX: Only types 1-26 are generic control messages requiring the 0x04 control bit on non-zero channels.
+    // Media and Sensor setup messages (>32768) are channel-specific and MUST NOT have the control flag.
+    bool is_control = (type >= 1 && type <= 26);
 
     if (ssl_bypassed) {
         uint8_t flags = 0x03; // Base Unencrypted
