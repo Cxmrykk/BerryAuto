@@ -217,10 +217,13 @@ void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload
             (void)BIO_reset(wbio);
         }
 
+        // PERFECT 8-BYTE VERSION RESPONSE 
+        // Required format: Length/Count Prefix (0x02), Major, Minor, Status (0)
         std::vector<uint8_t> resp_payload = {
+            0x00, 0x02, 
             (uint8_t)(major >> 8), (uint8_t)(major & 0xFF),
             (uint8_t)(minor >> 8), (uint8_t)(minor & 0xFF),
-            0x00, 0x00 // STATUS_SUCCESS = 0
+            0x00, 0x00 
         }; 
         send_unencrypted(0, 0x03, ControlMsgType::MESSAGE_VERSION_RESPONSE, resp_payload);
     } 
@@ -248,6 +251,16 @@ void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload
         }
     }
     else if (channel == 0 && type == ControlMsgType::MESSAGE_AUTH_COMPLETE) {
+        
+        // Parse the protobuf to see if the Head Unit accepted our response
+        AuthCompleteResponse auth_resp;
+        if (auth_resp.ParseFromArray(payload_data, payload_len)) {
+            if (auth_resp.status() != 0) {
+                LOG_E(">>> Handshake FAILED with Head Unit error code: " + std::to_string(auth_resp.status()) + " <<<");
+                return; // Wait for the car to reset the port
+            }
+        }
+
         if (!is_tls_connected) {
             ssl_bypassed = true;
             LOG_I(">>> Head Unit bypassed TLS! Operating in plaintext mode. <<<");
@@ -258,7 +271,6 @@ void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload
         sdp_req.set_phone_name("BerryAuto Phone");
         sdp_req.set_phone_brand("Raspberry Pi");
         
-        // Since we are inside handle_unencrypted_payload, using send_message handles TLS or Plaintext automatically
         send_message(0, ControlMsgType::MESSAGE_SERVICE_DISCOVERY_REQUEST, sdp_req);
     }
 }

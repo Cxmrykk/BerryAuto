@@ -63,6 +63,12 @@ enum DriverPosition
     DRIVER_POSITION_UNKNOWN = 3;
 }
 
+// Added to decode Head Unit's Auth acceptance/rejection
+message AuthCompleteResponse 
+{
+    required int32 status = 1;
+}
+
 message Service
 {
     message SensorSourceService
