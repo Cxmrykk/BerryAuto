@@ -46,26 +46,26 @@ enum AudioStreamType
 
 message AudioConfiguration
 {
-    required uint32 sample_rate = 1;
-    required uint32 number_of_bits = 2;
-    required uint32 number_of_channels = 3;
+    optional uint32 sample_rate = 1;
+    optional uint32 number_of_bits = 2;
+    optional uint32 number_of_channels = 3;
 }
 
 message Start
 {
-    required int32 session_id = 1;
-    required uint32 configuration_index = 2;
+    optional int32 session_id = 1;
+    optional uint32 configuration_index = 2;
 }
 
 message Ack
 {
-    required int32 session_id = 1;
-    required uint32 ack = 2;
+    optional int32 session_id = 1;
+    optional uint32 ack = 2;
 }
 
 message MicrophoneRequest
 {
-    required bool open = 1;
+    optional bool open = 1;
     optional bool anc_enabled = 2;
     optional bool ec_enabled = 3;
     optional int32 max_unacked = 4;
@@ -73,8 +73,8 @@ message MicrophoneRequest
 
 message MicrophoneResponse
 {
-    required int32 status = 1;
-    required uint32 session_id = 2;
+    optional int32 status = 1;
+    optional uint32 session_id = 2;
 }
 
 enum VideoFocusMode
@@ -95,19 +95,19 @@ message VideoFocusRequestNotification
     }
 
     optional int32 disp_channel_id = 1;
-    required VideoFocusMode mode = 2;
+    optional VideoFocusMode mode = 2;
     optional VideoFocusReason reason = 3;
 }
 
 message VideoFocusNotification
 {
-    required VideoFocusMode mode = 1;
-    required bool unsolicited = 2;
+    optional VideoFocusMode mode = 1;
+    optional bool unsolicited = 2;
 }
 
 message MediaSetupRequest
 {
-    required uint32 type = 1;
+    optional uint32 type = 1;
 }
 
 message Config
@@ -117,8 +117,8 @@ message Config
         DEVICE = 1;
         HEADUNIT = 2;
     }
-    required ConfigStatus status = 1;
-    required uint32 max_unacked = 2;
+    optional ConfigStatus status = 1;
+    optional uint32 max_unacked = 2;
     repeated uint32 configuration_indices = 3;
 }
 
@@ -140,10 +140,10 @@ message UiConfig
 
 message UpdateUiConfigRequest
 {
-    required UiConfig ui_config = 1;
+    optional UiConfig ui_config = 1;
 }
 
 message UpdateUiConfigReply
 {
-    required uint32 status = 1;
+    optional uint32 status = 1;
 }

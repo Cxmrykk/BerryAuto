@@ -39,13 +39,12 @@ message NextTurnDetail
         DESTINATION = 0x12;
     }
 
-    required string road = 1;
-    required Side side = 2;
-    required NextEvent nextturn = 3;
+    optional string road = 1;
+    optional Side side = 2;
+    optional NextEvent nextturn = 3;
     optional bytes turngraph = 4;
     optional uint32 trunnumer = 5;
     optional uint32 turnangel = 6;
-
 }
 
 message NextTurnDistanceEvent

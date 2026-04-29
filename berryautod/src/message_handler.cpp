@@ -14,6 +14,7 @@
 
 using namespace com::andrerinas::headunitrevived::aap::protocol::proto;
 
+// Helper function to print hex dumps for debugging
 void hex_dump(const std::string& prefix, const uint8_t* data, int len) {
     std::cout << prefix << " (" << len << " bytes): ";
     for (int i = 0; i < len; ++i) {
@@ -23,6 +24,7 @@ void hex_dump(const std::string& prefix, const uint8_t* data, int len) {
 }
 
 void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data, int payload_len) {
+    // ---- CHANNEL 0 (Control Channel) ----
     if (channel == 0) {
         if (type == ControlMsgType::MESSAGE_SERVICE_DISCOVERY_RESPONSE) {
             LOG_I(">>> Service Discovery Response received. Parsing Display Specs... <<<");
@@ -33,10 +35,10 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                     const auto& svc = sdp_resp.services(i);
                     // Video Sink Parsing
                     if (svc.has_media_sink_service()) {
-                        video_channel_id = svc.id();
+                        if (svc.has_id()) video_channel_id = svc.id();
                         if (svc.media_sink_service().video_configs_size() > 0) {
                             const auto& video_config = svc.media_sink_service().video_configs(0);
-                            int res_type = video_config.codec_resolution();
+                            int res_type = video_config.has_codec_resolution() ? video_config.codec_resolution() : 1;
                             
                             switch (res_type) {
                                 case 1: global_video_width = 800;  global_video_height = 480;  break;
@@ -61,7 +63,7 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                     }
                     // Input / Touch Parsing
                     if (svc.has_input_source_service()) {
-                        input_channel_id = svc.id();
+                        if (svc.has_id()) input_channel_id = svc.id();
                         if (svc.input_source_service().has_touchscreen()) {
                             global_touch_width = svc.input_source_service().touchscreen().width();
                             global_touch_height = svc.input_source_service().touchscreen().height();
@@ -71,40 +73,28 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                         }
                     }
                 }
-            } 
+            } else {
+                LOG_E(">>> [CRITICAL] ParseFromArray FAILED for ServiceDiscoveryResponse! Using default channels... <<<");
+            }
             
             LOG_I(">>> Negotiating Channels... <<<");
             
+            // CHANNEL OPEN REQUESTS MUST BE SENT ON THE TARGET CHANNEL (Not Channel 0)
             ChannelOpenRequest vid_req;
             vid_req.set_priority(1);
             vid_req.set_service_id(video_channel_id);
-            send_message(0, ControlMsgType::MESSAGE_CHANNEL_OPEN_REQUEST, vid_req);
+            send_message(video_channel_id, ControlMsgType::MESSAGE_CHANNEL_OPEN_REQUEST, vid_req);
 
             ChannelOpenRequest inp_req;
             inp_req.set_priority(2);
             inp_req.set_service_id(input_channel_id);
-            send_message(0, ControlMsgType::MESSAGE_CHANNEL_OPEN_REQUEST, inp_req);
+            send_message(input_channel_id, ControlMsgType::MESSAGE_CHANNEL_OPEN_REQUEST, inp_req);
         } 
-        else if (type == ControlMsgType::MESSAGE_CHANNEL_OPEN_RESPONSE) {
-            if (!video_channel_ready) {
-                video_channel_ready = true;
-                std::cout << ">>> Video Channel (" << video_channel_id << ") Opened! Sending Media Setup... <<<" << std::endl;
-                MediaSetupRequest setup; 
-                setup.set_type(MediaCodecType::MEDIA_CODEC_VIDEO_H264_BP);
-                send_message(video_channel_id, MediaMsgType::MEDIA_MESSAGE_SETUP, setup); 
-            } 
-            else if (!input_channel_ready) {
-                input_channel_ready = true;
-                std::cout << ">>> Input Channel (" << input_channel_id << ") Opened! Sending Touch Binding Request... <<<" << std::endl;
-                KeyBindingRequest bind;
-                send_message(input_channel_id, InputMsgType::BINDINGREQUEST, bind);
-            }
-        }
         else if (type == ControlMsgType::MESSAGE_PING_REQUEST) {
             PingRequest req;
             req.ParseFromArray(payload_data, payload_len);
             PingResponse resp;
-            resp.set_timestamp(req.timestamp());
+            if (req.has_timestamp()) resp.set_timestamp(req.timestamp());
             send_message(0, ControlMsgType::MESSAGE_PING_RESPONSE, resp);
         }
         else if (type == ControlMsgType::MESSAGE_BYEBYE_REQUEST) {
@@ -119,8 +109,18 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
             video_channel_ready = false;
         }
     }
+    // ---- DYNAMIC VIDEO CHANNEL ----
     else if (channel == video_channel_id) { 
-        if (type == MediaMsgType::MEDIA_MESSAGE_CONFIG) { 
+        if (type == ControlMsgType::MESSAGE_CHANNEL_OPEN_RESPONSE) {
+            if (!video_channel_ready) {
+                video_channel_ready = true;
+                std::cout << ">>> Video Channel (" << video_channel_id << ") Opened! Sending Media Setup... <<<" << std::endl;
+                MediaSetupRequest setup; 
+                setup.set_type(MediaCodecType::MEDIA_CODEC_VIDEO_H264_BP);
+                send_message(video_channel_id, MediaMsgType::MEDIA_MESSAGE_SETUP, setup); 
+            }
+        }
+        else if (type == MediaMsgType::MEDIA_MESSAGE_CONFIG) { 
             Config config;
             if (config.ParseFromArray(payload_data, payload_len)) {
                 if (config.has_max_unacked()) {
@@ -150,7 +150,7 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
         else if (type == MediaMsgType::MEDIA_MESSAGE_ACK) {
             Ack ack_msg;
             if (ack_msg.ParseFromArray(payload_data, payload_len)) {
-                video_unacked_count -= ack_msg.ack();
+                if (ack_msg.has_ack()) video_unacked_count -= ack_msg.ack();
                 if (video_unacked_count.load() < 0) video_unacked_count = 0;
             }
         }
@@ -166,7 +166,7 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
         else if (type == MediaMsgType::MEDIA_MESSAGE_VIDEO_FOCUS_NOTIFICATION) {
             VideoFocusNotification focus_notif;
             if (focus_notif.ParseFromArray(payload_data, payload_len)) {
-                if (focus_notif.mode() == VideoFocusMode::VIDEO_FOCUS_PROJECTED) {
+                if (focus_notif.has_mode() && focus_notif.mode() == VideoFocusMode::VIDEO_FOCUS_PROJECTED) {
                     is_video_streaming = true;
                     video_unacked_count = 0; 
                     if (video_streamer) video_streamer->force_keyframe();
@@ -177,10 +177,21 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
             }
         }
     }
-    else if (channel == input_channel_id && type == InputMsgType::EVENT) {
-        InputReport report;
-        report.ParseFromArray(payload_data, payload_len);
-        handle_touch_event(report);
+    // ---- DYNAMIC INPUT CHANNEL ----
+    else if (channel == input_channel_id) {
+        if (type == ControlMsgType::MESSAGE_CHANNEL_OPEN_RESPONSE) {
+            if (!input_channel_ready) {
+                input_channel_ready = true;
+                std::cout << ">>> Input Channel (" << input_channel_id << ") Opened! Sending Touch Binding Request... <<<" << std::endl;
+                KeyBindingRequest bind;
+                send_message(input_channel_id, InputMsgType::BINDINGREQUEST, bind);
+            }
+        }
+        else if (type == InputMsgType::EVENT) {
+            InputReport report;
+            report.ParseFromArray(payload_data, payload_len);
+            handle_touch_event(report);
+        }
     }
 }
 
@@ -257,7 +268,7 @@ void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload
     else if (channel == 0 && type == ControlMsgType::MESSAGE_AUTH_COMPLETE) {
         AuthCompleteResponse auth_resp;
         if (auth_resp.ParseFromArray(payload_data, payload_len)) {
-            if (auth_resp.status() != 0) {
+            if (auth_resp.has_status() && auth_resp.status() != 0) {
                 LOG_I(">>> IGNORING Auth Failure! Attempting to forcefully bypass and proceed... <<<");
             } else {
                 LOG_I(">>> Head Unit sent AuthComplete(0) - Authentication SUCCESS! <<<");

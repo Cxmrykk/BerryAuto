@@ -63,10 +63,9 @@ enum DriverPosition
     DRIVER_POSITION_UNKNOWN = 3;
 }
 
-// Added to decode Head Unit's Auth acceptance/rejection
 message AuthCompleteResponse 
 {
-    required int32 status = 1;
+    optional int32 status = 1;
 }
 
 message Service
@@ -75,7 +74,7 @@ message Service
     {
         message Sensor
         {
-            required SensorType type = 1;
+            optional SensorType type = 1;
         }
         repeated Sensor sensors = 1;
     }
@@ -102,16 +101,16 @@ message Service
                 _60 = 1;
                 _30 = 2;
             }
-            required VideoCodecResolutionType codec_resolution = 1;
-            required VideoFrameRateType frame_rate = 2;
-            required uint32 margin_width = 3;
-            required uint32 margin_height = 4;
-            required uint32 density = 5;
+            optional VideoCodecResolutionType codec_resolution = 1;
+            optional VideoFrameRateType frame_rate = 2;
+            optional uint32 margin_width = 3;
+            optional uint32 margin_height = 4;
+            optional uint32 density = 5;
             optional uint32 decoder_additional_depth = 6;
             optional MediaCodecType video_codec_type = 10;
         }
 
-        required MediaCodecType available_type = 1;
+        optional MediaCodecType available_type = 1;
         optional AudioStreamType audio_type = 2;
         repeated AudioConfiguration audio_configs = 3;
         repeated VideoConfiguration video_configs = 4;
@@ -122,8 +121,8 @@ message Service
     {
         message TouchConfig
         {
-            required uint32 width = 1;
-            required uint32 height = 2;
+            optional uint32 width = 1;
+            optional uint32 height = 2;
         }
         repeated uint32 keycodes_supported = 1;
         optional TouchConfig touchscreen = 2;
@@ -132,14 +131,14 @@ message Service
 
     message MediaSourceService
     {
-        required MediaCodecType type = 1;
-        required AudioConfiguration audio_config = 2;
+        optional MediaCodecType type = 1;
+        optional AudioConfiguration audio_config = 2;
         optional bool available_while_in_call = 3;
     }
 
     message BluetoothService
     {
-        required string car_address = 1;
+        optional string car_address = 1;
         repeated BluetoothPairingMethod supported_pairing_methods = 2;
     }
 
@@ -147,17 +146,17 @@ message Service
     {
         message ImageOptions
         {
-            required int32 width = 1;
-            required int32 height = 2;
-            required int32 colour_deth_bits = 3;
+            optional int32 width = 1;
+            optional int32 height = 2;
+            optional int32 colour_deth_bits = 3;
         }
         enum ClusterType
         {
             CustomImageSupported = 1;
             ImageCodesOnly = 2;
         }
-        required uint32 minimum_interval_ms = 1;
-        required ClusterType type = 2;
+        optional uint32 minimum_interval_ms = 1;
+        optional ClusterType type = 2;
         optional ImageOptions image_options = 3;
     }
 
@@ -177,7 +176,6 @@ message Service
     message PhoneStatus_Call
     {
         optional PhoneStatus_State state = 1;
-        //in seconds
         optional uint32 call_duration_seconds = 2;
         optional string caller_number = 3;
         optional string caller_id = 4;
@@ -215,7 +213,7 @@ message Service
         optional string car_wifi_bssid = 1;
     }
 
-    required uint32 id = 1;
+    optional uint32 id = 1;
     optional SensorSourceService sensor_source_service = 2;
     optional MediaSinkService media_sink_service = 3;
     optional InputSourceService input_source_service = 4;
@@ -230,23 +228,23 @@ message Service
 
 message ServiceDiscoveryRequest
 {
-    required string phone_name = 4;
-    required string phone_brand = 5;
+    optional string phone_name = 4;
+    optional string phone_brand = 5;
 }
 
 message ServiceDiscoveryResponse
 {
     repeated Service services = 1;
-    required string make = 2;
-    required string model = 3;
-    required string year = 4;
-    required string vehicle_id = 5;
-    required DriverPosition driver_position = 6;
-    required string head_unit_make = 7;
-    required string head_unit_model = 8;
-    required string head_unit_software_build = 9;
-    required string head_unit_software_version = 10;
-    required bool can_play_native_media_during_vr = 11;
+    optional string make = 2;
+    optional string model = 3;
+    optional string year = 4;
+    optional string vehicle_id = 5;
+    optional DriverPosition driver_position = 6;
+    optional string head_unit_make = 7;
+    optional string head_unit_model = 8;
+    optional string head_unit_software_build = 9;
+    optional string head_unit_software_version = 10;
+    optional bool can_play_native_media_during_vr = 11;
     optional bool hide_projected_clock = 12;
     optional int32 session_configuration = 13;
     optional string display_name = 14;
@@ -256,29 +254,29 @@ message ServiceDiscoveryResponse
 
 message ChannelOpenRequest
 {
-    required int32 priority = 1;
-    required int32 service_id = 2;
+    optional int32 priority = 1;
+    optional int32 service_id = 2;
 }
 
 message ChannelOpenResponse
 {
-    required MessageStatus status = 1;
+    optional MessageStatus status = 1;
 }
 
 message PingRequest
 {
-    required int64 timestamp = 1;
+    optional int64 timestamp = 1;
     optional int32 bug_report = 2;
 }
 
 message PingResponse
 {
-    required int64 timestamp = 1;
+    optional int64 timestamp = 1;
 }
 
 message ByeByeRequest
 {
-    required ByeByeReason reason = 1;
+    optional ByeByeReason reason = 1;
 }
 
 message ByeByeResponse
@@ -292,7 +290,7 @@ message VoiceSessionNotification
         VOICE_STATUS_START = 1;
         VOICE_STATUS_STOP = 2;
     }
-    required VoiceSessionStatus status = 1;
+    optional VoiceSessionStatus status = 1;
 }
 
 message AudioFocusRequestNotification
@@ -320,7 +318,7 @@ message AudioFocusNotification
         STATE_GAIN_MEDIA_ONLY = 6;
         STATE_GAIN_TRANSIENT_GUIDANCE_ONLY = 7;
     }
-    required AudioFocusStateType focus_state = 1;
+    optional AudioFocusStateType focus_state = 1;
     optional bool unsolicited = 2;
 }
 
@@ -337,12 +335,12 @@ message NavFocusRequestNotification
 
 message NavFocusNotification
 {
-    required NavFocusType focus_type = 1;
+    optional NavFocusType focus_type = 1;
 }
 
 message BatteryStatusNotification
 {
-    required uint32 battery_level = 1;
+    optional uint32 battery_level = 1;
     optional uint32 time_remaining_s = 2;
     optional bool critical_battery = 3;
 }
