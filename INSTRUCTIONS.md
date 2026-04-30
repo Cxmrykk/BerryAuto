@@ -63,10 +63,10 @@ BerryAuto works by capturing your Pi's desktop and streaming it to your car. To 
     | **2** | 1280 x 720  | `1280 720 60 6 0 0 0`  | 16:9        |
     | **3** | 1920 x 1080 | `1920 1080 60 6 0 0 0` | 16:9        |
 
-4.  **Enable the USB OTG driver:** Ensure this line is present to allow the Pi to act as a USB device:
+4.  **Enable the USB OTG driver:** Ensure this line is present to allow the Pi to act as a USB device (`cma-256` added to increase CMA Pool for hardware encoder):
 
     ```ini
-    dtoverlay=dwc2,dr_mode=peripheral
+    dtoverlay=dwc2,cma-256,dr_mode=peripheral
     ```
 
 5.  Save (`Ctrl+O`, `Enter`) and Exit (`Ctrl+X`).
