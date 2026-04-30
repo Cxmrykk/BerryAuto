@@ -48,12 +48,18 @@ void aap_send_raw(const std::vector<uint8_t>& pt, uint8_t target_channel, uint8_
 {
     std::vector<uint8_t> out;
     uint16_t len_field = pt.size();
+
+    // CRITICAL FIX: The 4-byte unfragmented size must be included in the total payload length!
+    if ((flags & 0x03) == 0x01)
+    {
+        len_field += 4;
+    }
+
     out.push_back(target_channel);
     out.push_back(flags);
     out.push_back((len_field >> 8) & 0xFF);
     out.push_back(len_field & 0xFF);
 
-    // Check bottom 2 bits to cover BOTH Encrypted (0x09) and Unencrypted (0x01) first fragments
     if ((flags & 0x03) == 0x01)
     {
         out.push_back((unfragmented_size >> 24) & 0xFF);
@@ -67,7 +73,7 @@ void aap_send_raw(const std::vector<uint8_t>& pt, uint8_t target_channel, uint8_
 }
 
 void ssl_write_and_flush_unlocked(const std::vector<uint8_t>& pt, uint8_t target_channel, uint8_t base_flags,
-                                  uint32_t /*unused*/) // FIX: Silenced unused variable warning
+                                  uint32_t /*unused*/)
 {
     std::vector<std::vector<uint8_t>> out_packets;
     {
@@ -99,7 +105,7 @@ void ssl_write_and_flush_unlocked(const std::vector<uint8_t>& pt, uint8_t target
             }
             else
             {
-                size_t MAX_CHUNK_SIZE = 16384;
+                size_t MAX_CHUNK_SIZE = 16000; // Dropped to 16000 to safely allow the 4-byte header
                 if (ciphertext.size() <= MAX_CHUNK_SIZE)
                 {
                     uint16_t len_field = ciphertext.size();
@@ -113,7 +119,6 @@ void ssl_write_and_flush_unlocked(const std::vector<uint8_t>& pt, uint8_t target
                 }
                 else
                 {
-                    // Automatically fragment the resulting Ciphertext payload
                     size_t offset = 0;
                     uint32_t total_size = ciphertext.size();
 
@@ -135,6 +140,11 @@ void ssl_write_and_flush_unlocked(const std::vector<uint8_t>& pt, uint8_t target
                         out.push_back(flag);
 
                         uint16_t len_field = chunk_size;
+                        if ((flag & 0x03) == 0x01)
+                        {
+                            len_field += 4; // CRITICAL FIX
+                        }
+
                         out.push_back((len_field >> 8) & 0xFF);
                         out.push_back(len_field & 0xFF);
 
@@ -178,8 +188,6 @@ void send_message(uint8_t channel, uint16_t type, const google::protobuf::Messag
     std::cout << "[DEBUG] SEND Channel: " << (int)channel << " Type: " << type << " Size: " << serialized.size()
               << std::endl;
 
-    // Only types 1-26 are generic control messages requiring the 0x04 control bit on non-zero channels.
-    // Media and Sensor setup messages (>32768) are channel-specific and MUST NOT have the control flag.
     bool is_control = (type >= 1 && type <= 26);
 
     if (ssl_bypassed)

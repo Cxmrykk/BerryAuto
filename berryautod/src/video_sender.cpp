@@ -13,7 +13,7 @@ bool has_cached_config = false;
 
 void send_video_frame_internal(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
 {
-    const size_t MAX_CHUNK_SIZE = 16384;
+    const size_t MAX_CHUNK_SIZE = 16000; // Reduced safely below 16384
 
     std::vector<uint8_t> header;
     header.push_back(0x00); // MEDIA_MESSAGE_DATA (msg_type_hi)
@@ -120,7 +120,6 @@ void extract_and_cache_sps_pps(const std::vector<uint8_t>& frame)
             }
             else
             {
-                // We've hit a non-config NAL (like the massive I-Frame). Halt extraction immediately!
                 break;
             }
         }
@@ -181,7 +180,6 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
         }
     }
 
-    // Send config right before the first frame
     if (just_extracted)
     {
         inject_cached_video_config();
