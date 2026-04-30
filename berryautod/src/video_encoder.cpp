@@ -205,8 +205,8 @@ bool VideoEncoder::init_encoder()
         else if (std::string(codec->name) == "h264_v4l2m2m" || std::string(codec->name) == "hevc_v4l2m2m")
         {
             // Restrict V4L2 DMA buffers to strictly prevent CMA "No space left on device" crashes at 1080p
-            av_opt_set(codec_ctx->priv_data, "num_capture_buffers", "8", 0);
-            av_opt_set(codec_ctx->priv_data, "num_output_buffers", "8", 0);
+            av_opt_set(codec_ctx->priv_data, "num_capture_buffers", "4", 0);
+            av_opt_set(codec_ctx->priv_data, "num_output_buffers", "4", 0);
         }
 
         std::cout << "[VideoEncoder] Attempting to open Encoder: " << codec->name << "..." << std::endl;
