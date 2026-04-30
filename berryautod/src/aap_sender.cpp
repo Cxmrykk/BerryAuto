@@ -39,6 +39,8 @@ void send_unencrypted(uint8_t channel, uint8_t flags, uint16_t type, const std::
     out.push_back(type & 0xFF);
     out.insert(out.end(), payload.begin(), payload.end());
 
+    std::cout << "[DEBUG-TX] Unencrypted - Channel: " << (int)channel << " Type: " << type << " Size: " << out.size()
+              << std::endl;
     write_to_usb(out);
 }
 
@@ -85,99 +87,80 @@ void ssl_write_and_flush_unlocked(const std::vector<uint8_t>& pt, uint8_t target
         int pending = BIO_ctrl_pending(wbio);
         if (pending > 0)
         {
-            std::vector<uint8_t> full_buffer(pending);
-            BIO_read(wbio, full_buffer.data(), pending);
+            std::vector<uint8_t> ciphertext(pending);
+            BIO_read(wbio, ciphertext.data(), pending);
 
-            size_t buf_offset = 0;
-            // Iterate over the buffer and extract individual TLS records
-            while (buf_offset + 5 <= full_buffer.size())
+            if (!is_tls_connected)
             {
-                // Parse the TLS Record Header to find its exact length
-                uint16_t record_len = (full_buffer[buf_offset + 3] << 8) | full_buffer[buf_offset + 4];
-                uint32_t total_record_size = 5 + record_len;
-
-                if (buf_offset + total_record_size > full_buffer.size())
+                uint16_t len_field = ciphertext.size() + 2;
+                std::vector<uint8_t> out;
+                out.push_back(0);
+                out.push_back(0x03);
+                out.push_back((len_field >> 8) & 0xFF);
+                out.push_back(len_field & 0xFF);
+                out.push_back((ControlMsgType::MESSAGE_ENCAPSULATED_SSL >> 8) & 0xFF);
+                out.push_back(ControlMsgType::MESSAGE_ENCAPSULATED_SSL & 0xFF);
+                out.insert(out.end(), ciphertext.begin(), ciphertext.end());
+                out_packets.push_back(out);
+            }
+            else
+            {
+                size_t MAX_CHUNK_SIZE = 16000;
+                if (ciphertext.size() <= MAX_CHUNK_SIZE)
                 {
-                    LOG_E("WARNING: Incomplete TLS record in wbio! Stream may desync.");
-                    break;
-                }
-
-                std::vector<uint8_t> ciphertext(full_buffer.begin() + buf_offset,
-                                                full_buffer.begin() + buf_offset + total_record_size);
-                buf_offset += total_record_size;
-
-                if (!is_tls_connected)
-                {
-                    uint16_t len_field = ciphertext.size() + 2;
+                    uint16_t len_field = ciphertext.size();
                     std::vector<uint8_t> out;
-                    out.push_back(0);
-                    out.push_back(0x03);
+                    out.push_back(target_channel);
+                    out.push_back(base_flags);
                     out.push_back((len_field >> 8) & 0xFF);
                     out.push_back(len_field & 0xFF);
-                    out.push_back((ControlMsgType::MESSAGE_ENCAPSULATED_SSL >> 8) & 0xFF);
-                    out.push_back(ControlMsgType::MESSAGE_ENCAPSULATED_SSL & 0xFF);
                     out.insert(out.end(), ciphertext.begin(), ciphertext.end());
                     out_packets.push_back(out);
                 }
                 else
                 {
-                    size_t MAX_CHUNK_SIZE = 16000;
-                    if (ciphertext.size() <= MAX_CHUNK_SIZE)
+                    // Fragment the entire ciphertext blob as a single unified AAP message chain
+                    size_t offset = 0;
+                    uint32_t total_size = ciphertext.size();
+
+                    while (offset < total_size)
                     {
-                        uint16_t len_field = ciphertext.size();
+                        size_t remain = total_size - offset;
+                        size_t chunk_size = std::min(remain, MAX_CHUNK_SIZE);
+
+                        uint8_t flag;
+                        if (offset == 0)
+                            flag = (base_flags & ~0x03) | 0x01; // First Fragment
+                        else if (offset + chunk_size >= total_size)
+                            flag = (base_flags & ~0x03) | 0x02; // Last Fragment
+                        else
+                            flag = (base_flags & ~0x03) | 0x00; // Middle Fragment
+
                         std::vector<uint8_t> out;
                         out.push_back(target_channel);
-                        out.push_back(base_flags);
+                        out.push_back(flag);
+
+                        uint16_t len_field = chunk_size;
+                        if ((flag & 0x03) == 0x01)
+                        {
+                            len_field += 4;
+                        }
+
                         out.push_back((len_field >> 8) & 0xFF);
                         out.push_back(len_field & 0xFF);
-                        out.insert(out.end(), ciphertext.begin(), ciphertext.end());
-                        out_packets.push_back(out);
-                    }
-                    else
-                    {
-                        size_t offset = 0;
-                        uint32_t total_size = ciphertext.size();
 
-                        while (offset < total_size)
+                        if ((flag & 0x03) == 0x01)
                         {
-                            size_t remain = total_size - offset;
-                            size_t chunk_size = std::min(remain, MAX_CHUNK_SIZE);
-
-                            uint8_t flag;
-                            if (offset == 0)
-                                flag = (base_flags & ~0x03) | 0x01; // First Fragment
-                            else if (offset + chunk_size >= total_size)
-                                flag = (base_flags & ~0x03) | 0x02; // Last Fragment
-                            else
-                                flag = (base_flags & ~0x03) | 0x00; // Middle Fragment
-
-                            std::vector<uint8_t> out;
-                            out.push_back(target_channel);
-                            out.push_back(flag);
-
-                            uint16_t len_field = chunk_size;
-                            if ((flag & 0x03) == 0x01)
-                            {
-                                len_field += 4;
-                            }
-
-                            out.push_back((len_field >> 8) & 0xFF);
-                            out.push_back(len_field & 0xFF);
-
-                            if ((flag & 0x03) == 0x01)
-                            {
-                                out.push_back((total_size >> 24) & 0xFF);
-                                out.push_back((total_size >> 16) & 0xFF);
-                                out.push_back((total_size >> 8) & 0xFF);
-                                out.push_back(total_size & 0xFF);
-                            }
-
-                            out.insert(out.end(), ciphertext.begin() + offset,
-                                       ciphertext.begin() + offset + chunk_size);
-                            out_packets.push_back(out);
-
-                            offset += chunk_size;
+                            out.push_back((total_size >> 24) & 0xFF);
+                            out.push_back((total_size >> 16) & 0xFF);
+                            out.push_back((total_size >> 8) & 0xFF);
+                            out.push_back(total_size & 0xFF);
                         }
+
+                        out.insert(out.end(), ciphertext.begin() + offset, ciphertext.begin() + offset + chunk_size);
+                        out_packets.push_back(out);
+
+                        offset += chunk_size;
                     }
                 }
             }
@@ -186,27 +169,42 @@ void ssl_write_and_flush_unlocked(const std::vector<uint8_t>& pt, uint8_t target
 
     for (const auto& pkt : out_packets)
     {
+        uint8_t target_channel = pkt[0];
+        uint8_t encrypted_flag = pkt[1];
+        // Hide logs for raw video frames to prevent console spam
+        if (!(target_channel == 2 && ((encrypted_flag & 0x03) != 0x03 || encrypted_flag == 0x0B)))
+        {
+            std::cout << "[DEBUG-TX] Encrypted - Channel: " << (int)target_channel << " Flags: 0x" << std::hex
+                      << (int)encrypted_flag << std::dec << " Size: " << pkt.size() << std::endl;
+        }
         write_to_usb(pkt);
     }
 }
 
+// Master wrapper to automatically handle Car TLS Bypasses
 void send_message(uint8_t channel, uint16_t type, const google::protobuf::Message& proto_msg)
 {
     std::vector<uint8_t> serialized(proto_msg.ByteSizeLong());
     proto_msg.SerializeToArray(serialized.data(), serialized.size());
 
+    std::cout << "[DEBUG] SEND Channel: " << (int)channel << " Type: " << type << " Size: " << serialized.size()
+              << std::endl;
+
+    // Only types 1-26 are generic control messages requiring the 0x04 control bit on non-zero channels.
+    // Media and Sensor setup messages (>32768) are channel-specific and MUST NOT have the control flag.
     bool is_control = (type >= 1 && type <= 26);
 
     if (ssl_bypassed)
     {
-        uint8_t flags = 0x03;
+        uint8_t flags = 0x03; // Base Unencrypted
         if (channel != 0 && is_control)
             flags = 0x07;
+
         send_unencrypted(channel, flags, type, serialized);
     }
     else
     {
-        uint8_t flags = 0x0B;
+        uint8_t flags = 0x0B; // Base Encrypted
         if (channel != 0 && is_control)
             flags = 0x0F;
 
