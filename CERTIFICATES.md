@@ -43,6 +43,9 @@
 ### Phase 4: Finalizing Root & Apps
 
 1.  Once booted back into Android, plug in your USB drive. Open the default **Files** app, navigate to your USB drive, and install **Magisk-v30.7.apk**.
+
+    > Alternatively, there might already be a magisk placeholder installed in your app drawer, in which case you open and follow the steps.
+
 2.  Open Magisk, allow "Additional Setup," and let the device reboot.
 3.  **Enable ADB Root:** Go to **Settings** -> **System** -> **Developer options** -> enable **Rooted debugging** and **USB debugging**.
 4.  **Enable Network ADB:** Go to **Settings** -> **System** -> **Raspberry Pi settings** -> **Remote access** -> enable **ADB** and note the IP address. _(used in phase 6)_
@@ -197,7 +200,7 @@ if __name__ == "__main__":
 
 ### Phase 8: Triggering the Handshake
 
-1.  Run the Python script on your PC: `python3 scrapper.py`.
+1.  Run the Python script on your PC: `python3 scrapper.py`. Make sure the enter the virtual environment first if you initialized it before.
 2.  Open a second terminal, navigate to the DHU folder (`~/Android/Sdk/extras/google/auto/`), and prepare the emulator: `./desktop-head-unit --usb`.
 3.  Connect the Raspberry Pi to your PC via a USB data cable.
 4.  Android Auto will launch in the background on the Pi, spawning `gearhead:car`.
@@ -221,4 +224,6 @@ Because the TLS handshake includes the full certificate chain, you will likely g
     ```
     _The certificate that produces the exact same MD5 hash as your private key is your Leaf Certificate._
 3.  **Integration:**
-    Rename the matching pair to `android_auto.key` and `android_auto.crt`. You now have all the ingredients.
+    Rename the matching pair to `android_auto.key` and `android_auto.crt`.
+
+Congratulations, you now have all the ingredients to connect to a real head unit!
