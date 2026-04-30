@@ -167,18 +167,21 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                 {
                     if (focus_notif.has_mode() && focus_notif.mode() == VideoFocusMode::VIDEO_FOCUS_PROJECTED)
                     {
-                        LOG_I(">>> Car GRANTED Video Focus! Streaming active. <<<");
-                        is_video_streaming = true;
-                        video_unacked_count = 0;
-                        if (video_streamer == nullptr)
+                        if (!is_video_streaming.load())
                         {
-                            video_streamer =
-                                new VideoEncoder(global_video_width, global_video_height, on_video_nal_ready);
-                            video_streamer->start();
-                            std::cout << "[VIDEO] Live Encoding Started (" << global_video_width << "x"
-                                      << global_video_height << ")." << std::endl;
+                            LOG_I(">>> Car GRANTED Video Focus! Streaming active. <<<");
+                            is_video_streaming = true;
+                            video_unacked_count = 0;
+                            if (video_streamer == nullptr)
+                            {
+                                video_streamer =
+                                    new VideoEncoder(global_video_width, global_video_height, on_video_nal_ready);
+                                video_streamer->start();
+                                std::cout << "[VIDEO] Live Encoding Started (" << global_video_width << "x"
+                                          << global_video_height << ")." << std::endl;
+                            }
+                            video_streamer->force_keyframe();
                         }
-                        video_streamer->force_keyframe();
                     }
                     else
                     {
