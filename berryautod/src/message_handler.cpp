@@ -67,7 +67,7 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
         }
         else if (type == ControlMsgType::MESSAGE_BYEBYE_REQUEST)
         {
-            stop_video_stream(); // Fix #1
+            stop_video_stream();
             video_channel_ready = false;
             input_channel_ready = false;
             ByeByeResponse resp;
@@ -75,7 +75,7 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
         }
         else if (type == ControlMsgType::MESSAGE_CHANNEL_CLOSE_NOTIFICATION)
         {
-            stop_video_stream(); // Fix #1
+            stop_video_stream();
             video_channel_ready = false;
         }
     }
@@ -145,7 +145,7 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
             if (ctype == ChannelType::VIDEO)
             {
                 LOG_I(">>> Video Stream stopped by car! <<<");
-                stop_video_stream(); // Fix #1
+                stop_video_stream();
             }
         }
         else if (type == MediaMsgType::MEDIA_MESSAGE_VIDEO_FOCUS_REQUEST)
@@ -186,7 +186,7 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                     else
                     {
                         LOG_I(">>> Car REVOKED Video Focus. <<<");
-                        stop_video_stream(); // Fix #1
+                        stop_video_stream();
                     }
                 }
             }
@@ -275,7 +275,8 @@ void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload
             is_tls_connected = false;
             video_channel_ready = false;
             input_channel_ready = false;
-            stop_video_stream(); // Fix #1: Cleanup on fresh connect
+            stop_video_stream();
+            flush_usb_tx_queue();
             video_unacked_count = 0;
 
             SSL_clear(ssl);
@@ -316,8 +317,7 @@ void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload
             }
         }
 
-        //ssl_write_and_flush_unlocked({}, 0, 0x0B, 0);
-        flush_ssl_buffers();
+        ssl_write_and_flush_unlocked({}, 0, 0x0B, 0); // Correctly flushed
 
         if (handshake_just_completed)
         {

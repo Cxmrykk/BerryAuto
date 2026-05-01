@@ -61,7 +61,6 @@ std::atomic<int> video_unacked_count{0};
 std::atomic<bool> is_video_streaming{false};
 int max_video_unacked = 16;
 
-// Safe cleanup of video thread to prevent memory/thread leak
 void stop_video_stream()
 {
     is_video_streaming = false;
@@ -356,8 +355,7 @@ int main()
                             }
                         }
                     }
-                    //ssl_write_and_flush_unlocked({}, 0, 0x0B, 0);
-                    flush_ssl_buffers();
+                    ssl_write_and_flush_unlocked({}, 0, 0x0B, 0); // Correctly flushed
                 }
                 else
                 {
