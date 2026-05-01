@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <thread>
 
 VideoEncoder::VideoEncoder(int width, int height, NalCallback callback)
     : target_width(width), target_height(height), nal_callback(callback)
@@ -137,14 +138,20 @@ bool VideoEncoder::init_encoder()
 
         codec_ctx->width = target_width;
         codec_ctx->height = target_height;
-        codec_ctx->time_base = {1, 30};
-        codec_ctx->framerate = {30, 1};
-        codec_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
 
-        // FIX: Restored original smooth performance and high bitrate (6 Mbps)
-        codec_ctx->bit_rate = 6000000;
-        codec_ctx->gop_size = 30;
+        // 1. Optimize for 60 FPS Capture
+        codec_ctx->time_base = {1, 60};
+        codec_ctx->framerate = {60, 1};
+        codec_ctx->gop_size = 60; // 1-second keyframe interval at 60 FPS
         codec_ctx->max_b_frames = 0;
+
+        // 2. Enable Multi-threading
+        codec_ctx->thread_count = std::max(1u, std::thread::hardware_concurrency());
+        codec_ctx->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
+
+        // 3. Dynamic Bitrate Scaling (0.12 bits per pixel @ 60 FPS)
+        int calc_bitrate = static_cast<int>(target_width * target_height * 60 * 0.12);
+        codec_ctx->bit_rate = std::clamp(calc_bitrate, 6000000, 16000000);
 
         if (std::string(codec->name) == "libx264" || std::string(codec->name) == "libx265")
         {
@@ -155,8 +162,8 @@ bool VideoEncoder::init_encoder()
         }
         else if (std::string(codec->name) == "h264_v4l2m2m" || std::string(codec->name) == "hevc_v4l2m2m")
         {
-            av_opt_set(codec_ctx->priv_data, "num_capture_buffers", "16", 0);
-            av_opt_set(codec_ctx->priv_data, "num_output_buffers", "16", 0);
+            av_opt_set(codec_ctx->priv_data, "num_capture_buffers", "32", 0);
+            av_opt_set(codec_ctx->priv_data, "num_output_buffers", "32", 0);
         }
 
         if (avcodec_open2(codec_ctx, codec, NULL) >= 0)
@@ -184,10 +191,14 @@ bool VideoEncoder::init_encoder()
     frame->width = codec_ctx->width;
     frame->height = codec_ctx->height;
     av_frame_get_buffer(frame, 32);
-
     pkt = av_packet_alloc();
-    sws_ctx = sws_getContext(capture_w, capture_h, AV_PIX_FMT_BGRA, scaled_w, scaled_h, AV_PIX_FMT_YUV420P,
-                             SWS_FAST_BILINEAR, NULL, NULL, NULL);
+
+    // 4. Fast-path CPU scaling: If the desktop perfectly matches the target, use SWS_POINT (no scaling, just fast color
+    // conversion)
+    int sws_flags = (capture_w == scaled_w && capture_h == scaled_h) ? SWS_POINT : SWS_FAST_BILINEAR;
+
+    sws_ctx = sws_getContext(capture_w, capture_h, AV_PIX_FMT_BGRA, scaled_w, scaled_h, AV_PIX_FMT_YUV420P, sws_flags,
+                             NULL, NULL, NULL);
 
     return true;
 }
@@ -270,7 +281,8 @@ void VideoEncoder::capture_loop()
         return;
     }
 
-    auto frame_duration = std::chrono::microseconds(1000000 / 30);
+    // 5. Target 60 FPS capture rate
+    auto frame_duration = std::chrono::microseconds(1000000 / 60);
     while (running.load())
     {
         auto start_time = std::chrono::steady_clock::now();

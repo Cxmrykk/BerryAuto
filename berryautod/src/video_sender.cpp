@@ -143,15 +143,15 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
         return;
     }
 
-    // FIX: Relaxed overly aggressive Pre-emptive USB Queue Check from 2 to 20
-    if (get_tx_queue_size() >= 20)
+    // Relaxed queue tolerance to 60 packets (1 full second at 60 FPS) to prevent false-positives
+    if (get_tx_queue_size() >= 60)
     {
         LOG_E("[WARNING] USB Queue Congested! Entering Recovery Mode.");
         is_recovering = true;
         return;
     }
 
-    // Car ACK Check (FIX: Restored max wait time to 1000ms / 500 cycles before failing)
+    // Car ACK Check (Waits max 1000ms for Head Unit to ACK before failing)
     int wait_cycles = 0;
     while (is_video_streaming.load() && video_unacked_count.load() >= max_video_unacked && wait_cycles < 500)
     {
