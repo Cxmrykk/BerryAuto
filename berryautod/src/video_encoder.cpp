@@ -102,9 +102,6 @@ bool VideoEncoder::init_x11()
                             capture_y = crtc_info->y;
                             capture_w = crtc_info->width;
                             capture_h = crtc_info->height;
-                            std::cout << "[VideoEncoder] Found Virtual Display '" << name
-                                      << "' at Offset: " << capture_x << "," << capture_y << " | Size: " << capture_w
-                                      << "x" << capture_h << std::endl;
                             XRRFreeCrtcInfo(crtc_info);
                             XRRFreeOutputInfo(output_info);
                             break;
@@ -126,8 +123,6 @@ bool VideoEncoder::init_x11()
         capture_h = attributes.height;
         capture_x = 0;
         capture_y = 0;
-        std::cout << "[VideoEncoder] Capturing primary monitor at 0,0 Size: " << capture_w << "x" << capture_h
-                  << std::endl;
     }
 
     img = XShmCreateImage(dpy, DefaultVisual(dpy, DefaultScreen(dpy)), DefaultDepth(dpy, DefaultScreen(dpy)), ZPixmap,
@@ -164,12 +159,10 @@ bool VideoEncoder::init_encoder()
 
     if (global_video_codec_type == 7) // MEDIA_CODEC_VIDEO_H265
     {
-        std::cout << "[VideoEncoder] Head Unit negotiated HEVC (H.265)." << std::endl;
         encoder_names = {"hevc_v4l2m2m", "libx265", "hevc"};
     }
     else // Default H.264
     {
-        std::cout << "[VideoEncoder] Head Unit negotiated H.264." << std::endl;
         encoder_names = {"h264_v4l2m2m", "h264_omx", "libx264", "h264"};
     }
 
@@ -194,14 +187,14 @@ bool VideoEncoder::init_encoder()
         codec_ctx->framerate = {30, 1};
         codec_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
 
-        // STRICT BANDWIDTH CONTROL TO PREVENT USB CHOKING
-        codec_ctx->bit_rate = 2000000;      // 2 Mbps target
-        codec_ctx->rc_max_rate = 2500000;   // 2.5 Mbps absolute spike limit
-        codec_ctx->rc_buffer_size = 500000; // Small VBV buffer
-        codec_ctx->gop_size = 60;           // I-Frame every 2 seconds
+        // STRICT BANDWIDTH CONTROL: Prevent I-Frame spikes that choke USB
+        codec_ctx->bit_rate = 1200000;    // 1.2 Mbps target
+        codec_ctx->rc_max_rate = 1500000; // 1.5 Mbps absolute peak
+        codec_ctx->rc_buffer_size = 300000;
+        codec_ctx->gop_size = 90; // I-Frame only every 3 seconds
         codec_ctx->max_b_frames = 0;
-        codec_ctx->qmin = 10;
-        codec_ctx->qmax = 45; // Allow encoder to drop quality during motion!
+        codec_ctx->qmin = 20;
+        codec_ctx->qmax = 51; // Allow heavy compression/artifacting during motion!
 
         if (std::string(codec->name) == "libx264" || std::string(codec->name) == "libx265")
         {
@@ -216,7 +209,6 @@ bool VideoEncoder::init_encoder()
             av_opt_set(codec_ctx->priv_data, "num_output_buffers", "16", 0);
         }
 
-        std::cout << "[VideoEncoder] Attempting to open Encoder: " << codec->name << "..." << std::endl;
         if (avcodec_open2(codec_ctx, codec, NULL) >= 0)
         {
             std::cout << "[VideoEncoder] Successfully opened Encoder: " << codec->name << std::endl;
@@ -224,31 +216,21 @@ bool VideoEncoder::init_encoder()
         }
         else
         {
-            std::cerr << "[VideoEncoder] Failed to open Encoder: " << codec->name << ", trying fallback..."
-                      << std::endl;
             avcodec_free_context(&codec_ctx);
             codec = nullptr;
         }
     }
 
     if (!codec_ctx || !codec)
-    {
-        std::cerr << "[VideoEncoder] FATAL: Could not open any working video encoders." << std::endl;
         return false;
-    }
 
     int usable_w = std::max(2, target_width - global_video_margin_w);
     int usable_h = std::max(2, target_height - global_video_margin_h);
 
-    scaled_w = usable_w;
-    scaled_h = usable_h;
-    offset_x = global_video_margin_w / 2;
-    offset_y = global_video_margin_h / 2;
-
-    scaled_w &= ~1;
-    scaled_h &= ~1;
-    offset_x &= ~1;
-    offset_y &= ~1;
+    scaled_w = usable_w & ~1;
+    scaled_h = usable_h & ~1;
+    offset_x = (global_video_margin_w / 2) & ~1;
+    offset_y = (global_video_margin_h / 2) & ~1;
 
     frame = av_frame_alloc();
     frame->format = codec_ctx->pix_fmt;
@@ -257,7 +239,6 @@ bool VideoEncoder::init_encoder()
     av_frame_get_buffer(frame, 32);
 
     pkt = av_packet_alloc();
-
     sws_ctx = sws_getContext(capture_w, capture_h, AV_PIX_FMT_BGRA, scaled_w, scaled_h, AV_PIX_FMT_YUV420P,
                              SWS_FAST_BILINEAR, NULL, NULL, NULL);
 
@@ -300,7 +281,6 @@ void VideoEncoder::encode_frame(uint8_t* bgra_data, int stride)
 
     const uint8_t* in_data[1] = {bgra_data};
     int in_linesize[1] = {stride};
-
     uint8_t* dst_data[4] = {frame->data[0] + offset_y * frame->linesize[0] + offset_x,
                             frame->data[1] + (offset_y / 2) * frame->linesize[1] + (offset_x / 2),
                             frame->data[2] + (offset_y / 2) * frame->linesize[2] + (offset_x / 2), NULL};
@@ -311,13 +291,9 @@ void VideoEncoder::encode_frame(uint8_t* bgra_data, int stride)
     frame->pts = frame_pts++;
 
     if (request_keyframe.exchange(false))
-    {
         frame->pict_type = AV_PICTURE_TYPE_I;
-    }
     else
-    {
         frame->pict_type = AV_PICTURE_TYPE_NONE;
-    }
 
     int ret = avcodec_send_frame(codec_ctx, frame);
     if (ret < 0)
@@ -326,9 +302,7 @@ void VideoEncoder::encode_frame(uint8_t* bgra_data, int stride)
     while (ret >= 0)
     {
         ret = avcodec_receive_packet(codec_ctx, pkt);
-        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
-            break;
-        if (ret < 0)
+        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF || ret < 0)
             break;
 
         auto now = std::chrono::system_clock::now().time_since_epoch();
@@ -336,7 +310,6 @@ void VideoEncoder::encode_frame(uint8_t* bgra_data, int stride)
 
         std::vector<uint8_t> nal_data(pkt->data, pkt->data + pkt->size);
         nal_callback(nal_data, ts);
-
         av_packet_unref(pkt);
     }
 }
@@ -345,28 +318,21 @@ void VideoEncoder::capture_loop()
 {
     if (!init_x11() || !init_encoder())
     {
-        std::cerr << "[VideoEncoder] Initialization failed" << std::endl;
         cleanup_x11();
         cleanup_encoder();
         return;
     }
 
     auto frame_duration = std::chrono::microseconds(1000000 / 30);
-
     while (running.load())
     {
         auto start_time = std::chrono::steady_clock::now();
-
         XShmGetImage(dpy, root_window, img, capture_x, capture_y, AllPlanes);
-
         encode_frame((uint8_t*)img->data, img->bytes_per_line);
-
-        auto end_time = std::chrono::steady_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
+        auto elapsed =
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start_time);
         if (elapsed < frame_duration)
-        {
             std::this_thread::sleep_for(frame_duration - elapsed);
-        }
     }
 
     cleanup_x11();

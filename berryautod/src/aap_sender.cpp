@@ -17,7 +17,7 @@ struct TxPacket
     uint8_t channel;
     std::vector<uint8_t> payload;
     bool is_control;
-    bool is_raw_ssl; // If true, payload is already encrypted/formatted. Bypass processing.
+    bool is_raw_ssl;
 };
 
 std::queue<TxPacket> high_priority_queue;
@@ -76,7 +76,7 @@ void write_chunk(const std::vector<uint8_t>& pt, uint8_t target_channel, uint8_t
 void transmit_atomic(uint8_t channel, bool is_encrypted, const std::vector<uint8_t>& payload, bool is_control)
 {
     const size_t MAX_CHUNK = 15000;
-    uint32_t total_size = payload.size(); // MUST BE CIPHERTEXT SIZE IF ENCRYPTED (Prevents -251 Buffer Overflow)
+    uint32_t total_size = payload.size();
 
     if (total_size <= MAX_CHUNK)
     {
@@ -148,7 +148,7 @@ void tx_worker()
 
         if (pkt.is_raw_ssl)
         {
-            write_buffer(pkt.payload); // Handshake bypass
+            write_buffer(pkt.payload);
         }
         else
         {
@@ -160,7 +160,6 @@ void tx_worker()
             {
                 std::vector<uint8_t> ciphertext;
                 {
-                    // LATE ENCRYPTION: Guarantees TLS Sequence matches physical wire transmission order!
                     std::lock_guard<std::recursive_mutex> aap_lock(aap_mutex);
                     SSL_write(ssl, pkt.payload.data(), pkt.payload.size());
                     int pending = BIO_ctrl_pending(wbio);
@@ -305,8 +304,9 @@ bool send_media_payload(uint8_t channel, const std::vector<uint8_t>& pt)
     init_tx_thread();
     std::lock_guard<std::mutex> lock(queue_mutex);
 
-    // BACKPRESSURE: Drop video if the queue is backed up
-    if (channel == 2 && low_priority_queue.size() > 5)
+    // ULTRA-TIGHT BACKPRESSURE: If the queue has EVEN ONE frame, drop this new one.
+    // The USB pipeline must remain absolutely clear for Ping Responses!
+    if (channel == 2 && low_priority_queue.size() >= 1)
         return false;
 
     TxPacket pkt;
