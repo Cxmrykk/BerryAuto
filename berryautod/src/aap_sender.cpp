@@ -12,17 +12,12 @@
 
 using namespace com::andrerinas::headunitrevived::aap::protocol::proto;
 
-// --- LATE-ENCRYPTION TX QUEUE ---
-
 struct TxPacket
 {
     uint8_t channel;
     std::vector<uint8_t> payload;
-    uint8_t fragment_flag;
-    uint32_t unfragmented_size;
     bool is_control;
-    bool encrypt;
-    bool is_raw; // If true, payload is already formatted and encrypted. Write directly!
+    bool is_raw_ssl; // If true, payload is already encrypted/formatted. Bypass processing.
 };
 
 std::queue<TxPacket> high_priority_queue;
@@ -30,6 +25,105 @@ std::queue<TxPacket> low_priority_queue;
 std::mutex queue_mutex;
 std::condition_variable queue_cv;
 std::once_flag tx_thread_flag;
+
+void write_buffer(const std::vector<uint8_t>& data)
+{
+    const uint8_t* ptr = data.data();
+    size_t remain = data.size();
+    while (remain > 0)
+    {
+        int w = write(ep_in, ptr, remain);
+        if (w < 0)
+        {
+            if (errno == EINTR || errno == EAGAIN)
+            {
+                usleep(100);
+                continue;
+            }
+            LOG_E("USB TX Write Failed! " << strerror(errno));
+            break;
+        }
+        ptr += w;
+        remain -= w;
+    }
+}
+
+void write_chunk(const std::vector<uint8_t>& pt, uint8_t target_channel, uint8_t flags, uint32_t unfragmented_size)
+{
+    std::vector<uint8_t> out;
+    uint16_t len_field = pt.size();
+
+    if ((flags & 0x03) == 0x01)
+        len_field += 4;
+
+    out.push_back(target_channel);
+    out.push_back(flags);
+    out.push_back((len_field >> 8) & 0xFF);
+    out.push_back(len_field & 0xFF);
+
+    if ((flags & 0x03) == 0x01)
+    {
+        out.push_back((unfragmented_size >> 24) & 0xFF);
+        out.push_back((unfragmented_size >> 16) & 0xFF);
+        out.push_back((unfragmented_size >> 8) & 0xFF);
+        out.push_back(unfragmented_size & 0xFF);
+    }
+
+    out.insert(out.end(), pt.begin(), pt.end());
+    write_buffer(out);
+}
+
+void transmit_atomic(uint8_t channel, bool is_encrypted, const std::vector<uint8_t>& payload, bool is_control)
+{
+    const size_t MAX_CHUNK = 15000;
+    uint32_t total_size = payload.size(); // MUST BE CIPHERTEXT SIZE IF ENCRYPTED (Prevents -251 Buffer Overflow)
+
+    if (total_size <= MAX_CHUNK)
+    {
+        uint8_t flag = 0;
+        if (is_encrypted)
+            flag = (is_control && channel != 0) ? 0x0F : 0x0B;
+        else
+            flag = (is_control && channel != 0) ? 0x07 : 0x03;
+
+        write_chunk(payload, channel, flag, 0);
+    }
+    else
+    {
+        uint8_t base_flag = 0;
+        if (is_encrypted)
+            base_flag = (is_control && channel != 0) ? 0x0C : 0x08;
+        else
+            base_flag = (is_control && channel != 0) ? 0x04 : 0x00;
+
+        size_t offset = 0;
+        while (offset < total_size)
+        {
+            size_t remain = total_size - offset;
+            size_t chunk_size = std::min(remain, MAX_CHUNK);
+            std::vector<uint8_t> chunk(payload.begin() + offset, payload.begin() + offset + chunk_size);
+
+            uint8_t flag = base_flag;
+            uint32_t unfrag = 0;
+            if (offset == 0)
+            {
+                flag |= 0x01;
+                unfrag = total_size;
+            }
+            else if (offset + chunk_size >= total_size)
+            {
+                flag |= 0x02;
+            }
+            else
+            {
+                flag |= 0x00;
+            }
+
+            write_chunk(chunk, channel, flag, unfrag);
+            offset += chunk_size;
+        }
+    }
+}
 
 void tx_worker()
 {
@@ -52,88 +146,35 @@ void tx_worker()
             }
         }
 
-        std::vector<uint8_t> out;
-
-        if (pkt.is_raw)
+        if (pkt.is_raw_ssl)
         {
-            out = pkt.payload; // Bypass encryption entirely
-        }
-        else if (pkt.encrypt)
-        {
-            uint8_t base_flag = (pkt.is_control && pkt.channel != 0) ? 0x0C : 0x08;
-            uint8_t flags = base_flag | pkt.fragment_flag;
-
-            std::vector<uint8_t> ciphertext;
-            {
-                std::lock_guard<std::recursive_mutex> aap_lock(aap_mutex);
-                SSL_write(ssl, pkt.payload.data(), pkt.payload.size());
-                int pending = BIO_ctrl_pending(wbio);
-                if (pending > 0)
-                {
-                    ciphertext.resize(pending);
-                    BIO_read(wbio, ciphertext.data(), pending);
-                }
-            }
-
-            uint16_t len = ciphertext.size();
-            if (pkt.fragment_flag == 0x01)
-                len += 4;
-
-            out.push_back(pkt.channel);
-            out.push_back(flags);
-            out.push_back(len >> 8);
-            out.push_back(len & 0xFF);
-
-            if (pkt.fragment_flag == 0x01)
-            {
-                out.push_back(pkt.unfragmented_size >> 24);
-                out.push_back(pkt.unfragmented_size >> 16);
-                out.push_back(pkt.unfragmented_size >> 8);
-                out.push_back(pkt.unfragmented_size & 0xFF);
-            }
-            out.insert(out.end(), ciphertext.begin(), ciphertext.end());
+            write_buffer(pkt.payload); // Handshake bypass
         }
         else
         {
-            uint8_t base_flag = (pkt.is_control && pkt.channel != 0) ? 0x04 : 0x00;
-            uint8_t flags = base_flag | pkt.fragment_flag;
-
-            uint16_t len = pkt.payload.size();
-            if (pkt.fragment_flag == 0x01)
-                len += 4;
-
-            out.push_back(pkt.channel);
-            out.push_back(flags);
-            out.push_back(len >> 8);
-            out.push_back(len & 0xFF);
-
-            if (pkt.fragment_flag == 0x01)
+            if (ssl_bypassed)
             {
-                out.push_back(pkt.unfragmented_size >> 24);
-                out.push_back(pkt.unfragmented_size >> 16);
-                out.push_back(pkt.unfragmented_size >> 8);
-                out.push_back(pkt.unfragmented_size & 0xFF);
+                transmit_atomic(pkt.channel, false, pkt.payload, pkt.is_control);
             }
-            out.insert(out.end(), pkt.payload.begin(), pkt.payload.end());
-        }
-
-        const uint8_t* ptr = out.data();
-        size_t remain = out.size();
-        while (remain > 0)
-        {
-            int w = write(ep_in, ptr, remain);
-            if (w < 0)
+            else
             {
-                if (errno == EINTR || errno == EAGAIN)
+                std::vector<uint8_t> ciphertext;
                 {
-                    usleep(100);
-                    continue;
+                    // LATE ENCRYPTION: Guarantees TLS Sequence matches physical wire transmission order!
+                    std::lock_guard<std::recursive_mutex> aap_lock(aap_mutex);
+                    SSL_write(ssl, pkt.payload.data(), pkt.payload.size());
+                    int pending = BIO_ctrl_pending(wbio);
+                    if (pending > 0)
+                    {
+                        ciphertext.resize(pending);
+                        BIO_read(wbio, ciphertext.data(), pending);
+                    }
                 }
-                LOG_E("USB TX Write Failed! " << strerror(errno));
-                break;
+                if (!ciphertext.empty())
+                {
+                    transmit_atomic(pkt.channel, true, ciphertext, pkt.is_control);
+                }
             }
-            ptr += w;
-            remain -= w;
         }
     }
 }
@@ -152,6 +193,12 @@ void flush_usb_tx_queue()
     std::swap(low_priority_queue, empty2);
 }
 
+int get_media_tx_queue_size()
+{
+    std::lock_guard<std::mutex> lock(queue_mutex);
+    return low_priority_queue.size();
+}
+
 void flush_ssl_buffers()
 {
     std::lock_guard<std::recursive_mutex> aap_lock(aap_mutex);
@@ -162,29 +209,28 @@ void flush_ssl_buffers()
         BIO_read(wbio, tls_record.data(), pending);
 
         std::vector<uint8_t> out;
+        uint16_t len = tls_record.size();
+
         if (!is_tls_connected)
         {
-            uint16_t len = tls_record.size() + 2;
             out.push_back(0);
             out.push_back(0x03);
-            out.push_back(len >> 8);
-            out.push_back(len & 0xFF);
+            out.push_back((len + 2) >> 8);
+            out.push_back((len + 2) & 0xFF);
             out.push_back((ControlMsgType::MESSAGE_ENCAPSULATED_SSL >> 8) & 0xFF);
             out.push_back(ControlMsgType::MESSAGE_ENCAPSULATED_SSL & 0xFF);
-            out.insert(out.end(), tls_record.begin(), tls_record.end());
         }
         else
         {
-            uint16_t len = tls_record.size();
             out.push_back(0);
             out.push_back(0x0B);
             out.push_back(len >> 8);
             out.push_back(len & 0xFF);
-            out.insert(out.end(), tls_record.begin(), tls_record.end());
         }
+        out.insert(out.end(), tls_record.begin(), tls_record.end());
 
         TxPacket pkt;
-        pkt.is_raw = true;
+        pkt.is_raw_ssl = true;
         pkt.payload = out;
 
         init_tx_thread();
@@ -195,8 +241,6 @@ void flush_ssl_buffers()
         queue_cv.notify_one();
     }
 }
-
-// --- PUBLIC API ---
 
 void send_unencrypted(uint8_t channel, uint8_t flags, uint16_t type, const std::vector<uint8_t>& payload)
 {
@@ -211,7 +255,7 @@ void send_unencrypted(uint8_t channel, uint8_t flags, uint16_t type, const std::
     out.insert(out.end(), payload.begin(), payload.end());
 
     TxPacket pkt;
-    pkt.is_raw = true;
+    pkt.is_raw_ssl = true;
     pkt.payload = out;
 
     init_tx_thread();
@@ -237,19 +281,16 @@ void send_message(uint8_t channel, uint16_t type, const google::protobuf::Messag
         return;
     }
 
-    std::vector<uint8_t> payload;
-    payload.push_back((type >> 8) & 0xFF);
-    payload.push_back(type & 0xFF);
-    payload.insert(payload.end(), serialized.begin(), serialized.end());
+    std::vector<uint8_t> pt;
+    pt.push_back((type >> 8) & 0xFF);
+    pt.push_back(type & 0xFF);
+    pt.insert(pt.end(), serialized.begin(), serialized.end());
 
     TxPacket pkt;
     pkt.channel = channel;
-    pkt.payload = payload;
-    pkt.fragment_flag = 0x03; // Unfragmented
-    pkt.unfragmented_size = 0;
-    pkt.is_control = (type >= 1 && type <= 26);
-    pkt.encrypt = true;
-    pkt.is_raw = false;
+    pkt.payload = pt;
+    pkt.is_control = (type <= 26);
+    pkt.is_raw_ssl = false;
 
     init_tx_thread();
     {
@@ -261,74 +302,24 @@ void send_message(uint8_t channel, uint16_t type, const google::protobuf::Messag
 
 bool send_media_payload(uint8_t channel, const std::vector<uint8_t>& pt)
 {
-    uint32_t total_size = pt.size();
-    const size_t MAX_CHUNK = 15000;
-
     init_tx_thread();
     std::lock_guard<std::mutex> lock(queue_mutex);
 
-    if (channel == 2 && low_priority_queue.size() > 50)
-    {
+    // BACKPRESSURE: Drop video if the queue is backed up
+    if (channel == 2 && low_priority_queue.size() > 5)
         return false;
-    }
 
-    if (total_size <= MAX_CHUNK)
-    {
-        TxPacket pkt;
-        pkt.channel = channel;
-        pkt.payload = pt;
-        pkt.fragment_flag = 0x03;
-        pkt.unfragmented_size = 0;
-        pkt.is_control = false;
-        pkt.encrypt = !ssl_bypassed;
-        pkt.is_raw = false;
+    TxPacket pkt;
+    pkt.channel = channel;
+    pkt.payload = pt;
+    pkt.is_control = false;
+    pkt.is_raw_ssl = false;
 
-        if (channel == 2)
-            low_priority_queue.push(pkt);
-        else
-            high_priority_queue.push(pkt);
-    }
+    if (channel == 2)
+        low_priority_queue.push(pkt);
     else
-    {
-        size_t offset = 0;
-        while (offset < total_size)
-        {
-            size_t chunk_size = std::min(total_size - offset, MAX_CHUNK);
-            std::vector<uint8_t> chunk(pt.begin() + offset, pt.begin() + offset + chunk_size);
+        high_priority_queue.push(pkt);
 
-            TxPacket pkt;
-            pkt.channel = channel;
-            pkt.payload = chunk;
-
-            if (offset == 0)
-            {
-                pkt.fragment_flag = 0x01;
-                pkt.unfragmented_size = total_size;
-            }
-            else if (offset + chunk_size >= total_size)
-            {
-                pkt.fragment_flag = 0x02;
-                pkt.unfragmented_size = 0;
-            }
-            else
-            {
-                pkt.fragment_flag = 0x00;
-                pkt.unfragmented_size = 0;
-            }
-
-            pkt.is_control = false;
-            pkt.encrypt = !ssl_bypassed;
-            pkt.is_raw = false;
-
-            if (channel == 2)
-                low_priority_queue.push(pkt);
-            else
-                high_priority_queue.push(pkt);
-
-            offset += chunk_size;
-        }
-    }
-
-    queue_cv.notify_all();
+    queue_cv.notify_one();
     return true;
 }

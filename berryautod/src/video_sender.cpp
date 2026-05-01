@@ -23,14 +23,12 @@ void send_video_frame_internal(const std::vector<uint8_t>& nal_data, uint64_t ti
 
     pt.insert(pt.end(), nal_data.begin(), nal_data.end());
 
-    // If the queue was overloaded, it returns false to protect latency.
     if (send_media_payload(video_channel_id, pt))
     {
         video_unacked_count++;
     }
     else
     {
-        // Tell the encoder to recover from the dropped frame instantly.
         if (video_streamer)
             video_streamer->force_keyframe();
     }
@@ -133,6 +131,16 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
 {
     if (!(is_tls_connected || ssl_bypassed) || !video_channel_ready || !is_video_streaming.load())
     {
+        return;
+    }
+
+    // PRE-EMPTIVE HEAD-UNIT CHOKE PREVENTION
+    // Android's USB Host API chokes reading single blocks larger than ~60KB, stalling the pipe.
+    if (nal_data.size() > 60000)
+    {
+        LOG_E("[WARNING] Frame too large (" << nal_data.size() << " bytes). Dropping to prevent USB Pipeline Choke!");
+        if (video_streamer)
+            video_streamer->force_keyframe();
         return;
     }
 
