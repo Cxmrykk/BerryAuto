@@ -22,7 +22,7 @@
 #include "input_handler.hpp"
 #include "message_handler.hpp"
 #include "video_encoder.hpp"
-#include "x11_wrapper.hpp" // FIX: Use the wrapper to prevent the X11 'Status' macro collision
+#include "x11_wrapper.hpp"
 
 // Global Instantiations
 int ep_in, ep_out;
@@ -334,9 +334,7 @@ int main()
                             }
                         }
                     }
-                    //ssl_write_and_flush_unlocked({}, 0, 0x0B, 0);
-                    ssl_write_and_flush_handshake();
-
+                    ssl_write_and_flush_unlocked({}, 0, 0x0B, 0);
                 }
                 else
                 {

@@ -27,7 +27,7 @@ void write_to_usb(const std::vector<uint8_t>& data)
     }
 }
 
-// Internal helper to correctly fragment payloads (plaintext or ciphertext)
+// Internal helper to correctly fragment payloads (either plaintext or fully encrypted ciphertext)
 void fragment_and_send(const std::vector<uint8_t>& payload, uint8_t channel, uint8_t base_flags)
 {
     const size_t MAX_CHUNK_SIZE = 16000;
@@ -56,7 +56,7 @@ void fragment_and_send(const std::vector<uint8_t>& payload, uint8_t channel, uin
             bool is_first = (offset == 0);
             size_t max_payload = MAX_CHUNK_SIZE;
             if (is_first)
-                max_payload -= 4; // leave room for unfragmented size
+                max_payload -= 4; // leave room for the unfragmented size header
 
             size_t chunk_size = std::min(remain, max_payload);
             bool is_last = (offset + chunk_size >= total_size);
@@ -92,7 +92,7 @@ void fragment_and_send(const std::vector<uint8_t>& payload, uint8_t channel, uin
 
             offset += chunk_size;
         }
-        // Send everything atomically
+        // Write entire multi-fragment structure atomically to prevent interleaving
         write_to_usb(out_payload);
     }
 }
@@ -108,14 +108,14 @@ void send_unencrypted(uint8_t channel, uint8_t flags, uint16_t type, const std::
     fragment_and_send(pt, channel, base_flags);
 }
 
-void aap_send_raw(const std::vector<uint8_t>& pt, uint8_t target_channel, uint8_t flags, uint32_t unfragmented_size)
+void aap_send_raw(const std::vector<uint8_t>& pt, uint8_t target_channel, uint8_t flags, uint32_t /* unused */)
 {
     uint8_t base_flags = flags & 0xFC;
     fragment_and_send(pt, target_channel, base_flags);
 }
 
 void ssl_write_and_flush_unlocked(const std::vector<uint8_t>& pt, uint8_t target_channel, uint8_t encrypted_flag,
-                                  uint32_t unfragmented_size)
+                                  uint32_t /* unused */)
 {
     std::vector<uint8_t> ciphertext;
     {

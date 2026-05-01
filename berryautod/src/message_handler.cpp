@@ -285,7 +285,9 @@ void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload
             (void)BIO_reset(wbio);
         }
 
-        send_version_response(major, minor);
+        std::vector<uint8_t> resp_payload = {
+            (uint8_t)(major >> 8), (uint8_t)(major & 0xFF), (uint8_t)(minor >> 8), (uint8_t)(minor & 0xFF), 0x00, 0x00};
+        send_unencrypted(0, 0x03, ControlMsgType::MESSAGE_VERSION_RESPONSE, resp_payload);
     }
     else if (channel == 0 && type == ControlMsgType::MESSAGE_ENCAPSULATED_SSL)
     {
@@ -314,7 +316,7 @@ void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload
             }
         }
 
-        ssl_write_and_flush_handshake();
+        ssl_write_and_flush_unlocked({}, 0, 0x0B, 0);
 
         if (handshake_just_completed)
         {
@@ -348,7 +350,16 @@ void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload
         sdp_req.set_phone_name("BerryAuto Phone");
         sdp_req.set_phone_brand("Raspberry Pi");
 
-        send_message(0, ControlMsgType::MESSAGE_SERVICE_DISCOVERY_REQUEST, sdp_req);
+        if (ssl_bypassed)
+        {
+            std::vector<uint8_t> serialized(sdp_req.ByteSizeLong());
+            sdp_req.SerializeToArray(serialized.data(), serialized.size());
+            send_unencrypted(0, 0x03, ControlMsgType::MESSAGE_SERVICE_DISCOVERY_REQUEST, serialized);
+        }
+        else
+        {
+            send_message(0, ControlMsgType::MESSAGE_SERVICE_DISCOVERY_REQUEST, sdp_req);
+        }
     }
     else
     {

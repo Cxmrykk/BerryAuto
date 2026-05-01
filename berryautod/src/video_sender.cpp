@@ -25,11 +25,11 @@ void send_video_frame_internal(const std::vector<uint8_t>& nal_data, uint64_t ti
 
     if (ssl_bypassed)
     {
-        aap_send_raw(pt, video_channel_id, 0x03, 0); // 0x03: Base Unencrypted
+        aap_send_raw(pt, video_channel_id, 0x03, 0); // 0x03 = Unencrypted
     }
     else
     {
-        ssl_write_and_flush_unlocked(pt, video_channel_id, 0x0B, 0); // 0x0B: Base Encrypted
+        ssl_write_and_flush_unlocked(pt, video_channel_id, 0x0B, 0); // 0x0B = Encrypted
     }
 
     video_unacked_count++;
@@ -127,11 +127,11 @@ void inject_cached_video_config()
     LOG_I(">>> Sending CODEC_CONFIG to Head Unit (" << config_copy.size() << " bytes)... <<<");
     if (ssl_bypassed)
     {
-        aap_send_raw(pt, video_channel_id, 0x03, 0); // 0x03 = Unencrypted
+        aap_send_raw(pt, video_channel_id, 0x03, 0);
     }
     else
     {
-        ssl_write_and_flush_unlocked(pt, video_channel_id, 0x0B, 0); // 0x0B = Encrypted
+        ssl_write_and_flush_unlocked(pt, video_channel_id, 0x0B, 0);
     }
 }
 
