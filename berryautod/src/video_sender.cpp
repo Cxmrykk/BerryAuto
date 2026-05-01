@@ -13,9 +13,9 @@ bool has_cached_config = false;
 
 void send_video_frame_internal(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
 {
-    // FIX: Lock the global AAP mutex to prevent control messages (like Ping)
-    // from interleaving in the middle of our video fragments!
-    std::lock_guard<std::recursive_mutex> lock(aap_mutex);
+    // FIX: Lock the global USB Mutex so no other thread (e.g. Ping) can interleave
+    // packets into the middle of this multi-fragment loop!
+    std::lock_guard<std::recursive_mutex> lock(usb_tx_mutex);
 
     const size_t MAX_CHUNK_SIZE = 16000;
 
@@ -178,7 +178,8 @@ void inject_cached_video_config()
 
     LOG_I(">>> Sending CODEC_CONFIG to Head Unit (" << config_copy.size() << " bytes)... <<<");
 
-    std::lock_guard<std::recursive_mutex> lock(aap_mutex); // Lock against interleaving here too!
+    // Also lock here since it's a multi-fragment packet sequence
+    std::lock_guard<std::recursive_mutex> lock(usb_tx_mutex);
     if (ssl_bypassed)
     {
         aap_send_raw(pt, video_channel_id, 0x03, 0);

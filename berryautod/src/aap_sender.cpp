@@ -7,11 +7,12 @@
 
 using namespace com::andrerinas::headunitrevived::aap::protocol::proto;
 
-std::mutex usb_tx_mutex;
+// Changed to recursive_mutex to allow global locking from video_sender
+std::recursive_mutex usb_tx_mutex;
 
 void write_to_usb(const std::vector<uint8_t>& data)
 {
-    std::lock_guard<std::mutex> lock(usb_tx_mutex);
+    std::lock_guard<std::recursive_mutex> lock(usb_tx_mutex);
     const uint8_t* ptr = data.data();
     size_t remain = data.size();
     while (remain > 0)
@@ -39,8 +40,6 @@ void send_unencrypted(uint8_t channel, uint8_t flags, uint16_t type, const std::
     out.push_back(type & 0xFF);
     out.insert(out.end(), payload.begin(), payload.end());
 
-    std::cout << "[DEBUG-TX] Unencrypted - Channel: " << (int)channel << " Type: " << type << " Size: " << out.size()
-              << std::endl;
     write_to_usb(out);
 }
 

@@ -1,7 +1,11 @@
 #pragma once
 #include <google/protobuf/message.h>
+#include <mutex>
 #include <stdint.h>
 #include <vector>
+
+// Exposed to allow video_sender to lock the USB port during fragmented sends
+extern std::recursive_mutex usb_tx_mutex;
 
 void send_unencrypted(uint8_t channel, uint8_t flags, uint16_t type, const std::vector<uint8_t>& payload);
 void aap_send_raw(const std::vector<uint8_t>& pt, uint8_t target_channel, uint8_t flags, uint32_t unfragmented_size);
