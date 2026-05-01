@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <vector>
 
+void write_to_usb(const std::vector<uint8_t>& data);
 void send_unencrypted(uint8_t channel, uint8_t flags, uint16_t type, const std::vector<uint8_t>& payload);
 void aap_send_raw(const std::vector<uint8_t>& pt, uint8_t target_channel, uint8_t flags, uint32_t unfragmented_size);
 void ssl_write_and_flush_unlocked(const std::vector<uint8_t>& pt, uint8_t target_channel = 0,

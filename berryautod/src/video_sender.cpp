@@ -11,6 +11,35 @@ std::mutex config_mutex;
 std::vector<uint8_t> cached_config_nal;
 bool has_cached_config = false;
 
+// Helper to format an AAP packet without sending it yet
+std::vector<uint8_t> build_aap_packet(const std::vector<uint8_t>& pt, uint8_t target_channel, uint8_t flags,
+                                      uint32_t unfragmented_size)
+{
+    std::vector<uint8_t> out;
+    uint16_t len_field = pt.size();
+
+    if ((flags & 0x03) == 0x01)
+    {
+        len_field += 4;
+    }
+
+    out.push_back(target_channel);
+    out.push_back(flags);
+    out.push_back((len_field >> 8) & 0xFF);
+    out.push_back(len_field & 0xFF);
+
+    if ((flags & 0x03) == 0x01)
+    {
+        out.push_back((unfragmented_size >> 24) & 0xFF);
+        out.push_back((unfragmented_size >> 16) & 0xFF);
+        out.push_back((unfragmented_size >> 8) & 0xFF);
+        out.push_back(unfragmented_size & 0xFF);
+    }
+
+    out.insert(out.end(), pt.begin(), pt.end());
+    return out;
+}
+
 void send_video_frame_internal(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
 {
     const size_t MAX_CHUNK_SIZE = 16000;
@@ -24,37 +53,26 @@ void send_video_frame_internal(const std::vector<uint8_t>& nal_data, uint64_t ti
     }
 
     uint32_t total_size = header.size() + nal_data.size();
+    std::vector<uint8_t> usb_payload;
 
     if (total_size <= MAX_CHUNK_SIZE)
     {
         std::vector<uint8_t> pt = header;
         pt.insert(pt.end(), nal_data.begin(), nal_data.end());
 
-        if (ssl_bypassed)
-        {
-            aap_send_raw(pt, video_channel_id, 0x03, 0);
-        }
-        else
-        {
-            ssl_write_and_flush_unlocked(pt, video_channel_id, 0x0B, 0);
-        }
+        // Video is ALWAYS unencrypted (0x03 = Unencrypted + Unfragmented)
+        std::vector<uint8_t> pkt = build_aap_packet(pt, video_channel_id, 0x03, 0);
+        usb_payload.insert(usb_payload.end(), pkt.begin(), pkt.end());
     }
     else
     {
-        // Fragment the plaintext before encryption
         size_t data_in_first = MAX_CHUNK_SIZE - header.size();
         std::vector<uint8_t> pt = header;
         pt.insert(pt.end(), nal_data.begin(), nal_data.begin() + data_in_first);
 
-        if (ssl_bypassed)
-        {
-            aap_send_raw(pt, video_channel_id, 0x01, total_size);
-        }
-        else
-        {
-            // 0x09 = First Fragment (0x01) + Encrypted (0x08)
-            ssl_write_and_flush_unlocked(pt, video_channel_id, 0x09, total_size);
-        }
+        // 0x01 = Unencrypted + First Fragment
+        std::vector<uint8_t> pkt = build_aap_packet(pt, video_channel_id, 0x01, total_size);
+        usb_payload.insert(usb_payload.end(), pkt.begin(), pkt.end());
 
         size_t offset = data_in_first;
         while (offset < nal_data.size())
@@ -65,20 +83,17 @@ void send_video_frame_internal(const std::vector<uint8_t>& nal_data, uint64_t ti
 
             bool is_last = (offset + chunk_size >= nal_data.size());
 
-            if (ssl_bypassed)
-            {
-                uint8_t flag = is_last ? 0x02 : 0x00;
-                aap_send_raw(pt_chunk, video_channel_id, flag, 0);
-            }
-            else
-            {
-                // 0x0A = Last Fragment (0x02) + Encrypted, 0x08 = Middle Fragment (0x00) + Encrypted
-                uint8_t flag = is_last ? 0x0A : 0x08;
-                ssl_write_and_flush_unlocked(pt_chunk, video_channel_id, flag, 0);
-            }
+            // 0x02 = Last Fragment, 0x00 = Middle Fragment
+            uint8_t flag = is_last ? 0x02 : 0x00;
+            std::vector<uint8_t> chunk_pkt = build_aap_packet(pt_chunk, video_channel_id, flag, 0);
+            usb_payload.insert(usb_payload.end(), chunk_pkt.begin(), chunk_pkt.end());
+
             offset += chunk_size;
         }
     }
+
+    // Send everything atomically to USB to prevent control messages from interleaving inside our fragments!
+    write_to_usb(usb_payload);
 
     video_unacked_count++;
 }
@@ -173,14 +188,10 @@ void inject_cached_video_config()
     pt.insert(pt.end(), config_copy.begin(), config_copy.end());
 
     LOG_I(">>> Sending CODEC_CONFIG to Head Unit (" << config_copy.size() << " bytes)... <<<");
-    if (ssl_bypassed)
-    {
-        aap_send_raw(pt, video_channel_id, 0x03, 0);
-    }
-    else
-    {
-        ssl_write_and_flush_unlocked(pt, video_channel_id, 0x0B, 0);
-    }
+
+    // Always send unencrypted (0x03)
+    std::vector<uint8_t> pkt = build_aap_packet(pt, video_channel_id, 0x03, 0);
+    write_to_usb(pkt);
 }
 
 void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
