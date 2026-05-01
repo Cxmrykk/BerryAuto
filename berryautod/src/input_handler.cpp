@@ -7,6 +7,8 @@ static Display* input_dpy = nullptr;
 
 void handle_touch_event(const com::andrerinas::headunitrevived::aap::protocol::proto::InputReport& report)
 {
+    std::lock_guard<std::recursive_mutex> lock(aap_mutex); // Fix #4: Thread safety on touch event pointers
+
     if (report.has_touch_event() && video_streamer != nullptr)
     {
         if (report.touch_event().pointer_data_size() == 0)

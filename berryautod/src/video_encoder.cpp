@@ -186,6 +186,9 @@ bool VideoEncoder::init_encoder()
         }
 
         codec_ctx = avcodec_alloc_context3(codec);
+        if (!codec_ctx)
+            continue; // Fix #2: Prevent NULL dereference on allocation failure
+
         codec_ctx->width = target_width;
         codec_ctx->height = target_height;
         codec_ctx->time_base = {1, 30};

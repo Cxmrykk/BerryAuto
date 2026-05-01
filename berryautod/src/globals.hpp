@@ -20,6 +20,12 @@ extern VideoEncoder* video_streamer;
 extern bool video_channel_ready;
 extern bool input_channel_ready;
 
+// Graceful Shutdown Flag (Fix #5)
+extern std::atomic<bool> should_exit;
+
+// Global safe cleanup function (Fix #1)
+void stop_video_stream();
+
 // Dynamic AAP Channels
 extern int video_channel_id;
 extern int input_channel_id;

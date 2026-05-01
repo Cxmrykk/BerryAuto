@@ -67,7 +67,7 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
         }
         else if (type == ControlMsgType::MESSAGE_BYEBYE_REQUEST)
         {
-            is_video_streaming = false;
+            stop_video_stream(); // Fix #1
             video_channel_ready = false;
             input_channel_ready = false;
             ByeByeResponse resp;
@@ -75,7 +75,7 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
         }
         else if (type == ControlMsgType::MESSAGE_CHANNEL_CLOSE_NOTIFICATION)
         {
-            is_video_streaming = false;
+            stop_video_stream(); // Fix #1
             video_channel_ready = false;
         }
     }
@@ -145,7 +145,7 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
             if (ctype == ChannelType::VIDEO)
             {
                 LOG_I(">>> Video Stream stopped by car! <<<");
-                is_video_streaming = false;
+                stop_video_stream(); // Fix #1
             }
         }
         else if (type == MediaMsgType::MEDIA_MESSAGE_VIDEO_FOCUS_REQUEST)
@@ -186,7 +186,7 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                     else
                     {
                         LOG_I(">>> Car REVOKED Video Focus. <<<");
-                        is_video_streaming = false;
+                        stop_video_stream(); // Fix #1
                     }
                 }
             }
@@ -275,7 +275,7 @@ void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload
             is_tls_connected = false;
             video_channel_ready = false;
             input_channel_ready = false;
-            is_video_streaming = false;
+            stop_video_stream(); // Fix #1: Cleanup on fresh connect
             video_unacked_count = 0;
 
             SSL_clear(ssl);

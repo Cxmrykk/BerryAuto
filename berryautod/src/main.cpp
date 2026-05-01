@@ -22,7 +22,7 @@
 #include "input_handler.hpp"
 #include "message_handler.hpp"
 #include "video_encoder.hpp"
-#include "x11_wrapper.hpp" // FIX: Use the wrapper to prevent the X11 'Status' macro collision
+#include "x11_wrapper.hpp"
 
 // Global Instantiations
 int ep_in, ep_out;
@@ -34,6 +34,8 @@ bool ssl_bypassed = false;
 VideoEncoder* video_streamer = nullptr;
 bool video_channel_ready = false;
 bool input_channel_ready = false;
+
+std::atomic<bool> should_exit{false}; // Fix #5
 
 // Dynamic Channel Assignments
 int video_channel_id = 2;
@@ -58,6 +60,18 @@ std::recursive_mutex aap_mutex;
 std::atomic<int> video_unacked_count{0};
 std::atomic<bool> is_video_streaming{false};
 int max_video_unacked = 16;
+
+// Fix #1: Safe cleanup of video thread to prevent memory/thread leak
+void stop_video_stream()
+{
+    is_video_streaming = false;
+    if (video_streamer != nullptr)
+    {
+        video_streamer->stop();
+        delete video_streamer;
+        video_streamer = nullptr;
+    }
+}
 
 bool load_hardcoded_certs(SSL_CTX* ctx)
 {
@@ -122,7 +136,7 @@ void ep0_thread(int ep0)
                 std::lock_guard<std::recursive_mutex> lock(aap_mutex);
                 is_tls_connected = false;
                 ssl_bypassed = false;
-                is_video_streaming = false;
+                stop_video_stream(); // Fix #1
                 video_channel_ready = false;
                 input_channel_ready = false;
                 video_unacked_count = 0;
@@ -161,7 +175,7 @@ void ep0_thread(int ep0)
                         force_zero_ack(ep0, false);
                         LOG_I("[AOA] Received START (53). Acknowledged. Waiting 500ms to flush, then morphing...");
                         usleep(500000);
-                        exit(42);
+                        should_exit = true; // Fix #5: Graceful exit instead of hard exit
                     }
                     else
                     {
@@ -180,6 +194,8 @@ void ep0_thread(int ep0)
 
 int main()
 {
+    XInitThreads(); // Fix #3: Ensure Xlib thread safety for background capture + input injection
+
     LOG_I("Starting OpenGAL Emitter...");
 
     const char* disp_env = getenv("DISPLAY");
@@ -245,6 +261,9 @@ int main()
 
     while (true)
     {
+        if (should_exit.load()) // Fix #5: Catch AOA shutdown gracefully
+            break;
+
         int r = read(ep_out, tmp_buf, sizeof(tmp_buf));
 
         if (r < 0)
@@ -328,6 +347,8 @@ int main()
                                     if (err != SSL_ERROR_WANT_READ && err != SSL_ERROR_WANT_WRITE)
                                     {
                                         LOG_E(">>> SSL_read Decryption Error: " << err << " <<<");
+                                        SSL_clear(ssl);           // Fix #6: Prevent infinite loop crash
+                                        is_tls_connected = false; // Fix #6
                                     }
                                     break;
                                 }
@@ -353,5 +374,9 @@ int main()
     }
 
     cleanup_input();
+
+    // Fix #5: Return bounce status gracefully
+    if (should_exit.load())
+        return 42;
     return 0;
 }
