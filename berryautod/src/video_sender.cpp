@@ -11,6 +11,7 @@ std::mutex config_mutex;
 std::vector<uint8_t> cached_config_nal;
 bool has_cached_config = false;
 
+// THE STATE MACHINE: Prevents "Decoding Error" spam on the Head Unit
 static bool is_recovering = false;
 
 void extract_and_cache_sps_pps(const std::vector<uint8_t>& frame)
@@ -128,17 +129,25 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
     // --- DRAIN & RECOVER STATE MACHINE ---
     if (is_recovering)
     {
-        // Wait for the TX queue to drain to 0 AND the car to catch up on ACKs
+        // Wait for the TX queue to hit 0 AND for the car to catch up on ACKs
         if (get_tx_queue_size() > 0 || video_unacked_count.load() >= max_video_unacked)
         {
-            return; // Silently drop frame, wait for pipeline to clear
+            return; // Silently drop frame, wait for pipeline to drain completely
         }
 
-        // Pipeline is clear! Request a fresh Keyframe to resume perfectly.
+        // Pipeline is completely clear! Request a fresh Keyframe to resume perfectly.
         if (video_streamer)
             video_streamer->force_keyframe();
         is_recovering = false;
         LOG_I("[RECOVERY] USB Pipeline is clear. Requesting Keyframe to resume stream.");
+        return;
+    }
+
+    // Pre-emptive USB Queue Check: Single FIFO Queue logic
+    if (get_tx_queue_size() >= 2)
+    {
+        LOG_E("[WARNING] USB Queue Congested! Entering Recovery Mode.");
+        is_recovering = true;
         return;
     }
 
@@ -158,7 +167,7 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
     {
         LOG_E("[WARNING] Video ACK timeout. Entering Recovery Mode.");
         is_recovering = true;
-        video_unacked_count = 0; // Reset artificially so recovery can complete
+        video_unacked_count = 0;
         return;
     }
 
