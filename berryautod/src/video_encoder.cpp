@@ -173,7 +173,6 @@ bool VideoEncoder::init_encoder()
         encoder_names = {"h264_v4l2m2m", "h264_omx", "libx264", "h264"};
     }
 
-    // Try encoders sequentially, actually opening them to ensure hardware support exists
     for (const auto& name : encoder_names)
     {
         codec = avcodec_find_encoder_by_name(name.c_str());
@@ -187,16 +186,22 @@ bool VideoEncoder::init_encoder()
 
         codec_ctx = avcodec_alloc_context3(codec);
         if (!codec_ctx)
-            continue; // Fix #2: Prevent NULL dereference on allocation failure
+            continue;
 
         codec_ctx->width = target_width;
         codec_ctx->height = target_height;
         codec_ctx->time_base = {1, 30};
         codec_ctx->framerate = {30, 1};
         codec_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
-        codec_ctx->gop_size = 30;
+
+        // STRICT BANDWIDTH CONTROL TO PREVENT USB CHOKING
+        codec_ctx->bit_rate = 2000000;      // 2 Mbps target
+        codec_ctx->rc_max_rate = 2500000;   // 2.5 Mbps absolute spike limit
+        codec_ctx->rc_buffer_size = 500000; // Small VBV buffer
+        codec_ctx->gop_size = 60;           // I-Frame every 2 seconds
         codec_ctx->max_b_frames = 0;
-        codec_ctx->bit_rate = 6000000;
+        codec_ctx->qmin = 10;
+        codec_ctx->qmax = 45; // Allow encoder to drop quality during motion!
 
         if (std::string(codec->name) == "libx264" || std::string(codec->name) == "libx265")
         {
@@ -207,7 +212,6 @@ bool VideoEncoder::init_encoder()
         }
         else if (std::string(codec->name) == "h264_v4l2m2m" || std::string(codec->name) == "hevc_v4l2m2m")
         {
-            // Restrict V4L2 DMA buffers to strictly prevent CMA "No space left on device" crashes at 1080p
             av_opt_set(codec_ctx->priv_data, "num_capture_buffers", "16", 0);
             av_opt_set(codec_ctx->priv_data, "num_output_buffers", "16", 0);
         }
@@ -216,7 +220,7 @@ bool VideoEncoder::init_encoder()
         if (avcodec_open2(codec_ctx, codec, NULL) >= 0)
         {
             std::cout << "[VideoEncoder] Successfully opened Encoder: " << codec->name << std::endl;
-            break; // Success! It was found AND the hardware accepted it.
+            break;
         }
         else
         {
@@ -229,8 +233,7 @@ bool VideoEncoder::init_encoder()
 
     if (!codec_ctx || !codec)
     {
-        std::cerr << "[VideoEncoder] FATAL: Could not open any working video encoders for the requested codec."
-                  << std::endl;
+        std::cerr << "[VideoEncoder] FATAL: Could not open any working video encoders." << std::endl;
         return false;
     }
 
@@ -246,10 +249,6 @@ bool VideoEncoder::init_encoder()
     scaled_h &= ~1;
     offset_x &= ~1;
     offset_y &= ~1;
-
-    std::cout << "[VideoEncoder] Stretching Capture (" << capture_w << "x" << capture_h
-              << ") to fill Usable Area: " << scaled_w << "x" << scaled_h << " (Offset X:" << offset_x
-              << " Y:" << offset_y << ")" << std::endl;
 
     frame = av_frame_alloc();
     frame->format = codec_ctx->pix_fmt;
@@ -322,12 +321,7 @@ void VideoEncoder::encode_frame(uint8_t* bgra_data, int stride)
 
     int ret = avcodec_send_frame(codec_ctx, frame);
     if (ret < 0)
-    {
-        char errbuf[128];
-        av_strerror(ret, errbuf, sizeof(errbuf));
-        std::cerr << "[VideoEncoder] avcodec_send_frame failed: " << errbuf << std::endl;
         return;
-    }
 
     while (ret >= 0)
     {
@@ -335,12 +329,7 @@ void VideoEncoder::encode_frame(uint8_t* bgra_data, int stride)
         if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
             break;
         if (ret < 0)
-        {
-            char errbuf[128];
-            av_strerror(ret, errbuf, sizeof(errbuf));
-            std::cerr << "[VideoEncoder] avcodec_receive_packet failed: " << errbuf << std::endl;
             break;
-        }
 
         auto now = std::chrono::system_clock::now().time_since_epoch();
         uint64_t ts = std::chrono::duration_cast<std::chrono::microseconds>(now).count();

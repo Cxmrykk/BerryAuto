@@ -12,10 +12,8 @@
 
 using namespace com::andrerinas::headunitrevived::aap::protocol::proto;
 
-// --- TRUE INTERLEAVING TX QUEUE ---
-
-std::queue<std::vector<uint8_t>> high_priority_queue;
-std::queue<std::vector<uint8_t>> low_priority_queue;
+std::queue<std::vector<std::vector<uint8_t>>> high_priority_queue;
+std::queue<std::vector<std::vector<uint8_t>>> low_priority_queue;
 std::mutex queue_mutex;
 std::condition_variable queue_cv;
 std::once_flag tx_thread_flag;
@@ -24,42 +22,44 @@ void tx_worker()
 {
     while (true)
     {
-        std::vector<uint8_t> chunk_to_send;
+        std::vector<std::vector<uint8_t>> batch;
         {
             std::unique_lock<std::mutex> lock(queue_mutex);
             queue_cv.wait(lock, [] { return !high_priority_queue.empty() || !low_priority_queue.empty(); });
 
-            // PRIORITY DEMUX: Grab exactly ONE chunk.
-            // If a Ping arrives during a massive 150KB video frame, it slips perfectly into the stream!
             if (!high_priority_queue.empty())
             {
-                chunk_to_send = high_priority_queue.front();
+                batch = high_priority_queue.front();
                 high_priority_queue.pop();
             }
             else
             {
-                chunk_to_send = low_priority_queue.front();
+                batch = low_priority_queue.front();
                 low_priority_queue.pop();
             }
         }
 
-        const uint8_t* ptr = chunk_to_send.data();
-        size_t remain = chunk_to_send.size();
-        while (remain > 0)
+        // Send entire batch holding the wire to prevent protocol interleaving errors
+        for (const auto& chunk : batch)
         {
-            int w = write(ep_in, ptr, remain);
-            if (w < 0)
+            const uint8_t* ptr = chunk.data();
+            size_t remain = chunk.size();
+            while (remain > 0)
             {
-                if (errno == EINTR || errno == EAGAIN)
+                int w = write(ep_in, ptr, remain);
+                if (w < 0)
                 {
-                    usleep(100);
-                    continue;
+                    if (errno == EINTR || errno == EAGAIN)
+                    {
+                        usleep(100);
+                        continue;
+                    }
+                    LOG_E("USB TX Write Failed! " << strerror(errno));
+                    break;
                 }
-                LOG_E("USB TX Write Failed! " << strerror(errno));
-                break;
+                ptr += w;
+                remain -= w;
             }
-            ptr += w;
-            remain -= w;
         }
     }
 }
@@ -72,13 +72,37 @@ void init_tx_thread()
 void flush_usb_tx_queue()
 {
     std::lock_guard<std::mutex> lock(queue_mutex);
-    std::queue<std::vector<uint8_t>> empty1;
-    std::queue<std::vector<uint8_t>> empty2;
+    std::queue<std::vector<std::vector<uint8_t>>> empty1;
+    std::queue<std::vector<std::vector<uint8_t>>> empty2;
     std::swap(high_priority_queue, empty1);
     std::swap(low_priority_queue, empty2);
 }
 
-// --- PROTOCOL HELPERS ---
+int get_media_tx_queue_size()
+{
+    std::lock_guard<std::mutex> lock(queue_mutex);
+    return low_priority_queue.size();
+}
+
+void enqueue_batch(uint8_t channel, std::vector<std::vector<uint8_t>>& batch)
+{
+    if (batch.empty())
+        return;
+
+    init_tx_thread();
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex);
+        if (channel == 2)
+        {
+            low_priority_queue.push(std::move(batch));
+        }
+        else
+        {
+            high_priority_queue.push(std::move(batch));
+        }
+    }
+    queue_cv.notify_one();
+}
 
 void build_chunk(std::vector<std::vector<uint8_t>>& batch, const std::vector<uint8_t>& pt, uint8_t target_channel,
                  uint8_t flags, uint32_t unfragmented_size)
@@ -108,17 +132,16 @@ void build_chunk(std::vector<std::vector<uint8_t>>& batch, const std::vector<uin
     batch.push_back(std::move(out));
 }
 
-bool enqueue_fragments(uint8_t channel, bool is_encrypted, const std::vector<uint8_t>& payload)
+void fragment_and_batch(uint8_t channel, bool is_encrypted, const std::vector<uint8_t>& payload,
+                        std::vector<std::vector<uint8_t>>& batch)
 {
     const size_t MAX_CHUNK = 15000;
     uint32_t total_size = payload.size();
-    std::vector<std::vector<uint8_t>> chunks;
 
-    // 1. Build all chunks for this message
     if (total_size <= MAX_CHUNK)
     {
         uint8_t flag = is_encrypted ? 0x0B : 0x03;
-        build_chunk(chunks, payload, channel, flag, 0);
+        build_chunk(batch, payload, channel, flag, 0);
     }
     else
     {
@@ -137,7 +160,7 @@ bool enqueue_fragments(uint8_t channel, bool is_encrypted, const std::vector<uin
             if (offset == 0)
             {
                 flag |= 0x01;
-                unfrag_size = total_size;
+                unfrag_size = total_size; // MUST BE CIPHERTEXT SIZE TO PREVENT BUFFER OVERFLOW (-251)
             }
             else if (offset + chunk_size >= total_size)
             {
@@ -148,40 +171,11 @@ bool enqueue_fragments(uint8_t channel, bool is_encrypted, const std::vector<uin
                 flag |= 0x00;
             }
 
-            build_chunk(chunks, chunk, channel, flag, unfrag_size);
+            build_chunk(batch, chunk, channel, flag, unfrag_size);
             offset += chunk_size;
         }
     }
-
-    // 2. Safely push all chunks to the queue
-    init_tx_thread();
-    {
-        std::lock_guard<std::mutex> lock(queue_mutex);
-
-        if (channel == 2)
-        {
-            // BACKPRESSURE: If there are >100 chunks waiting (~1.5 MB), drop this frame to recover latency.
-            if (low_priority_queue.size() > 100)
-                return false;
-
-            for (auto& c : chunks)
-            {
-                low_priority_queue.push(std::move(c));
-            }
-        }
-        else
-        {
-            for (auto& c : chunks)
-            {
-                high_priority_queue.push(std::move(c));
-            }
-        }
-    }
-    queue_cv.notify_all();
-    return true;
 }
-
-// --- PUBLIC API ---
 
 void send_unencrypted(uint8_t channel, uint8_t flags, uint16_t type, const std::vector<uint8_t>& payload)
 {
@@ -195,109 +189,85 @@ void send_unencrypted(uint8_t channel, uint8_t flags, uint16_t type, const std::
     out.push_back(type & 0xFF);
     out.insert(out.end(), payload.begin(), payload.end());
 
-    std::cout << "[DEBUG-TX] Unencrypted - Channel: " << (int)channel << " Type: " << type << " Size: " << out.size()
-              << std::endl;
-
-    init_tx_thread();
-    {
-        std::lock_guard<std::mutex> lock(queue_mutex);
-        high_priority_queue.push(std::move(out));
-    }
-    queue_cv.notify_one();
+    std::vector<std::vector<uint8_t>> batch = {out};
+    enqueue_batch(channel, batch);
 }
 
-bool send_media_payload(uint8_t channel, const std::vector<uint8_t>& pt)
+void send_media_payload(uint8_t channel, const std::vector<uint8_t>& pt)
 {
-    std::lock_guard<std::recursive_mutex> aap_lock(aap_mutex);
+    std::vector<std::vector<uint8_t>> batch;
 
-    if (ssl_bypassed)
     {
-        return enqueue_fragments(channel, false, pt);
-    }
-    else
-    {
-        SSL_write(ssl, pt.data(), pt.size());
-        int pending = BIO_ctrl_pending(wbio);
-        if (pending > 0)
+        // aap_mutex ensures pristine TLS Sequence order
+        std::lock_guard<std::recursive_mutex> aap_lock(aap_mutex);
+
+        if (ssl_bypassed)
         {
-            std::vector<uint8_t> ciphertext(pending);
-            BIO_read(wbio, ciphertext.data(), pending);
-            return enqueue_fragments(channel, true, ciphertext);
+            fragment_and_batch(channel, false, pt, batch);
+        }
+        else
+        {
+            SSL_write(ssl, pt.data(), pt.size());
+            int pending = BIO_ctrl_pending(wbio);
+            if (pending > 0)
+            {
+                std::vector<uint8_t> ciphertext(pending);
+                BIO_read(wbio, ciphertext.data(), pending);
+                fragment_and_batch(channel, true, ciphertext, batch);
+            }
         }
     }
-    return false;
+
+    enqueue_batch(channel, batch);
 }
 
 void ssl_write_and_flush_unlocked(const std::vector<uint8_t>& pt, uint8_t target_channel, uint8_t encrypted_flag,
                                   uint32_t unfragmented_size)
 {
-    std::lock_guard<std::recursive_mutex> aap_lock(aap_mutex);
+    std::vector<std::vector<uint8_t>> batch;
 
-    if (!pt.empty())
     {
-        SSL_write(ssl, pt.data(), pt.size());
-    }
+        std::lock_guard<std::recursive_mutex> aap_lock(aap_mutex);
 
-    int pending = BIO_ctrl_pending(wbio);
-    if (pending > 0)
-    {
-        std::vector<uint8_t> tls_record(pending);
-        BIO_read(wbio, tls_record.data(), pending);
-
-        if (!is_tls_connected)
+        if (!pt.empty())
         {
-            uint16_t len_field = tls_record.size() + 2;
-            std::vector<uint8_t> out;
-            out.push_back(0);
-            out.push_back(0x03);
-            out.push_back((len_field >> 8) & 0xFF);
-            out.push_back(len_field & 0xFF);
-            out.push_back((ControlMsgType::MESSAGE_ENCAPSULATED_SSL >> 8) & 0xFF);
-            out.push_back(ControlMsgType::MESSAGE_ENCAPSULATED_SSL & 0xFF);
-            out.insert(out.end(), tls_record.begin(), tls_record.end());
-
-            init_tx_thread();
-            {
-                std::lock_guard<std::mutex> lock(queue_mutex);
-                high_priority_queue.push(std::move(out));
-            }
-            queue_cv.notify_one();
+            SSL_write(ssl, pt.data(), pt.size());
         }
-        else
+
+        int pending = BIO_ctrl_pending(wbio);
+        if (pending > 0)
         {
-            std::vector<std::vector<uint8_t>> chunks;
-            build_chunk(chunks, tls_record, target_channel, encrypted_flag, unfragmented_size);
+            std::vector<uint8_t> tls_record(pending);
+            BIO_read(wbio, tls_record.data(), pending);
 
-            if (!(target_channel == 2 && ((encrypted_flag & 0x03) != 0x03 || encrypted_flag == 0x0B)))
+            if (!is_tls_connected)
             {
-                std::cout << "[DEBUG-TX] Encrypted - Channel: " << (int)target_channel << " Flags: 0x" << std::hex
-                          << (int)encrypted_flag << std::dec << " Size: " << tls_record.size() << std::endl;
-            }
+                uint16_t len_field = tls_record.size() + 2;
+                std::vector<uint8_t> out;
+                out.push_back(0);
+                out.push_back(0x03);
+                out.push_back((len_field >> 8) & 0xFF);
+                out.push_back(len_field & 0xFF);
+                out.push_back((ControlMsgType::MESSAGE_ENCAPSULATED_SSL >> 8) & 0xFF);
+                out.push_back(ControlMsgType::MESSAGE_ENCAPSULATED_SSL & 0xFF);
+                out.insert(out.end(), tls_record.begin(), tls_record.end());
 
-            init_tx_thread();
-            {
-                std::lock_guard<std::mutex> lock(queue_mutex);
-                if (target_channel == 2)
-                {
-                    low_priority_queue.push(std::move(chunks[0]));
-                }
-                else
-                {
-                    high_priority_queue.push(std::move(chunks[0]));
-                }
+                batch.push_back(std::move(out));
             }
-            queue_cv.notify_one();
+            else
+            {
+                build_chunk(batch, tls_record, target_channel, encrypted_flag, unfragmented_size);
+            }
         }
     }
+
+    enqueue_batch(target_channel, batch);
 }
 
 void send_message(uint8_t channel, uint16_t type, const google::protobuf::Message& proto_msg)
 {
     std::vector<uint8_t> serialized(proto_msg.ByteSizeLong());
     proto_msg.SerializeToArray(serialized.data(), serialized.size());
-
-    std::cout << "[DEBUG] SEND Channel: " << (int)channel << " Type: " << type << " Size: " << serialized.size()
-              << std::endl;
 
     bool is_control = (type >= 1 && type <= 26);
 
