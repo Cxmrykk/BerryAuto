@@ -1,6 +1,5 @@
 #!/bin/bash
 modprobe libcomposite
-modprobe uinput
 
 GADGET_DIR="/sys/kernel/config/usb_gadget/opengal"
 

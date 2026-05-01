@@ -8,7 +8,7 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(OPENSSL REQUIRED openssl)
 pkg_check_modules(PROTOBUF REQUIRED protobuf)
 pkg_check_modules(FFMPEG REQUIRED libavcodec libavutil libswscale)
-pkg_check_modules(X11 REQUIRED x11 xext xrandr)
+pkg_check_modules(X11 REQUIRED x11 xext xrandr xtst)
 
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS 
     "${CMAKE_SOURCE_DIR}/certs/android_auto.crt" 
