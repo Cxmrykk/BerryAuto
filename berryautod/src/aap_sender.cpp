@@ -27,126 +27,128 @@ void write_to_usb(const std::vector<uint8_t>& data)
     }
 }
 
-void send_unencrypted(uint8_t channel, uint8_t flags, uint16_t type, const std::vector<uint8_t>& payload)
+void write_fragmented_packet(const std::vector<uint8_t>& payload, uint8_t target_channel, bool is_encrypted,
+                             bool is_control)
 {
-    uint16_t len_field = payload.size() + 2;
-    std::vector<uint8_t> out;
-    out.push_back(channel);
-    out.push_back(flags);
-    out.push_back((len_field >> 8) & 0xFF);
-    out.push_back(len_field & 0xFF);
-    out.push_back((type >> 8) & 0xFF);
-    out.push_back(type & 0xFF);
-    out.insert(out.end(), payload.begin(), payload.end());
+    uint8_t base_flag = 0;
+    if (is_encrypted)
+        base_flag |= 0x08;
+    if (is_control && target_channel != 0)
+        base_flag |= 0x04;
 
-    std::cout << "[DEBUG-TX] Unencrypted - Channel: " << (int)channel << " Type: " << type << " Size: " << out.size()
-              << std::endl;
-    write_to_usb(out);
+    const size_t MAX_CHUNK_SIZE = 16000;
+
+    if (payload.size() <= MAX_CHUNK_SIZE)
+    {
+        uint8_t flag = base_flag | 0x03; // Unfragmented
+        uint16_t len_field = payload.size();
+        std::vector<uint8_t> out;
+        out.push_back(target_channel);
+        out.push_back(flag);
+        out.push_back((len_field >> 8) & 0xFF);
+        out.push_back(len_field & 0xFF);
+        out.insert(out.end(), payload.begin(), payload.end());
+        write_to_usb(out);
+    }
+    else
+    {
+        std::vector<uint8_t> out_payload;
+        uint32_t total_size = payload.size();
+        size_t offset = 0;
+
+        while (offset < total_size)
+        {
+            size_t remain = total_size - offset;
+            size_t chunk_size = std::min(remain, MAX_CHUNK_SIZE);
+            bool is_first = (offset == 0);
+            bool is_last = (offset + chunk_size >= total_size);
+
+            uint8_t flag = base_flag;
+            if (is_first)
+                flag |= 0x01;
+            else if (is_last)
+                flag |= 0x02;
+            else
+                flag |= 0x00;
+
+            uint16_t len_field = chunk_size;
+            if (is_first)
+                len_field += 4;
+
+            std::vector<uint8_t> chunk;
+            chunk.push_back(target_channel);
+            chunk.push_back(flag);
+            chunk.push_back((len_field >> 8) & 0xFF);
+            chunk.push_back(len_field & 0xFF);
+
+            if (is_first)
+            {
+                chunk.push_back((total_size >> 24) & 0xFF);
+                chunk.push_back((total_size >> 16) & 0xFF);
+                chunk.push_back((total_size >> 8) & 0xFF);
+                chunk.push_back(total_size & 0xFF);
+            }
+
+            chunk.insert(chunk.end(), payload.begin() + offset, payload.begin() + offset + chunk_size);
+            out_payload.insert(out_payload.end(), chunk.begin(), chunk.end());
+
+            offset += chunk_size;
+        }
+
+        // Write all fragments at once atomically to prevent interleaving
+        write_to_usb(out_payload);
+    }
 }
 
-void aap_send_raw(const std::vector<uint8_t>& pt, uint8_t target_channel, uint8_t flags, uint32_t unfragmented_size)
+void ssl_write_and_flush_handshake()
 {
-    std::vector<uint8_t> out;
-    uint16_t len_field = pt.size();
-
-    // CRITICAL FIX: Add 4 bytes for the unfragmented size header
-    if ((flags & 0x03) == 0x01)
-    {
-        len_field += 4;
-    }
-
-    out.push_back(target_channel);
-    out.push_back(flags);
-    out.push_back((len_field >> 8) & 0xFF);
-    out.push_back(len_field & 0xFF);
-
-    if ((flags & 0x03) == 0x01)
-    {
-        out.push_back((unfragmented_size >> 24) & 0xFF);
-        out.push_back((unfragmented_size >> 16) & 0xFF);
-        out.push_back((unfragmented_size >> 8) & 0xFF);
-        out.push_back(unfragmented_size & 0xFF);
-    }
-
-    out.insert(out.end(), pt.begin(), pt.end());
-    write_to_usb(out);
-}
-
-void ssl_write_and_flush_unlocked(const std::vector<uint8_t>& pt, uint8_t target_channel, uint8_t encrypted_flag,
-                                  uint32_t unfragmented_size)
-{
-    std::vector<std::vector<uint8_t>> out_packets;
+    std::vector<uint8_t> ciphertext;
     {
         std::lock_guard<std::recursive_mutex> lock(aap_mutex);
+        int pending = BIO_ctrl_pending(wbio);
+        while (pending > 0)
+        {
+            std::vector<uint8_t> temp(pending);
+            BIO_read(wbio, temp.data(), pending);
+            ciphertext.insert(ciphertext.end(), temp.begin(), temp.end());
+            pending = BIO_ctrl_pending(wbio);
+        }
+    }
 
+    if (!ciphertext.empty())
+    {
+        std::vector<uint8_t> pt;
+        pt.push_back((ControlMsgType::MESSAGE_ENCAPSULATED_SSL >> 8) & 0xFF);
+        pt.push_back(ControlMsgType::MESSAGE_ENCAPSULATED_SSL & 0xFF);
+        pt.insert(pt.end(), ciphertext.begin(), ciphertext.end());
+        write_fragmented_packet(pt, 0, false, false);
+    }
+}
+
+void send_encrypted_message(uint8_t channel, bool is_control, const std::vector<uint8_t>& pt)
+{
+    std::vector<uint8_t> ciphertext;
+    {
+        std::lock_guard<std::recursive_mutex> lock(aap_mutex);
         if (!pt.empty())
         {
             SSL_write(ssl, pt.data(), pt.size());
         }
-
         int pending = BIO_ctrl_pending(wbio);
-        if (pending > 0)
+        while (pending > 0)
         {
-            std::vector<uint8_t> tls_record(pending);
-            BIO_read(wbio, tls_record.data(), pending);
-
-            if (!is_tls_connected)
-            {
-                uint16_t len_field = tls_record.size() + 2;
-                std::vector<uint8_t> out;
-                out.push_back(0);
-                out.push_back(0x03);
-                out.push_back((len_field >> 8) & 0xFF);
-                out.push_back(len_field & 0xFF);
-                out.push_back((ControlMsgType::MESSAGE_ENCAPSULATED_SSL >> 8) & 0xFF);
-                out.push_back(ControlMsgType::MESSAGE_ENCAPSULATED_SSL & 0xFF);
-                out.insert(out.end(), tls_record.begin(), tls_record.end());
-                out_packets.push_back(out);
-            }
-            else
-            {
-                uint16_t len_field = tls_record.size();
-                std::vector<uint8_t> out;
-
-                // CRITICAL FIX: Add 4 bytes for the unfragmented size header
-                if ((encrypted_flag & 0x03) == 0x01)
-                {
-                    len_field += 4;
-                }
-
-                out.push_back(target_channel);
-                out.push_back(encrypted_flag);
-                out.push_back((len_field >> 8) & 0xFF);
-                out.push_back(len_field & 0xFF);
-
-                if ((encrypted_flag & 0x03) == 0x01)
-                {
-                    out.push_back((unfragmented_size >> 24) & 0xFF);
-                    out.push_back((unfragmented_size >> 16) & 0xFF);
-                    out.push_back((unfragmented_size >> 8) & 0xFF);
-                    out.push_back(unfragmented_size & 0xFF);
-                }
-
-                out.insert(out.end(), tls_record.begin(), tls_record.end());
-                out_packets.push_back(out);
-            }
+            std::vector<uint8_t> temp(pending);
+            BIO_read(wbio, temp.data(), pending);
+            ciphertext.insert(ciphertext.end(), temp.begin(), temp.end());
+            pending = BIO_ctrl_pending(wbio);
         }
     }
-
-    for (const auto& pkt : out_packets)
+    if (!ciphertext.empty())
     {
-        uint8_t target_channel = pkt[0];
-        uint8_t flag = pkt[1];
-        if (!(target_channel == 2 && ((flag & 0x03) != 0x03 || flag == 0x0B)))
-        {
-            std::cout << "[DEBUG-TX] Encrypted - Channel: " << (int)target_channel << " Flags: 0x" << std::hex
-                      << (int)flag << std::dec << " Size: " << pkt.size() << std::endl;
-        }
-        write_to_usb(pkt);
+        write_fragmented_packet(ciphertext, channel, true, is_control);
     }
 }
 
-// Master wrapper to automatically handle Car TLS Bypasses
 void send_message(uint8_t channel, uint16_t type, const google::protobuf::Message& proto_msg)
 {
     std::vector<uint8_t> serialized(proto_msg.ByteSizeLong());
@@ -157,25 +159,45 @@ void send_message(uint8_t channel, uint16_t type, const google::protobuf::Messag
 
     bool is_control = (type >= 1 && type <= 26);
 
+    std::vector<uint8_t> pt;
+    pt.push_back((type >> 8) & 0xFF);
+    pt.push_back(type & 0xFF);
+    pt.insert(pt.end(), serialized.begin(), serialized.end());
+
     if (ssl_bypassed)
     {
-        uint8_t flags = 0x03; // Base Unencrypted
-        if (channel != 0 && is_control)
-            flags = 0x07;
-
-        send_unencrypted(channel, flags, type, serialized);
+        write_fragmented_packet(pt, channel, false, is_control);
     }
     else
     {
-        uint8_t flags = 0x0B; // Base Encrypted
-        if (channel != 0 && is_control)
-            flags = 0x0F;
-
-        std::vector<uint8_t> plaintext;
-        plaintext.push_back((type >> 8) & 0xFF);
-        plaintext.push_back(type & 0xFF);
-        plaintext.insert(plaintext.end(), serialized.begin(), serialized.end());
-
-        ssl_write_and_flush_unlocked(plaintext, channel, flags, 0);
+        send_encrypted_message(channel, is_control, pt);
     }
+}
+
+void send_media_message(uint8_t channel, const std::vector<uint8_t>& payload)
+{
+    if (ssl_bypassed)
+    {
+        write_fragmented_packet(payload, channel, false, false);
+    }
+    else
+    {
+        send_encrypted_message(channel, false, payload);
+    }
+}
+
+void send_version_response(uint16_t major, uint16_t minor)
+{
+    std::vector<uint8_t> pt;
+    uint16_t type = ControlMsgType::MESSAGE_VERSION_RESPONSE;
+    pt.push_back((type >> 8) & 0xFF);
+    pt.push_back(type & 0xFF);
+    pt.push_back((major >> 8) & 0xFF);
+    pt.push_back(major & 0xFF);
+    pt.push_back((minor >> 8) & 0xFF);
+    pt.push_back(minor & 0xFF);
+    pt.push_back(0x00);
+    pt.push_back(0x00);
+
+    write_fragmented_packet(pt, 0, false, false);
 }
