@@ -138,6 +138,7 @@ bool VideoEncoder::init_encoder()
 
         codec_ctx->width = target_width;
         codec_ctx->height = target_height;
+        codec_ctx->pix_fmt = AV_PIX_FMT_YUV420P; // FIX: Restored missing pixel format
 
         // 1. Optimize for 60 FPS Capture
         codec_ctx->time_base = {1, 60};
