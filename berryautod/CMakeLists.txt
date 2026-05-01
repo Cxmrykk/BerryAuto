@@ -26,7 +26,7 @@ file(WRITE "${GENERATED_DIR}/certs_data.hpp"
 "constexpr const char* AAP_KEY_GENERATED = R\"KEY_DELIM(${AAP_KEY_CONTENT})KEY_DELIM\";\n"
 )
 
-set(PROTO_SRC_DIR ${CMAKE_SOURCE_DIR}/../proto)
+set(PROTO_SRC_DIR ${CMAKE_SOURCE_DIR}/proto)
 set(PROTO_BUILD_DIR ${CMAKE_BINARY_DIR}/proto_gen)
 file(MAKE_DIRECTORY ${PROTO_BUILD_DIR})
 
