@@ -165,14 +165,15 @@ bool VideoEncoder::init_encoder()
     if (global_video_codec_type == 7) // MEDIA_CODEC_VIDEO_H265
     {
         std::cout << "[VideoEncoder] Head Unit negotiated HEVC (H.265)." << std::endl;
-        encoder_names = {"libx265", "hevc_v4l2m2m", "hevc"};
+        encoder_names = {"hevc_v4l2m2m", "libx265", "hevc"};
     }
     else // Default H.264
     {
         std::cout << "[VideoEncoder] Head Unit negotiated H.264." << std::endl;
-        encoder_names = {"libx264", "h264_v4l2m2m", "h264_omx", "h264"};
+        encoder_names = {"h264_v4l2m2m", "h264_omx", "libx264", "h264"};
     }
 
+    // Try encoders sequentially, actually opening them to ensure hardware support exists
     for (const auto& name : encoder_names)
     {
         codec = avcodec_find_encoder_by_name(name.c_str());
@@ -203,15 +204,16 @@ bool VideoEncoder::init_encoder()
         }
         else if (std::string(codec->name) == "h264_v4l2m2m" || std::string(codec->name) == "hevc_v4l2m2m")
         {
-            av_opt_set(codec_ctx->priv_data, "num_capture_buffers", "4", 0);
-            av_opt_set(codec_ctx->priv_data, "num_output_buffers", "4", 0);
+            // Restrict V4L2 DMA buffers to strictly prevent CMA "No space left on device" crashes at 1080p
+            av_opt_set(codec_ctx->priv_data, "num_capture_buffers", "16", 0);
+            av_opt_set(codec_ctx->priv_data, "num_output_buffers", "16", 0);
         }
 
         std::cout << "[VideoEncoder] Attempting to open Encoder: " << codec->name << "..." << std::endl;
         if (avcodec_open2(codec_ctx, codec, NULL) >= 0)
         {
             std::cout << "[VideoEncoder] Successfully opened Encoder: " << codec->name << std::endl;
-            break;
+            break; // Success! It was found AND the hardware accepted it.
         }
         else
         {

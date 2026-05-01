@@ -13,19 +13,72 @@ bool has_cached_config = false;
 
 void send_video_frame_internal(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
 {
-    std::vector<uint8_t> pt;
-    pt.push_back(0x00); // MEDIA_MESSAGE_DATA (msg_type_hi)
-    pt.push_back(0x00); // MEDIA_MESSAGE_DATA (msg_type_lo)
+    const size_t MAX_CHUNK_SIZE = 16000;
+
+    std::vector<uint8_t> header;
+    header.push_back(0x00); // MEDIA_MESSAGE_DATA (msg_type_hi)
+    header.push_back(0x00); // MEDIA_MESSAGE_DATA (msg_type_lo)
     for (int i = 7; i >= 0; --i)
     {
-        pt.push_back((timestamp >> (i * 8)) & 0xFF);
+        header.push_back((timestamp >> (i * 8)) & 0xFF);
     }
 
-    pt.insert(pt.end(), nal_data.begin(), nal_data.end());
+    uint32_t total_size = header.size() + nal_data.size();
 
-    // This calls our new sender. It encrypts the whole buffer first, extracting the ciphertext,
-    // and correctly fragments it with the ciphertext size in the header!
-    send_media_message(video_channel_id, pt);
+    if (total_size <= MAX_CHUNK_SIZE)
+    {
+        std::vector<uint8_t> pt = header;
+        pt.insert(pt.end(), nal_data.begin(), nal_data.end());
+
+        if (ssl_bypassed)
+        {
+            aap_send_raw(pt, video_channel_id, 0x03, 0);
+        }
+        else
+        {
+            ssl_write_and_flush_unlocked(pt, video_channel_id, 0x0B, 0);
+        }
+    }
+    else
+    {
+        // Fragment the plaintext before encryption
+        size_t data_in_first = MAX_CHUNK_SIZE - header.size();
+        std::vector<uint8_t> pt = header;
+        pt.insert(pt.end(), nal_data.begin(), nal_data.begin() + data_in_first);
+
+        if (ssl_bypassed)
+        {
+            aap_send_raw(pt, video_channel_id, 0x01, total_size);
+        }
+        else
+        {
+            // 0x09 = First Fragment (0x01) + Encrypted (0x08)
+            ssl_write_and_flush_unlocked(pt, video_channel_id, 0x09, total_size);
+        }
+
+        size_t offset = data_in_first;
+        while (offset < nal_data.size())
+        {
+            size_t remain = nal_data.size() - offset;
+            size_t chunk_size = std::min(remain, MAX_CHUNK_SIZE);
+            std::vector<uint8_t> pt_chunk(nal_data.begin() + offset, nal_data.begin() + offset + chunk_size);
+
+            bool is_last = (offset + chunk_size >= nal_data.size());
+
+            if (ssl_bypassed)
+            {
+                uint8_t flag = is_last ? 0x02 : 0x00;
+                aap_send_raw(pt_chunk, video_channel_id, flag, 0);
+            }
+            else
+            {
+                // 0x0A = Last Fragment (0x02) + Encrypted, 0x08 = Middle Fragment (0x00) + Encrypted
+                uint8_t flag = is_last ? 0x0A : 0x08;
+                ssl_write_and_flush_unlocked(pt_chunk, video_channel_id, flag, 0);
+            }
+            offset += chunk_size;
+        }
+    }
 
     video_unacked_count++;
 }
@@ -120,7 +173,14 @@ void inject_cached_video_config()
     pt.insert(pt.end(), config_copy.begin(), config_copy.end());
 
     LOG_I(">>> Sending CODEC_CONFIG to Head Unit (" << config_copy.size() << " bytes)... <<<");
-    send_media_message(video_channel_id, pt);
+    if (ssl_bypassed)
+    {
+        aap_send_raw(pt, video_channel_id, 0x03, 0);
+    }
+    else
+    {
+        ssl_write_and_flush_unlocked(pt, video_channel_id, 0x0B, 0);
+    }
 }
 
 void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
