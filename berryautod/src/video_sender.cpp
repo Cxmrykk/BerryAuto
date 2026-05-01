@@ -11,41 +11,8 @@ std::mutex config_mutex;
 std::vector<uint8_t> cached_config_nal;
 bool has_cached_config = false;
 
-void send_video_frame_internal(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
-{
-    // SLICING MAGIC: We limit every payload to 14,000 bytes.
-    // This entirely circumvents AAP Message Fragmentation, ensuring every chunk
-    // fits into a single TLS Record and cannot cause -251 Buffer Overflows!
-    const size_t MAX_SLICE_SIZE = 14000;
-    size_t offset = 0;
-
-    while (offset < nal_data.size())
-    {
-        size_t remain = nal_data.size() - offset;
-        size_t chunk_size = std::min(remain, MAX_SLICE_SIZE);
-
-        std::vector<uint8_t> pt;
-        pt.push_back(0x00); // MEDIA_MESSAGE_DATA (msg_type_hi)
-        pt.push_back(0x00); // MEDIA_MESSAGE_DATA (msg_type_lo)
-
-        // Android Auto decoders reconstruct NAL units by grouping payloads with identical timestamps!
-        for (int i = 7; i >= 0; --i)
-        {
-            pt.push_back((timestamp >> (i * 8)) & 0xFF);
-        }
-
-        pt.insert(pt.end(), nal_data.begin() + offset, nal_data.begin() + offset + chunk_size);
-
-        send_media_payload(video_channel_id, pt);
-        offset += chunk_size;
-
-        // VITAL YIELD: This brief microsecond pause allows the USB RX thread
-        // to grab the queue mutex and slip a Ping Response into the stream!
-        std::this_thread::yield();
-    }
-
-    video_unacked_count++;
-}
+// THE STATE MACHINE: Prevents "Decoding Error" spam on the Head Unit
+static bool is_recovering = false;
 
 void extract_and_cache_sps_pps(const std::vector<uint8_t>& frame)
 {
@@ -125,13 +92,8 @@ void inject_cached_video_config()
 void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
 {
     if (!(is_tls_connected || ssl_bypassed) || !video_channel_ready || !is_video_streaming.load())
-        return;
-
-    // PRE-EMPTIVE DROP: If the USB pipeline is backed up by > 10 chunks (~150KB),
-    // drop this video frame natively to prevent the pipeline from choking!
-    if (get_tx_queue_size() > 10)
     {
-        LOG_E("[WARNING] USB TX Queue backed up. Dropping frame to preserve latency.");
+        is_recovering = false; // Reset state on disconnect
         return;
     }
 
@@ -142,6 +104,33 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
             inject_cached_video_config();
     }
 
+    // --- DRAIN & RECOVER STATE MACHINE ---
+    if (is_recovering)
+    {
+        // Wait for the TX queue to hit 0 AND for the car to catch up on ACKs
+        if (get_media_tx_queue_size() > 0 || video_unacked_count.load() >= max_video_unacked)
+        {
+            return; // Silently drop frame, wait for pipeline to drain
+        }
+
+        // Pipeline is completely clear!
+        // We drop this current frame (because it's an un-decodable P-frame) and request an I-frame.
+        if (video_streamer)
+            video_streamer->force_keyframe();
+        is_recovering = false;
+        LOG_I("[RECOVERY] USB Pipeline is clear. Requesting Keyframe to resume stream.");
+        return;
+    }
+
+    // Pre-emptive USB Queue Check
+    if (get_media_tx_queue_size() >= 5)
+    {
+        LOG_E("[WARNING] USB Queue Congested! Entering Recovery Mode.");
+        is_recovering = true;
+        return;
+    }
+
+    // Car ACK Check
     int wait_cycles = 0;
     while (is_video_streaming.load() && video_unacked_count.load() >= max_video_unacked && wait_cycles < 250)
     {
@@ -155,11 +144,31 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
 
     if (wait_cycles >= 250)
     {
-        LOG_E("[WARNING] Video ACK timeout (500ms). Dropping frame.");
+        LOG_E("[WARNING] Video ACK timeout. Entering Recovery Mode.");
+        is_recovering = true;
+        video_unacked_count = 0; // Artificially lower count to allow recovery condition to pass later
         return;
     }
 
-    send_video_frame_internal(nal_data, timestamp);
+    // We survived all checks! Build and send the packet.
+    std::vector<uint8_t> pt;
+    pt.push_back(0x00);
+    pt.push_back(0x00);
+    for (int i = 7; i >= 0; --i)
+    {
+        pt.push_back((timestamp >> (i * 8)) & 0xFF);
+    }
+    pt.insert(pt.end(), nal_data.begin(), nal_data.end());
+
+    if (send_media_payload(video_channel_id, pt))
+    {
+        video_unacked_count++;
+    }
+    else
+    {
+        LOG_E("[WARNING] Frame rejected by TX Queue. Entering Recovery Mode.");
+        is_recovering = true;
+    }
 }
 
 void on_video_nal_ready(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
