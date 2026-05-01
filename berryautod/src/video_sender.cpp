@@ -143,17 +143,17 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
         return;
     }
 
-    // Pre-emptive USB Queue Check: Single FIFO Queue logic
-    if (get_tx_queue_size() >= 2)
+    // FIX: Relaxed overly aggressive Pre-emptive USB Queue Check from 2 to 20
+    if (get_tx_queue_size() >= 20)
     {
         LOG_E("[WARNING] USB Queue Congested! Entering Recovery Mode.");
         is_recovering = true;
         return;
     }
 
-    // Car ACK Check (Wait max 500ms for Head Unit to ACK before entering recovery)
+    // Car ACK Check (FIX: Restored max wait time to 1000ms / 500 cycles before failing)
     int wait_cycles = 0;
-    while (is_video_streaming.load() && video_unacked_count.load() >= max_video_unacked && wait_cycles < 250)
+    while (is_video_streaming.load() && video_unacked_count.load() >= max_video_unacked && wait_cycles < 500)
     {
         std::this_thread::yield();
         usleep(2000);
@@ -163,7 +163,7 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
     if (!is_video_streaming.load())
         return;
 
-    if (wait_cycles >= 250)
+    if (wait_cycles >= 500)
     {
         LOG_E("[WARNING] Video ACK timeout. Entering Recovery Mode.");
         is_recovering = true;
