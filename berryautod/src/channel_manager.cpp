@@ -23,7 +23,7 @@ void handle_channel_open_response()
 
         ChannelType ctype = channel_types[opened_channel];
 
-        if (ctype == ChannelType::VIDEO || ctype == ChannelType::AUDIO || ctype == ChannelType::MIC)
+        if (ctype == ChannelType::VIDEO || ctype == ChannelType::AUDIO)
         {
             if (ctype == ChannelType::VIDEO)
             {
@@ -33,6 +33,10 @@ void handle_channel_open_response()
             MediaSetupRequest setup;
             setup.set_type((MediaCodecType)channel_codecs[opened_channel]);
             send_message(opened_channel, MediaMsgType::MEDIA_MESSAGE_SETUP, setup);
+        }
+        else if (ctype == ChannelType::MIC)
+        {
+            std::cout << ">>> MIC Channel opened. Waiting for usage... <<<" << std::endl;
         }
         else if (ctype == ChannelType::INPUT)
         {
@@ -47,10 +51,12 @@ void handle_channel_open_response()
 
             SensorRequest req_driving;
             req_driving.set_type(SensorType::DRIVING_STATUS);
+            req_driving.set_min_update_period(1000);
             send_message(opened_channel, SensorsMsgType::SENSOR_STARTREQUEST, req_driving);
 
             SensorRequest req_night;
             req_night.set_type(SensorType::NIGHT);
+            req_night.set_min_update_period(1000);
             send_message(opened_channel, SensorsMsgType::SENSOR_STARTREQUEST, req_night);
         }
         else
