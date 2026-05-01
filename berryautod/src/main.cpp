@@ -8,6 +8,7 @@
 #include <mutex>
 #include <openssl/err.h>
 #include <openssl/ssl.h>
+#include <poll.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -263,6 +264,25 @@ int main()
     {
         if (should_exit.load())
             break;
+
+        struct pollfd pfd;
+        pfd.fd = ep_out;
+        pfd.events = POLLIN;
+        pfd.revents = 0;
+
+        int s = poll(&pfd, 1, 100); // 100ms timeout
+        if (s < 0)
+        {
+            if (errno == EINTR || errno == EAGAIN)
+                continue;
+            LOG_E("[BULK-RX] Poll error: " << strerror(errno));
+            usleep(100000);
+            continue;
+        }
+        if (s == 0)
+        {
+            continue; // Time-out elapsed, loop around and verify the should_exit flag
+        }
 
         int r = read(ep_out, tmp_buf, sizeof(tmp_buf));
 
