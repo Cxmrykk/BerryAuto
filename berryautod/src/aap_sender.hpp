@@ -4,11 +4,7 @@
 #include <vector>
 
 void flush_usb_tx_queue();
-bool is_tx_busy(); // New: Checks if the USB hardware is actively transmitting
-
-void send_unencrypted(uint8_t channel, uint8_t flags, uint16_t type, const std::vector<uint8_t>& payload);
-void ssl_write_and_flush_unlocked(const std::vector<uint8_t>& pt, uint8_t target_channel = 0,
-                                  uint8_t encrypted_flag = 0x0B, uint32_t unfragmented_size = 0);
-
 void send_message(uint8_t channel, uint16_t type, const google::protobuf::Message& proto_msg);
-void send_media_payload(uint8_t channel, const std::vector<uint8_t>& pt);
+
+// Media handler returns false if the queue is overloaded, allowing pre-emptive frame drops
+bool send_media_payload(uint8_t channel, const std::vector<uint8_t>& pt);

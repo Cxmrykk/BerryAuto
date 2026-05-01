@@ -23,8 +23,17 @@ void send_video_frame_internal(const std::vector<uint8_t>& nal_data, uint64_t ti
 
     pt.insert(pt.end(), nal_data.begin(), nal_data.end());
 
-    send_media_payload(video_channel_id, pt);
-    video_unacked_count++;
+    // If the queue was overloaded, it returns false to protect latency.
+    if (send_media_payload(video_channel_id, pt))
+    {
+        video_unacked_count++;
+    }
+    else
+    {
+        // Tell the encoder to recover from the dropped frame instantly.
+        if (video_streamer)
+            video_streamer->force_keyframe();
+    }
 }
 
 void extract_and_cache_sps_pps(const std::vector<uint8_t>& frame)
@@ -127,16 +136,6 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
         return;
     }
 
-    // STRICT LATENCY CONTROL:
-    // If the USB hardware is actively sending ANY data (like a previous video frame),
-    // we DROP this frame entirely. This guarantees the pipe is free when the Head Unit Pings!
-    if (is_tx_busy())
-    {
-        if (video_streamer)
-            video_streamer->force_keyframe(); // Recover immediately on the next pass
-        return;
-    }
-
     bool just_extracted = false;
     if (!has_cached_config)
     {
@@ -165,7 +164,7 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
 
     if (wait_cycles >= 500)
     {
-        LOG_E("[WARNING] Video ACK timeout (1000ms). Dropping frame.");
+        LOG_E("[WARNING] Video ACK timeout (1000ms). Dropping frame to relieve pipeline.");
         if (video_streamer)
             video_streamer->force_keyframe();
         return;
