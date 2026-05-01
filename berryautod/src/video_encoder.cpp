@@ -170,11 +170,9 @@ bool VideoEncoder::init_encoder()
     else // Default H.264
     {
         std::cout << "[VideoEncoder] Head Unit negotiated H.264." << std::endl;
-        // FIX 1: Prioritize software encoding (libx264) to bypass Raspberry Pi V4L2 CMA memory crashes
         encoder_names = {"libx264", "h264_v4l2m2m", "h264_omx", "h264"};
     }
 
-    // Try encoders sequentially, actually opening them to ensure hardware support exists
     for (const auto& name : encoder_names)
     {
         codec = avcodec_find_encoder_by_name(name.c_str());
@@ -194,7 +192,7 @@ bool VideoEncoder::init_encoder()
         codec_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
         codec_ctx->gop_size = 30;
         codec_ctx->max_b_frames = 0;
-        codec_ctx->bit_rate = 4000000;
+        codec_ctx->bit_rate = 6000000;
 
         if (std::string(codec->name) == "libx264" || std::string(codec->name) == "libx265")
         {
@@ -205,7 +203,6 @@ bool VideoEncoder::init_encoder()
         }
         else if (std::string(codec->name) == "h264_v4l2m2m" || std::string(codec->name) == "hevc_v4l2m2m")
         {
-            // FIX 2: Restrict V4L2 DMA buffers to 4 (down from 16) to strictly prevent CMA "No space left on device"
             av_opt_set(codec_ctx->priv_data, "num_capture_buffers", "4", 0);
             av_opt_set(codec_ctx->priv_data, "num_output_buffers", "4", 0);
         }
@@ -214,7 +211,7 @@ bool VideoEncoder::init_encoder()
         if (avcodec_open2(codec_ctx, codec, NULL) >= 0)
         {
             std::cout << "[VideoEncoder] Successfully opened Encoder: " << codec->name << std::endl;
-            break; // Success! It was found AND the hardware accepted it.
+            break;
         }
         else
         {
@@ -289,6 +286,14 @@ void VideoEncoder::cleanup_encoder()
 
 void VideoEncoder::encode_frame(uint8_t* bgra_data, int stride)
 {
+    for (int y = 0; y < codec_ctx->height; ++y)
+        memset(frame->data[0] + y * frame->linesize[0], 0, codec_ctx->width);
+    for (int y = 0; y < codec_ctx->height / 2; ++y)
+    {
+        memset(frame->data[1] + y * frame->linesize[1], 128, codec_ctx->width / 2);
+        memset(frame->data[2] + y * frame->linesize[2], 128, codec_ctx->width / 2);
+    }
+
     const uint8_t* in_data[1] = {bgra_data};
     int in_linesize[1] = {stride};
 
