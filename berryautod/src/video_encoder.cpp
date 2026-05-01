@@ -69,61 +69,19 @@ bool VideoEncoder::init_x11()
 {
     const char* disp_env = getenv("DISPLAY");
     if (!disp_env)
-    {
         setenv("DISPLAY", ":0", 1);
-    }
 
     dpy = XOpenDisplay(NULL);
     if (!dpy)
-    {
-        std::cerr << "[VideoEncoder] FATAL: Failed to open X11 Display." << std::endl;
         return false;
-    }
+
     root_window = DefaultRootWindow(dpy);
-
-    int rr_event_base, rr_error_base;
-    if (XRRQueryExtension(dpy, &rr_event_base, &rr_error_base))
-    {
-        XRRScreenResources* res = XRRGetScreenResources(dpy, root_window);
-        if (res)
-        {
-            for (int i = 0; i < res->noutput; ++i)
-            {
-                XRROutputInfo* output_info = XRRGetOutputInfo(dpy, res, res->outputs[i]);
-                if (output_info && output_info->connection == RR_Connected && output_info->crtc)
-                {
-                    std::string name(output_info->name);
-                    if (name.find("Virtual") != std::string::npos || name.find("VGA") != std::string::npos)
-                    {
-                        XRRCrtcInfo* crtc_info = XRRGetCrtcInfo(dpy, res, output_info->crtc);
-                        if (crtc_info)
-                        {
-                            capture_x = crtc_info->x;
-                            capture_y = crtc_info->y;
-                            capture_w = crtc_info->width;
-                            capture_h = crtc_info->height;
-                            XRRFreeCrtcInfo(crtc_info);
-                            XRRFreeOutputInfo(output_info);
-                            break;
-                        }
-                    }
-                }
-                if (output_info)
-                    XRRFreeOutputInfo(output_info);
-            }
-            XRRFreeScreenResources(res);
-        }
-    }
-
-    if (capture_w == 0 || capture_h == 0)
-    {
-        XWindowAttributes attributes;
-        XGetWindowAttributes(dpy, root_window, &attributes);
-        capture_w = attributes.width;
-        capture_h = attributes.height;
-        capture_x = 0;
-        capture_y = 0;
-    }
+    XWindowAttributes attributes;
+    XGetWindowAttributes(dpy, root_window, &attributes);
+    capture_w = attributes.width;
+    capture_h = attributes.height;
+    capture_x = 0;
+    capture_y = 0;
 
     img = XShmCreateImage(dpy, DefaultVisual(dpy, DefaultScreen(dpy)), DefaultDepth(dpy, DefaultScreen(dpy)), ZPixmap,
                           NULL, &shminfo, capture_w, capture_h);
@@ -157,14 +115,10 @@ bool VideoEncoder::init_encoder()
 {
     std::vector<std::string> encoder_names;
 
-    if (global_video_codec_type == 7) // MEDIA_CODEC_VIDEO_H265
-    {
+    if (global_video_codec_type == 7)
         encoder_names = {"hevc_v4l2m2m", "libx265", "hevc"};
-    }
-    else // Default H.264
-    {
+    else
         encoder_names = {"h264_v4l2m2m", "h264_omx", "libx264", "h264"};
-    }
 
     for (const auto& name : encoder_names)
     {
@@ -191,10 +145,10 @@ bool VideoEncoder::init_encoder()
         codec_ctx->bit_rate = 2000000;    // 2 Mbps target
         codec_ctx->rc_max_rate = 2500000; // 2.5 Mbps absolute spike limit
         codec_ctx->rc_buffer_size = 500000;
-        codec_ctx->gop_size = 30; // 1-Second Keyframe Guarantee! Recovers decoder instantly.
+        codec_ctx->gop_size = 30; // 1-Second Keyframes
         codec_ctx->max_b_frames = 0;
         codec_ctx->qmin = 10;
-        codec_ctx->qmax = 51; // Allow heavy compression/artifacting during motion!
+        codec_ctx->qmax = 51; // Allow heavy compression during motion!
 
         if (std::string(codec->name) == "libx264" || std::string(codec->name) == "libx265")
         {
@@ -210,10 +164,7 @@ bool VideoEncoder::init_encoder()
         }
 
         if (avcodec_open2(codec_ctx, codec, NULL) >= 0)
-        {
-            std::cout << "[VideoEncoder] Successfully opened Encoder: " << codec->name << std::endl;
             break;
-        }
         else
         {
             avcodec_free_context(&codec_ctx);

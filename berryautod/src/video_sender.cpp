@@ -11,7 +11,6 @@ std::mutex config_mutex;
 std::vector<uint8_t> cached_config_nal;
 bool has_cached_config = false;
 
-// THE STATE MACHINE: Prevents "Decoding Error" spam on the Head Unit
 static bool is_recovering = false;
 
 void extract_and_cache_sps_pps(const std::vector<uint8_t>& frame)
@@ -93,7 +92,7 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
 {
     if (!(is_tls_connected || ssl_bypassed) || !video_channel_ready || !is_video_streaming.load())
     {
-        is_recovering = false; // Reset state on disconnect
+        is_recovering = false;
         return;
     }
 
@@ -113,8 +112,7 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
             return; // Silently drop frame, wait for pipeline to drain
         }
 
-        // Pipeline is completely clear!
-        // We drop this current frame (because it's an un-decodable P-frame) and request an I-frame.
+        // Pipeline is completely clear! Request a fresh Keyframe to resume.
         if (video_streamer)
             video_streamer->force_keyframe();
         is_recovering = false;
@@ -123,7 +121,7 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
     }
 
     // Pre-emptive USB Queue Check
-    if (get_media_tx_queue_size() >= 5)
+    if (get_media_tx_queue_size() >= 2)
     {
         LOG_E("[WARNING] USB Queue Congested! Entering Recovery Mode.");
         is_recovering = true;
@@ -146,7 +144,7 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
     {
         LOG_E("[WARNING] Video ACK timeout. Entering Recovery Mode.");
         is_recovering = true;
-        video_unacked_count = 0; // Artificially lower count to allow recovery condition to pass later
+        video_unacked_count = 0;
         return;
     }
 
