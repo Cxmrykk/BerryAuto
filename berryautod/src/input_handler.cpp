@@ -29,17 +29,22 @@ static bool init_uinput(int max_x, int max_y)
     uinput_fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
     if (uinput_fd < 0)
     {
-        LOG_E("Failed to open /dev/uinput. Ensure the uinput kernel module is loaded and daemon is running as root.");
+        LOG_E("Failed to open /dev/uinput. Ensure the uinput kernel module is loaded and daemon is root.");
         return false;
     }
 
-    // Configure the virtual device to emit Key (Touch) and Absolute (X/Y) events
+    // 1. Allow emulating Touch and Left Mouse Button
     ioctl(uinput_fd, UI_SET_EVBIT, EV_KEY);
     ioctl(uinput_fd, UI_SET_KEYBIT, BTN_TOUCH);
+    ioctl(uinput_fd, UI_SET_KEYBIT, BTN_LEFT);
 
+    // 2. Allow emitting Absolute X and Y coordinates
     ioctl(uinput_fd, UI_SET_EVBIT, EV_ABS);
     ioctl(uinput_fd, UI_SET_ABSBIT, ABS_X);
     ioctl(uinput_fd, UI_SET_ABSBIT, ABS_Y);
+
+    // 3. CRUCIAL: Tell libinput this is a Touchscreen, NOT a Touchpad
+    ioctl(uinput_fd, UI_SET_PROPBIT, INPUT_PROP_DIRECT);
 
     struct uinput_user_dev uidev;
     memset(&uidev, 0, sizeof(uidev));
@@ -81,25 +86,48 @@ void handle_touch_event(const com::andrerinas::headunitrevived::aap::protocol::p
 
     if (report.has_touch_event() && video_streamer != nullptr)
     {
-        if (report.touch_event().pointer_data_size() == 0)
-            return; // Safety guard
-
         int action = report.touch_event().action();
+
+        // Initialize uinput dynamically on the first touch event
+        if (uinput_fd < 0)
+        {
+            if (!init_uinput(video_streamer->get_desktop_width(), video_streamer->get_desktop_height()))
+            {
+                return;
+            }
+        }
+
+        // 1. Process UP actions IMMEDIATELY (These often don't contain X/Y coordinates!)
+        if (action == 1 || action == 6) // TOUCH_ACTION_UP or TOUCH_ACTION_POINTER_UP
+        {
+            if (uinput_fd >= 0)
+            {
+                emit_event(uinput_fd, EV_KEY, BTN_TOUCH, 0);
+                emit_event(uinput_fd, EV_KEY, BTN_LEFT, 0);
+                emit_event(uinput_fd, EV_SYN, SYN_REPORT, 0);
+            }
+            return;
+        }
+
+        // 2. Safety guard for DOWN and MOVE actions (which MUST have coordinates)
+        if (report.touch_event().pointer_data_size() == 0)
+            return;
+
         int x = report.touch_event().pointer_data(0).x();
         int y = report.touch_event().pointer_data(0).y();
 
-        // 1. Map raw phone coordinates (Touch Space) -> Stream Coordinates (Video Space)
+        // Map raw phone coordinates (Touch Space) -> Stream Coordinates (Video Space)
         float video_x = (float)x * global_video_width / global_touch_width;
         float video_y = (float)y * global_video_height / global_touch_height;
 
-        // 2. Remove the margin offset (Inside Video Space)
+        // Remove the margin offset (Inside Video Space)
         float local_x = video_x - video_streamer->get_offset_x();
         float local_y = video_y - video_streamer->get_offset_y();
 
         int mapped_x = 0;
         int mapped_y = 0;
 
-        // 3. Map valid interior pixel touches over to the Pi's internal desktop space
+        // Map valid interior pixel touches over to the Pi's internal desktop space
         if (video_streamer->get_scaled_w() > 0 && video_streamer->get_scaled_h() > 0)
         {
             mapped_x = (int)((local_x / video_streamer->get_scaled_w()) * video_streamer->get_desktop_width());
@@ -116,15 +144,6 @@ void handle_touch_event(const com::andrerinas::headunitrevived::aap::protocol::p
         if (mapped_y > video_streamer->get_desktop_height())
             mapped_y = video_streamer->get_desktop_height();
 
-        // Initialize uinput dynamically on the first touch event
-        if (uinput_fd < 0)
-        {
-            if (!init_uinput(video_streamer->get_desktop_width(), video_streamer->get_desktop_height()))
-            {
-                return;
-            }
-        }
-
         if (uinput_fd >= 0)
         {
             if (action == 0 || action == 5) // TOUCH_ACTION_DOWN or TOUCH_ACTION_POINTER_DOWN
@@ -132,11 +151,7 @@ void handle_touch_event(const com::andrerinas::headunitrevived::aap::protocol::p
                 emit_event(uinput_fd, EV_ABS, ABS_X, mapped_x);
                 emit_event(uinput_fd, EV_ABS, ABS_Y, mapped_y);
                 emit_event(uinput_fd, EV_KEY, BTN_TOUCH, 1);
-                emit_event(uinput_fd, EV_SYN, SYN_REPORT, 0);
-            }
-            else if (action == 1 || action == 6) // TOUCH_ACTION_UP or TOUCH_ACTION_POINTER_UP
-            {
-                emit_event(uinput_fd, EV_KEY, BTN_TOUCH, 0);
+                emit_event(uinput_fd, EV_KEY, BTN_LEFT, 1);
                 emit_event(uinput_fd, EV_SYN, SYN_REPORT, 0);
             }
             else if (action == 2) // TOUCH_ACTION_MOVE
