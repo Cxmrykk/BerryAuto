@@ -187,10 +187,14 @@ bool VideoEncoder::init_encoder()
         codec_ctx->framerate = {30, 1};
         codec_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
 
-        // Restored high-quality parameters now that OpenSSL bottleneck is gone!
-        codec_ctx->bit_rate = 6000000;
-        codec_ctx->gop_size = 30;
+        // STRICT BANDWIDTH LIMITS to completely eliminate USB Pipe Choking!
+        codec_ctx->bit_rate = 2000000;    // 2 Mbps target
+        codec_ctx->rc_max_rate = 2500000; // 2.5 Mbps absolute spike limit
+        codec_ctx->rc_buffer_size = 500000;
+        codec_ctx->gop_size = 30; // 1-Second Keyframe Guarantee! Recovers decoder instantly.
         codec_ctx->max_b_frames = 0;
+        codec_ctx->qmin = 10;
+        codec_ctx->qmax = 51; // Allow heavy compression/artifacting during motion!
 
         if (std::string(codec->name) == "libx264" || std::string(codec->name) == "libx265")
         {

@@ -23,16 +23,8 @@ void send_video_frame_internal(const std::vector<uint8_t>& nal_data, uint64_t ti
 
     pt.insert(pt.end(), nal_data.begin(), nal_data.end());
 
-    if (send_media_payload(video_channel_id, pt))
-    {
-        video_unacked_count++;
-    }
-    else
-    {
-        LOG_E("[WARNING] Video Frame dropped. Re-syncing Keyframe...");
-        if (video_streamer)
-            video_streamer->force_keyframe();
-    }
+    send_media_payload(video_channel_id, pt);
+    video_unacked_count++;
 }
 
 void extract_and_cache_sps_pps(const std::vector<uint8_t>& frame)
@@ -136,8 +128,8 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
     if (wait_cycles >= 500)
     {
         LOG_E("[WARNING] Video ACK timeout (1000ms). Dropping frame to relieve pipeline.");
-        if (video_streamer)
-            video_streamer->force_keyframe();
+        // By skipping force_keyframe() here, we prevent the "Death Spiral".
+        // The decoder will auto-recover on the very next second because gop_size = 30!
         return;
     }
 
