@@ -334,7 +334,9 @@ int main()
                             }
                         }
                     }
-                    ssl_write_and_flush_unlocked({}, 0, 0x0B, 0);
+                    //ssl_write_and_flush_unlocked({}, 0, 0x0B, 0);
+                    ssl_write_and_flush_handshake();
+
                 }
                 else
                 {
