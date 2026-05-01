@@ -12,8 +12,8 @@
 
 using namespace com::andrerinas::headunitrevived::aap::protocol::proto;
 
-std::queue<std::vector<std::vector<uint8_t>>> high_priority_queue;
-std::queue<std::vector<std::vector<uint8_t>>> low_priority_queue;
+// STRICT SINGLE-FIFO QUEUE: Guarantees TLS Sequence numbers exactly match USB transmission order!
+std::queue<std::vector<uint8_t>> tx_queue;
 std::mutex queue_mutex;
 std::condition_variable queue_cv;
 std::once_flag tx_thread_flag;
@@ -22,43 +22,31 @@ void tx_worker()
 {
     while (true)
     {
-        std::vector<std::vector<uint8_t>> batch;
+        std::vector<uint8_t> chunk;
         {
             std::unique_lock<std::mutex> lock(queue_mutex);
-            queue_cv.wait(lock, [] { return !high_priority_queue.empty() || !low_priority_queue.empty(); });
-
-            if (!high_priority_queue.empty())
-            {
-                batch = high_priority_queue.front();
-                high_priority_queue.pop();
-            }
-            else
-            {
-                batch = low_priority_queue.front();
-                low_priority_queue.pop();
-            }
+            queue_cv.wait(lock, [] { return !tx_queue.empty(); });
+            chunk = tx_queue.front();
+            tx_queue.pop();
         }
 
-        for (const auto& chunk : batch)
+        const uint8_t* ptr = chunk.data();
+        size_t remain = chunk.size();
+        while (remain > 0)
         {
-            const uint8_t* ptr = chunk.data();
-            size_t remain = chunk.size();
-            while (remain > 0)
+            int w = write(ep_in, ptr, remain);
+            if (w < 0)
             {
-                int w = write(ep_in, ptr, remain);
-                if (w < 0)
+                if (errno == EINTR || errno == EAGAIN)
                 {
-                    if (errno == EINTR || errno == EAGAIN)
-                    {
-                        usleep(100);
-                        continue;
-                    }
-                    LOG_E("USB TX Write Failed! " << strerror(errno));
-                    break;
+                    usleep(100);
+                    continue;
                 }
-                ptr += w;
-                remain -= w;
+                LOG_E("USB TX Write Failed! " << strerror(errno));
+                break;
             }
+            ptr += w;
+            remain -= w;
         }
     }
 }
@@ -71,200 +59,112 @@ void init_tx_thread()
 void flush_usb_tx_queue()
 {
     std::lock_guard<std::mutex> lock(queue_mutex);
-    std::queue<std::vector<std::vector<uint8_t>>> empty1;
-    std::queue<std::vector<std::vector<uint8_t>>> empty2;
-    std::swap(high_priority_queue, empty1);
-    std::swap(low_priority_queue, empty2);
+    std::queue<std::vector<uint8_t>> empty;
+    std::swap(tx_queue, empty);
 }
 
-int get_media_tx_queue_size()
+int get_tx_queue_size()
 {
     std::lock_guard<std::mutex> lock(queue_mutex);
-    return low_priority_queue.size();
+    return tx_queue.size();
 }
 
-void enqueue_batch(uint8_t channel, std::vector<std::vector<uint8_t>>& batch)
+// Master packet builder. Because video is sliced into 14KB chunks before arriving here,
+// EVERY message is guaranteed to fit in a single Unfragmented AAP packet!
+void queue_packet(uint8_t channel, bool is_encrypted, bool is_control, const std::vector<uint8_t>& plaintext)
 {
-    if (batch.empty())
-        return;
-
     init_tx_thread();
-    {
-        std::lock_guard<std::mutex> lock(queue_mutex);
-        if (channel == 2)
-        {
-            // Drop frames if the batch queue is heavily overloaded
-            if (low_priority_queue.size() >= 10)
-                return;
-            low_priority_queue.push(std::move(batch));
-        }
-        else
-        {
-            high_priority_queue.push(std::move(batch));
-        }
-    }
-    queue_cv.notify_one();
-}
-
-void build_chunk(std::vector<std::vector<uint8_t>>& batch, const std::vector<uint8_t>& pt, uint8_t target_channel,
-                 uint8_t flags, uint32_t unfragmented_size)
-{
     std::vector<uint8_t> out;
-    uint16_t len_field = pt.size();
 
-    if ((flags & 0x03) == 0x01)
+    // SIMULTANEOUS LOCK: Ties the generation of the TLS Sequence number directly to its position in the TX Queue!
+    std::lock_guard<std::recursive_mutex> aap_lock(aap_mutex);
+    std::lock_guard<std::mutex> tx_lock(queue_mutex);
+
+    if (is_encrypted && !ssl_bypassed)
     {
-        len_field += 4;
-    }
+        SSL_write(ssl, plaintext.data(), plaintext.size());
+        int pending = BIO_ctrl_pending(wbio);
+        if (pending > 0)
+        {
+            std::vector<uint8_t> ciphertext(pending);
+            BIO_read(wbio, ciphertext.data(), pending);
 
-    out.push_back(target_channel);
-    out.push_back(flags);
-    out.push_back((len_field >> 8) & 0xFF);
-    out.push_back(len_field & 0xFF);
+            uint8_t flag = (is_control && channel != 0) ? 0x0F : 0x0B;
+            uint16_t len = ciphertext.size();
 
-    if ((flags & 0x03) == 0x01)
-    {
-        out.push_back((unfragmented_size >> 24) & 0xFF);
-        out.push_back((unfragmented_size >> 16) & 0xFF);
-        out.push_back((unfragmented_size >> 8) & 0xFF);
-        out.push_back(unfragmented_size & 0xFF);
-    }
-
-    out.insert(out.end(), pt.begin(), pt.end());
-    batch.push_back(std::move(out));
-}
-
-void fragment_and_batch(uint8_t channel, bool is_encrypted, const std::vector<uint8_t>& payload,
-                        std::vector<std::vector<uint8_t>>& batch)
-{
-    const size_t MAX_CHUNK = 15000;
-    uint32_t total_size = payload.size();
-
-    if (total_size <= MAX_CHUNK)
-    {
-        uint8_t flag = is_encrypted ? 0x0B : 0x03;
-        build_chunk(batch, payload, channel, flag, 0);
+            out.push_back(channel);
+            out.push_back(flag);
+            out.push_back(len >> 8);
+            out.push_back(len & 0xFF);
+            out.insert(out.end(), ciphertext.begin(), ciphertext.end());
+        }
     }
     else
     {
-        uint8_t base_flag = is_encrypted ? 0x08 : 0x00;
-        size_t offset = 0;
+        uint8_t flag = (is_control && channel != 0) ? 0x07 : 0x03;
+        uint16_t len = plaintext.size();
 
-        while (offset < total_size)
+        out.push_back(channel);
+        out.push_back(flag);
+        out.push_back(len >> 8);
+        out.push_back(len & 0xFF);
+        out.insert(out.end(), plaintext.begin(), plaintext.end());
+    }
+
+    if (!out.empty())
+    {
+        tx_queue.push(std::move(out));
+        queue_cv.notify_one();
+    }
+}
+
+void flush_ssl_buffers()
+{
+    init_tx_thread();
+    std::lock_guard<std::recursive_mutex> aap_lock(aap_mutex);
+    std::lock_guard<std::mutex> tx_lock(queue_mutex);
+
+    int pending = BIO_ctrl_pending(wbio);
+    if (pending > 0)
+    {
+        std::vector<uint8_t> tls_record(pending);
+        BIO_read(wbio, tls_record.data(), pending);
+
+        std::vector<uint8_t> out;
+        uint16_t len = tls_record.size();
+
+        if (!is_tls_connected)
         {
-            size_t remain = total_size - offset;
-            size_t chunk_size = std::min(remain, MAX_CHUNK);
-            std::vector<uint8_t> chunk(payload.begin() + offset, payload.begin() + offset + chunk_size);
-
-            uint8_t flag = base_flag;
-            uint32_t unfrag_size = 0;
-
-            if (offset == 0)
-            {
-                flag |= 0x01;
-                unfrag_size = total_size; // EXACT CIPHERTEXT SIZE. Precludes -251 Buffer Overflows.
-            }
-            else if (offset + chunk_size >= total_size)
-            {
-                flag |= 0x02;
-            }
-            else
-            {
-                flag |= 0x00;
-            }
-
-            build_chunk(batch, chunk, channel, flag, unfrag_size);
-            offset += chunk_size;
+            out.push_back(0);
+            out.push_back(0x03);
+            out.push_back((len + 2) >> 8);
+            out.push_back((len + 2) & 0xFF);
+            out.push_back((ControlMsgType::MESSAGE_ENCAPSULATED_SSL >> 8) & 0xFF);
+            out.push_back(ControlMsgType::MESSAGE_ENCAPSULATED_SSL & 0xFF);
         }
+        else
+        {
+            out.push_back(0);
+            out.push_back(0x0B);
+            out.push_back(len >> 8);
+            out.push_back(len & 0xFF);
+        }
+        out.insert(out.end(), tls_record.begin(), tls_record.end());
+
+        tx_queue.push(std::move(out));
+        queue_cv.notify_one();
     }
 }
 
 void send_unencrypted(uint8_t channel, uint8_t flags, uint16_t type, const std::vector<uint8_t>& payload)
 {
-    uint16_t len_field = payload.size() + 2;
-    std::vector<uint8_t> out;
-    out.push_back(channel);
-    out.push_back(flags);
-    out.push_back((len_field >> 8) & 0xFF);
-    out.push_back(len_field & 0xFF);
-    out.push_back((type >> 8) & 0xFF);
-    out.push_back(type & 0xFF);
-    out.insert(out.end(), payload.begin(), payload.end());
+    std::vector<uint8_t> pt;
+    pt.push_back(type >> 8);
+    pt.push_back(type & 0xFF);
+    pt.insert(pt.end(), payload.begin(), payload.end());
 
-    std::vector<std::vector<uint8_t>> batch = {out};
-    enqueue_batch(channel, batch);
-}
-
-bool send_media_payload(uint8_t channel, const std::vector<uint8_t>& pt)
-{
-    std::vector<std::vector<uint8_t>> batch;
-
-    {
-        // aap_mutex ensures pristine TLS Sequence order
-        std::lock_guard<std::recursive_mutex> aap_lock(aap_mutex);
-
-        if (ssl_bypassed)
-        {
-            fragment_and_batch(channel, false, pt, batch);
-        }
-        else
-        {
-            SSL_write(ssl, pt.data(), pt.size());
-            int pending = BIO_ctrl_pending(wbio);
-            if (pending > 0)
-            {
-                std::vector<uint8_t> ciphertext(pending);
-                BIO_read(wbio, ciphertext.data(), pending);
-                fragment_and_batch(channel, true, ciphertext, batch);
-            }
-        }
-    }
-
-    enqueue_batch(channel, batch);
-    return true;
-}
-
-void ssl_write_and_flush_unlocked(const std::vector<uint8_t>& pt, uint8_t target_channel, uint8_t encrypted_flag,
-                                  uint32_t unfragmented_size)
-{
-    std::vector<std::vector<uint8_t>> batch;
-
-    {
-        std::lock_guard<std::recursive_mutex> aap_lock(aap_mutex);
-
-        if (!pt.empty())
-        {
-            SSL_write(ssl, pt.data(), pt.size());
-        }
-
-        int pending = BIO_ctrl_pending(wbio);
-        if (pending > 0)
-        {
-            std::vector<uint8_t> tls_record(pending);
-            BIO_read(wbio, tls_record.data(), pending);
-
-            if (!is_tls_connected)
-            {
-                uint16_t len_field = tls_record.size() + 2;
-                std::vector<uint8_t> out;
-                out.push_back(0);
-                out.push_back(0x03);
-                out.push_back((len_field >> 8) & 0xFF);
-                out.push_back(len_field & 0xFF);
-                out.push_back((ControlMsgType::MESSAGE_ENCAPSULATED_SSL >> 8) & 0xFF);
-                out.push_back(ControlMsgType::MESSAGE_ENCAPSULATED_SSL & 0xFF);
-                out.insert(out.end(), tls_record.begin(), tls_record.end());
-
-                batch.push_back(std::move(out));
-            }
-            else
-            {
-                build_chunk(batch, tls_record, target_channel, encrypted_flag, unfragmented_size);
-            }
-        }
-    }
-
-    enqueue_batch(target_channel, batch);
+    // Handshake messages are unencrypted
+    queue_packet(channel, false, true, pt);
 }
 
 void send_message(uint8_t channel, uint16_t type, const google::protobuf::Message& proto_msg)
@@ -272,27 +172,17 @@ void send_message(uint8_t channel, uint16_t type, const google::protobuf::Messag
     std::vector<uint8_t> serialized(proto_msg.ByteSizeLong());
     proto_msg.SerializeToArray(serialized.data(), serialized.size());
 
-    bool is_control = (type >= 1 && type <= 26);
+    std::vector<uint8_t> pt;
+    pt.push_back(type >> 8);
+    pt.push_back(type & 0xFF);
+    pt.insert(pt.end(), serialized.begin(), serialized.end());
 
-    if (ssl_bypassed)
-    {
-        uint8_t flags = 0x03; // Base Unencrypted
-        if (channel != 0 && is_control)
-            flags = 0x07;
+    bool is_control = (type <= 26);
+    queue_packet(channel, true, is_control, pt);
+}
 
-        send_unencrypted(channel, flags, type, serialized);
-    }
-    else
-    {
-        uint8_t flags = 0x0B; // Base Encrypted
-        if (channel != 0 && is_control)
-            flags = 0x0F;
-
-        std::vector<uint8_t> plaintext;
-        plaintext.push_back((type >> 8) & 0xFF);
-        plaintext.push_back(type & 0xFF);
-        plaintext.insert(plaintext.end(), serialized.begin(), serialized.end());
-
-        ssl_write_and_flush_unlocked(plaintext, channel, flags, 0);
-    }
+void send_media_payload(uint8_t channel, const std::vector<uint8_t>& pt)
+{
+    // Video slices arrive here pre-chunked to 14KB!
+    queue_packet(channel, true, false, pt);
 }

@@ -13,17 +13,37 @@ bool has_cached_config = false;
 
 void send_video_frame_internal(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
 {
-    std::vector<uint8_t> pt;
-    pt.push_back(0x00);
-    pt.push_back(0x00);
-    for (int i = 7; i >= 0; --i)
+    // SLICING MAGIC: We limit every payload to 14,000 bytes.
+    // This entirely circumvents AAP Message Fragmentation, ensuring every chunk
+    // fits into a single TLS Record and cannot cause -251 Buffer Overflows!
+    const size_t MAX_SLICE_SIZE = 14000;
+    size_t offset = 0;
+
+    while (offset < nal_data.size())
     {
-        pt.push_back((timestamp >> (i * 8)) & 0xFF);
+        size_t remain = nal_data.size() - offset;
+        size_t chunk_size = std::min(remain, MAX_SLICE_SIZE);
+
+        std::vector<uint8_t> pt;
+        pt.push_back(0x00); // MEDIA_MESSAGE_DATA (msg_type_hi)
+        pt.push_back(0x00); // MEDIA_MESSAGE_DATA (msg_type_lo)
+
+        // Android Auto decoders reconstruct NAL units by grouping payloads with identical timestamps!
+        for (int i = 7; i >= 0; --i)
+        {
+            pt.push_back((timestamp >> (i * 8)) & 0xFF);
+        }
+
+        pt.insert(pt.end(), nal_data.begin() + offset, nal_data.begin() + offset + chunk_size);
+
+        send_media_payload(video_channel_id, pt);
+        offset += chunk_size;
+
+        // VITAL YIELD: This brief microsecond pause allows the USB RX thread
+        // to grab the queue mutex and slip a Ping Response into the stream!
+        std::this_thread::yield();
     }
 
-    pt.insert(pt.end(), nal_data.begin(), nal_data.end());
-
-    send_media_payload(video_channel_id, pt);
     video_unacked_count++;
 }
 
@@ -107,6 +127,14 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
     if (!(is_tls_connected || ssl_bypassed) || !video_channel_ready || !is_video_streaming.load())
         return;
 
+    // PRE-EMPTIVE DROP: If the USB pipeline is backed up by > 10 chunks (~150KB),
+    // drop this video frame natively to prevent the pipeline from choking!
+    if (get_tx_queue_size() > 10)
+    {
+        LOG_E("[WARNING] USB TX Queue backed up. Dropping frame to preserve latency.");
+        return;
+    }
+
     if (!has_cached_config)
     {
         extract_and_cache_sps_pps(nal_data);
@@ -115,7 +143,7 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
     }
 
     int wait_cycles = 0;
-    while (is_video_streaming.load() && video_unacked_count.load() >= max_video_unacked && wait_cycles < 500)
+    while (is_video_streaming.load() && video_unacked_count.load() >= max_video_unacked && wait_cycles < 250)
     {
         std::this_thread::yield();
         usleep(2000);
@@ -125,11 +153,9 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
     if (!is_video_streaming.load())
         return;
 
-    if (wait_cycles >= 500)
+    if (wait_cycles >= 250)
     {
-        LOG_E("[WARNING] Video ACK timeout (1000ms). Dropping frame to relieve pipeline.");
-        // By skipping force_keyframe() here, we prevent the "Death Spiral".
-        // The decoder will auto-recover on the very next second because gop_size = 30!
+        LOG_E("[WARNING] Video ACK timeout (500ms). Dropping frame.");
         return;
     }
 
