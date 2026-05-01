@@ -2,41 +2,82 @@
 #include "control.pb.h"
 #include "globals.hpp"
 #include <algorithm>
+#include <condition_variable>
 #include <errno.h>
 #include <mutex>
+#include <queue>
 #include <string.h>
+#include <thread>
 #include <unistd.h>
 
 using namespace com::andrerinas::headunitrevived::aap::protocol::proto;
 
-std::mutex usb_tx_mutex;
+// --- ASYNCHRONOUS TX QUEUE ENGINE ---
 
-// --- INTERNAL HELPERS (Must be called with BOTH locks held) ---
+std::queue<std::vector<uint8_t>> tx_queue;
+std::mutex queue_mutex;
+std::condition_variable queue_cv;
+std::once_flag tx_thread_flag;
 
-void write_to_usb_unlocked(const std::vector<uint8_t>& data)
+void tx_worker()
 {
-    const uint8_t* ptr = data.data();
-    size_t remain = data.size();
-    while (remain > 0)
+    while (true)
     {
-        int w = write(ep_in, ptr, remain);
-        if (w < 0)
+        std::vector<uint8_t> packet;
         {
-            if (errno == EINTR || errno == EAGAIN)
-            {
-                usleep(100);
-                continue;
-            }
-            LOG_E("USB TX Write Failed! " << strerror(errno));
-            break;
+            std::unique_lock<std::mutex> lock(queue_mutex);
+            queue_cv.wait(lock, [] { return !tx_queue.empty(); });
+            packet = tx_queue.front();
+            tx_queue.pop();
         }
-        ptr += w;
-        remain -= w;
+
+        const uint8_t* ptr = packet.data();
+        size_t remain = packet.size();
+        while (remain > 0)
+        {
+            // This blocking call is now safely isolated in its own thread!
+            int w = write(ep_in, ptr, remain);
+            if (w < 0)
+            {
+                if (errno == EINTR || errno == EAGAIN)
+                {
+                    usleep(100);
+                    continue;
+                }
+                LOG_E("USB TX Write Failed! " << strerror(errno));
+                break; // Drop packet, but TX thread survives
+            }
+            ptr += w;
+            remain -= w;
+        }
     }
 }
 
-void write_chunk_unlocked(const std::vector<uint8_t>& pt, uint8_t target_channel, uint8_t flags,
-                          uint32_t unfragmented_size)
+void init_tx_thread()
+{
+    std::call_once(tx_thread_flag, [] { std::thread(tx_worker).detach(); });
+}
+
+void flush_usb_tx_queue()
+{
+    std::lock_guard<std::mutex> lock(queue_mutex);
+    std::queue<std::vector<uint8_t>> empty;
+    std::swap(tx_queue, empty);
+}
+
+void queue_packet(const std::vector<uint8_t>& packet)
+{
+    init_tx_thread();
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex);
+        tx_queue.push(packet);
+    }
+    queue_cv.notify_one();
+}
+
+// --- PROTOCOL HELPERS ---
+
+void queue_chunk(const std::vector<uint8_t>& pt, uint8_t target_channel, uint8_t flags, uint32_t unfragmented_size)
 {
     std::vector<uint8_t> out;
     uint16_t len_field = pt.size();
@@ -61,19 +102,18 @@ void write_chunk_unlocked(const std::vector<uint8_t>& pt, uint8_t target_channel
     }
 
     out.insert(out.end(), pt.begin(), pt.end());
-    write_to_usb_unlocked(out);
+    queue_packet(out);
 }
 
-void fragment_and_send_unlocked(uint8_t channel, bool is_encrypted, const std::vector<uint8_t>& payload_to_send,
-                                uint32_t original_plaintext_size)
+void fragment_and_queue(uint8_t channel, bool is_encrypted, const std::vector<uint8_t>& payload_to_send)
 {
     const size_t MAX_CHUNK = 15000;
-    uint32_t total_size = payload_to_send.size(); // Ciphertext length
+    uint32_t total_size = payload_to_send.size(); // MUST be Ciphertext length when encrypted!
 
     if (total_size <= MAX_CHUNK)
     {
         uint8_t flag = is_encrypted ? 0x0B : 0x03; // Unfragmented
-        write_chunk_unlocked(payload_to_send, channel, flag, 0);
+        queue_chunk(payload_to_send, channel, flag, 0);
     }
     else
     {
@@ -91,8 +131,8 @@ void fragment_and_send_unlocked(uint8_t channel, bool is_encrypted, const std::v
 
             if (offset == 0)
             {
-                flag |= 0x01;                          // First Fragment
-                unfrag_size = original_plaintext_size; // THE MAGIC FIX: Pass Plaintext size, not Ciphertext size!
+                flag |= 0x01; // First Fragment
+                unfrag_size = total_size;
             }
             else if (offset + chunk_size >= total_size)
             {
@@ -103,7 +143,7 @@ void fragment_and_send_unlocked(uint8_t channel, bool is_encrypted, const std::v
                 flag |= 0x00; // Middle Fragment
             }
 
-            write_chunk_unlocked(chunk, channel, flag, unfrag_size);
+            queue_chunk(chunk, channel, flag, unfrag_size);
             offset += chunk_size;
         }
     }
@@ -127,22 +167,17 @@ void send_unencrypted(uint8_t channel, uint8_t flags, uint16_t type, const std::
               << std::endl;
 
     std::lock_guard<std::recursive_mutex> aap_lock(aap_mutex);
-    std::lock_guard<std::mutex> tx_lock(usb_tx_mutex);
-    write_to_usb_unlocked(out);
+    queue_packet(out);
 }
 
 void send_media_payload(uint8_t channel, const std::vector<uint8_t>& pt)
 {
-    uint32_t original_plaintext_size = pt.size();
-
-    // STRICT LOCKING: Hold both locks for the ENTIRE duration of the fragmented frame.
-    // This absolutely guarantees that a Ping Response cannot interleave between video chunks!
+    // AAP lock serializes both Encryption AND the order it enters the Queue, maintaining perfect TLS Sequences
     std::lock_guard<std::recursive_mutex> aap_lock(aap_mutex);
-    std::lock_guard<std::mutex> tx_lock(usb_tx_mutex);
 
     if (ssl_bypassed)
     {
-        fragment_and_send_unlocked(channel, false, pt, original_plaintext_size);
+        fragment_and_queue(channel, false, pt);
     }
     else
     {
@@ -152,9 +187,7 @@ void send_media_payload(uint8_t channel, const std::vector<uint8_t>& pt)
         {
             std::vector<uint8_t> ciphertext(pending);
             BIO_read(wbio, ciphertext.data(), pending);
-
-            // Fragment the Ciphertext, but pass the Plaintext size to the header!
-            fragment_and_send_unlocked(channel, true, ciphertext, original_plaintext_size);
+            fragment_and_queue(channel, true, ciphertext);
         }
     }
 }
@@ -162,9 +195,7 @@ void send_media_payload(uint8_t channel, const std::vector<uint8_t>& pt)
 void ssl_write_and_flush_unlocked(const std::vector<uint8_t>& pt, uint8_t target_channel, uint8_t encrypted_flag,
                                   uint32_t unfragmented_size)
 {
-    // STRICT LOCKING: Hold both locks during encryption AND transmission
     std::lock_guard<std::recursive_mutex> aap_lock(aap_mutex);
-    std::lock_guard<std::mutex> tx_lock(usb_tx_mutex);
 
     if (!pt.empty())
     {
@@ -189,7 +220,7 @@ void ssl_write_and_flush_unlocked(const std::vector<uint8_t>& pt, uint8_t target
             out.push_back(ControlMsgType::MESSAGE_ENCAPSULATED_SSL & 0xFF);
             out.insert(out.end(), tls_record.begin(), tls_record.end());
 
-            write_to_usb_unlocked(out);
+            queue_packet(out);
         }
         else
         {
@@ -221,7 +252,7 @@ void ssl_write_and_flush_unlocked(const std::vector<uint8_t>& pt, uint8_t target
                 std::cout << "[DEBUG-TX] Encrypted - Channel: " << (int)target_channel << " Flags: 0x" << std::hex
                           << (int)encrypted_flag << std::dec << " Size: " << out.size() << std::endl;
             }
-            write_to_usb_unlocked(out);
+            queue_packet(out);
         }
     }
 }

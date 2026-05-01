@@ -35,7 +35,7 @@ VideoEncoder* video_streamer = nullptr;
 bool video_channel_ready = false;
 bool input_channel_ready = false;
 
-std::atomic<bool> should_exit{false}; // Fix #5
+std::atomic<bool> should_exit{false};
 
 // Dynamic Channel Assignments
 int video_channel_id = 2;
@@ -61,7 +61,7 @@ std::atomic<int> video_unacked_count{0};
 std::atomic<bool> is_video_streaming{false};
 int max_video_unacked = 16;
 
-// Fix #1: Safe cleanup of video thread to prevent memory/thread leak
+// Safe cleanup of video thread to prevent memory/thread leak
 void stop_video_stream()
 {
     is_video_streaming = false;
@@ -136,7 +136,8 @@ void ep0_thread(int ep0)
                 std::lock_guard<std::recursive_mutex> lock(aap_mutex);
                 is_tls_connected = false;
                 ssl_bypassed = false;
-                stop_video_stream(); // Fix #1
+                stop_video_stream();
+                flush_usb_tx_queue();
                 video_channel_ready = false;
                 input_channel_ready = false;
                 video_unacked_count = 0;
@@ -175,7 +176,7 @@ void ep0_thread(int ep0)
                         force_zero_ack(ep0, false);
                         LOG_I("[AOA] Received START (53). Acknowledged. Waiting 500ms to flush, then morphing...");
                         usleep(500000);
-                        should_exit = true; // Fix #5: Graceful exit instead of hard exit
+                        should_exit = true;
                     }
                     else
                     {
@@ -194,7 +195,7 @@ void ep0_thread(int ep0)
 
 int main()
 {
-    XInitThreads(); // Fix #3: Ensure Xlib thread safety for background capture + input injection
+    XInitThreads();
 
     LOG_I("Starting OpenGAL Emitter...");
 
@@ -261,7 +262,7 @@ int main()
 
     while (true)
     {
-        if (should_exit.load()) // Fix #5: Catch AOA shutdown gracefully
+        if (should_exit.load())
             break;
 
         int r = read(ep_out, tmp_buf, sizeof(tmp_buf));
@@ -347,8 +348,8 @@ int main()
                                     if (err != SSL_ERROR_WANT_READ && err != SSL_ERROR_WANT_WRITE)
                                     {
                                         LOG_E(">>> SSL_read Decryption Error: " << err << " <<<");
-                                        SSL_clear(ssl);           // Fix #6: Prevent infinite loop crash
-                                        is_tls_connected = false; // Fix #6
+                                        SSL_clear(ssl);
+                                        is_tls_connected = false;
                                     }
                                     break;
                                 }
@@ -375,7 +376,6 @@ int main()
 
     cleanup_input();
 
-    // Fix #5: Return bounce status gracefully
     if (should_exit.load())
         return 42;
     return 0;
