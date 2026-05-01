@@ -15,7 +15,7 @@ using namespace com::andrerinas::headunitrevived::aap::protocol::proto;
 struct TxPacket
 {
     uint8_t channel;
-    std::vector<uint8_t> payload;
+    std::vector<uint8_t> payload; // ALWAYS Plaintext!
     bool is_control;
     bool is_raw_ssl;
     bool encrypt;
@@ -74,58 +74,6 @@ void write_chunk(const std::vector<uint8_t>& pt, uint8_t target_channel, uint8_t
     write_buffer(out);
 }
 
-void transmit_atomic(uint8_t channel, bool is_encrypted, const std::vector<uint8_t>& payload, bool is_control)
-{
-    const size_t MAX_CHUNK = 15000;
-    uint32_t total_size = payload.size();
-
-    if (total_size <= MAX_CHUNK)
-    {
-        uint8_t flag = 0;
-        if (is_encrypted)
-            flag = (is_control && channel != 0) ? 0x0F : 0x0B;
-        else
-            flag = (is_control && channel != 0) ? 0x07 : 0x03;
-
-        write_chunk(payload, channel, flag, 0);
-    }
-    else
-    {
-        uint8_t base_flag = 0;
-        if (is_encrypted)
-            base_flag = (is_control && channel != 0) ? 0x0C : 0x08;
-        else
-            base_flag = (is_control && channel != 0) ? 0x04 : 0x00;
-
-        size_t offset = 0;
-        while (offset < total_size)
-        {
-            size_t remain = total_size - offset;
-            size_t chunk_size = std::min(remain, MAX_CHUNK);
-            std::vector<uint8_t> chunk(payload.begin() + offset, payload.begin() + offset + chunk_size);
-
-            uint8_t flag = base_flag;
-            uint32_t unfrag = 0;
-            if (offset == 0)
-            {
-                flag |= 0x01;
-                unfrag = total_size;
-            }
-            else if (offset + chunk_size >= total_size)
-            {
-                flag |= 0x02;
-            }
-            else
-            {
-                flag |= 0x00;
-            }
-
-            write_chunk(chunk, channel, flag, unfrag);
-            offset += chunk_size;
-        }
-    }
-}
-
 void tx_worker()
 {
     while (true)
@@ -153,27 +101,80 @@ void tx_worker()
         }
         else
         {
-            if (!pkt.encrypt)
+            std::vector<uint8_t> data_to_fragment;
+            uint32_t original_plaintext_size = pkt.payload.size();
+            bool is_encrypted = false;
+
+            if (pkt.encrypt && !ssl_bypassed)
             {
-                // MASSIVE SPEEDUP: Plaintext media bypasses OpenSSL completely!
-                transmit_atomic(pkt.channel, false, pkt.payload, pkt.is_control);
+                // LATE ENCRYPTION: Guarantees perfect TLS Sequence numbering right before transmission
+                std::lock_guard<std::recursive_mutex> aap_lock(aap_mutex);
+                SSL_write(ssl, pkt.payload.data(), pkt.payload.size());
+                int pending = BIO_ctrl_pending(wbio);
+                if (pending > 0)
+                {
+                    data_to_fragment.resize(pending);
+                    BIO_read(wbio, data_to_fragment.data(), pending);
+                    is_encrypted = true;
+                }
             }
             else
             {
-                std::vector<uint8_t> ciphertext;
+                data_to_fragment = pkt.payload;
+            }
+
+            if (data_to_fragment.empty())
+                continue;
+
+            const size_t MAX_CHUNK = 15000;
+            uint32_t total_cipher_size = data_to_fragment.size();
+
+            if (total_cipher_size <= MAX_CHUNK)
+            {
+                uint8_t flag = 0;
+                if (is_encrypted)
+                    flag = (pkt.is_control && pkt.channel != 0) ? 0x0F : 0x0B;
+                else
+                    flag = (pkt.is_control && pkt.channel != 0) ? 0x07 : 0x03;
+
+                write_chunk(data_to_fragment, pkt.channel, flag, 0);
+            }
+            else
+            {
+                uint8_t base_flag = 0;
+                if (is_encrypted)
+                    base_flag = (pkt.is_control && pkt.channel != 0) ? 0x0C : 0x08;
+                else
+                    base_flag = (pkt.is_control && pkt.channel != 0) ? 0x04 : 0x00;
+
+                size_t offset = 0;
+                while (offset < total_cipher_size)
                 {
-                    std::lock_guard<std::recursive_mutex> aap_lock(aap_mutex);
-                    SSL_write(ssl, pkt.payload.data(), pkt.payload.size());
-                    int pending = BIO_ctrl_pending(wbio);
-                    if (pending > 0)
+                    size_t chunk_size = std::min(total_cipher_size - offset, MAX_CHUNK);
+                    std::vector<uint8_t> chunk(data_to_fragment.begin() + offset,
+                                               data_to_fragment.begin() + offset + chunk_size);
+
+                    uint8_t flag = base_flag;
+                    uint32_t unfrag = 0;
+
+                    if (offset == 0)
                     {
-                        ciphertext.resize(pending);
-                        BIO_read(wbio, ciphertext.data(), pending);
+                        flag |= 0x01;
+                        // THE HOLY GRAIL: This tells the Head Unit exactly how much plaintext to expect after
+                        // decrypting the chunks!
+                        unfrag = original_plaintext_size;
                     }
-                }
-                if (!ciphertext.empty())
-                {
-                    transmit_atomic(pkt.channel, true, ciphertext, pkt.is_control);
+                    else if (offset + chunk_size >= total_cipher_size)
+                    {
+                        flag |= 0x02;
+                    }
+                    else
+                    {
+                        flag |= 0x00;
+                    }
+
+                    write_chunk(chunk, pkt.channel, flag, unfrag);
+                    offset += chunk_size;
                 }
             }
         }
@@ -307,19 +308,16 @@ bool send_media_payload(uint8_t channel, const std::vector<uint8_t>& pt)
     init_tx_thread();
     std::lock_guard<std::mutex> lock(queue_mutex);
 
-    if (channel == 2 && low_priority_queue.size() > 10)
+    // BACKPRESSURE: Drop video if the queue is backed up
+    if (channel == 2 && low_priority_queue.size() > 5)
         return false;
-
-    // MAGICAL FIX: Android Auto media frames (Type < 0x8000) are NEVER encrypted!
-    uint16_t type = (pt[0] << 8) | pt[1];
-    bool should_encrypt = (!ssl_bypassed) && (type >= 0x8000);
 
     TxPacket pkt;
     pkt.channel = channel;
     pkt.payload = pt;
     pkt.is_control = false;
     pkt.is_raw_ssl = false;
-    pkt.encrypt = should_encrypt;
+    pkt.encrypt = !ssl_bypassed;
 
     if (channel == 2)
         low_priority_queue.push(pkt);
