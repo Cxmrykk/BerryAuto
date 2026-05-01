@@ -10,6 +10,22 @@ pkg_check_modules(PROTOBUF REQUIRED protobuf)
 pkg_check_modules(FFMPEG REQUIRED libavcodec libavutil libswscale)
 pkg_check_modules(X11 REQUIRED x11 xext xrandr xtst)
 
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS 
+    "${CMAKE_SOURCE_DIR}/certs/android_auto.crt" 
+    "${CMAKE_SOURCE_DIR}/certs/android_auto.key"
+)
+
+file(READ "${CMAKE_SOURCE_DIR}/certs/android_auto.crt" AAP_CERT_CONTENT)
+file(READ "${CMAKE_SOURCE_DIR}/certs/android_auto.key" AAP_KEY_CONTENT)
+
+set(GENERATED_DIR "${CMAKE_BINARY_DIR}/generated")
+file(MAKE_DIRECTORY "${GENERATED_DIR}")
+file(WRITE "${GENERATED_DIR}/certs_data.hpp"
+"#pragma once\n\n"
+"constexpr const char* AAP_CERT_GENERATED = R\"CERT_DELIM(${AAP_CERT_CONTENT})CERT_DELIM\";\n\n"
+"constexpr const char* AAP_KEY_GENERATED = R\"KEY_DELIM(${AAP_KEY_CONTENT})KEY_DELIM\";\n"
+)
+
 set(PROTO_SRC_DIR ${CMAKE_SOURCE_DIR}/../proto)
 set(PROTO_BUILD_DIR ${CMAKE_BINARY_DIR}/proto_gen)
 file(MAKE_DIRECTORY ${PROTO_BUILD_DIR})
@@ -22,7 +38,7 @@ foreach(PROTO_FILE ${PROTO_FILES})
     )
 endforeach()
 
-include_directories(${PROTO_BUILD_DIR} ${OPENSSL_INCLUDE_DIRS} ${PROTOBUF_INCLUDE_DIRS} ${FFMPEG_INCLUDE_DIRS} ${X11_INCLUDE_DIRS} src)
+include_directories(${PROTO_BUILD_DIR} ${OPENSSL_INCLUDE_DIRS} ${PROTOBUF_INCLUDE_DIRS} ${FFMPEG_INCLUDE_DIRS} ${X11_INCLUDE_DIRS} src ${GENERATED_DIR})
 
 file(GLOB SOURCES "src/*.cpp")
 file(GLOB PROTO_SRCS "${PROTO_BUILD_DIR}/*.pb.cc")

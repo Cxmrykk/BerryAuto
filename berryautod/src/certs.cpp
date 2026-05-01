@@ -1,55 +1,10 @@
 #include "certs.hpp"
+#include "certs_data.hpp"
 
 unsigned char aa_ticket_keys[48] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C,
                                     0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
                                     0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20, 0x21, 0x22, 0x23, 0x24,
                                     0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F, 0x30};
 
-const char* AAP_CERT = "-----BEGIN CERTIFICATE-----\n"
-                       "MIIDLDCCAhQCAgMIMA0GCSqGSIb3DQEBCwUAMFsxCzAJBgNVBAYTAlVTMRMwEQYD\n"
-                       "VQQIDApDYWxpZm9ybmlhMRYwFAYDVQQHDA1Nb3VudGFpbiBWaWV3MR8wHQYDVQQK\n"
-                       "DBZHb29nbGUgQXV0b21vdGl2ZSBMaW5rMB4XDTE0MDcwNDAwMDAwMFoXDTIyMDgy\n"
-                       "NDEyMjkxMlowXDELMAkGA1UEBhMCVVMxEzARBgNVBAgMCkNhbGlmb3JuaWExFjAU\n"
-                       "BgNVBAcMDU1vdW50YWluIFZpZXcxEzARBgNVBAoMCkNhclNlcnZpY2UxCzAJBgNV\n"
-                       "BAsMAjUzMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAz/sgFFGUFIFz\n"
-                       "oMZwkicaH8dY4mnRLMP+m4KszLyxN/1FRWATM+LVwDeWvlS3ZqzyKeUPmx5t+WUF\n"
-                       "Mx15Q4/OlzKoyhD6nmx3eunlP6dp1bO0LLJjOFPny4VKgSrrPlUNgwrFga5Pl7wC\n"
-                       "s8Dh5ObQUfp7lLytsb3RcGcRG2039L6ZZZghpYc5qGV+NqRsIdA3ZirvNmAcAgxC\n"
-                       "szUyztCbrtMaWXIo78p0zgEEaCExN5ekMpqBCcMVo0bXWWiYcyxWCpNq77qTSGf2\n"
-                       "CZEQE/BLtw/0b+1wYGQLTf0Mq+SGcRzIUrK5wsHEzCxs8KXQfAv0KlnJdiRPR74S\n"
-                       "ln/9geVooQIDAQABMA0GCSqGSIb3DQEBCwUAA4IBAQCAq5uOCPCpleMNPqnHX9oY\n"
-                       "7IUaMW1zzpjjWseuX/6MgyI72kDhHDzg/XhYkgrEbfsy61wpnsqzp9LGbYylKVDD\n"
-                       "8LsEyUMNjfUD0StCbJEed/DdaBITtRktuetJ22bpE2nX/DjJYMsR3UVt/l1HL+Wh\n"
-                       "HzGurXVPB7l4ZMtbaz3SPZbG+iIfHwQKP/J3XOnttk5ihiIBD86gBfZn9oPTYrIX\n"
-                       "e2LrG6LbQUtVqqBYqg291c5ECFTeOUegF9WAx6UH9eztEH+emOWxosv1zE6Ssjs9\n"
-                       "jrFuvbuEvTsRaVEJve2+YIKaPzm4tnIGAs5MlpRC51P2ImI7PunxfguAvK3lBEyj\n"
-                       "-----END CERTIFICATE-----\n";
-
-const char* AAP_KEY = "-----BEGIN PRIVATE KEY-----\n"
-                      "MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDP+yAUUZQUgXOg\n"
-                      "xnCSJxofx1jiadEsw/6bgqzMvLE3/UVFYBMz4tXAN5a+VLdmrPIp5Q+bHm35ZQUz\n"
-                      "HXlDj86XMqjKEPqebHd66eU/p2nVs7QssmM4U+fLhUqBKus+VQ2DCsWBrk+XvAKz\n"
-                      "wOHk5tBR+nuUvK2xvdFwZxEbbTf0vpllmCGlhzmoZX42pGwh0DdmKu82YBwCDEKz\n"
-                      "NTLO0Juu0xpZcijvynTOAQRoITE3l6QymoEJwxWjRtdZaJhzLFYKk2rvupNIZ/YJ\n"
-                      "kRAT8Eu3D/Rv7XBgZAtN/Qyr5IZxHMhSsrnCwcTMLGzwpdB8C/QqWcl2JE9HvhKW\n"
-                      "f/2B5WihAgMBAAECggEBALAUv2MUchcuRfO/Lb0/J6nx/zmpNvP8d4m3h47KzgtF\n"
-                      "/SiwH3HVQPy8034OgTuHfnqjuKOujpMPyOgusuTVUqXFuQtidpw73qgMcA+FMGBC\n"
-                      "BW+2E7SzrNIs5hgXexTJs2fXbcHODwq6nVsMGPPPyl0tgQU6/J83wqK0T9J1lGM6\n"
-                      "mA/1Pz1wJm3BtWJqzY7Qc76zRJ1w3u47APJNFTGmcON+HMHC2GaMQg4F08LFx7gp\n"
-                      "wmXpyUg8nIGFB1k8trN+6ACvoFbO+hky7P5KOyGpSk8MMQ0tyHKmg7C3SCVHpokg\n"
-                      "GxCgDct6mcyOHn0fWDEXoD7j44+3v9Ek1Dpni5G/jkUCgYEA7QSxebseq29HamNz\n"
-                      "ukf3YDQxt4DaW9tRjT7lsUziVD1hUhXHvTe5J0I3YtxiCnJm16qM2MrM4OZvbJtz\n"
-                      "fBf2cprXVPLR8DFYHSn3rDnRXFX2Uu6gzocfNLkE6/mwsffD+haZG3Y1AKkOiqFb\n"
-                      "ZCv8burIXqe6mSAMaY7njgbZwvsCgYEA4KMc8kBBt3nfVAtxB88WZDsgmZ3T+0JM\n"
-                      "JWT2+Q3K2fOyxZ8EcOhlDQik0WvPyWi6BsFY76B55V6T7j65sskdTIKAQNSJN+CE\n"
-                      "SUenjqjwlGuMVxdOUDo/bw4Y1zMIFjonC1P/0y9rthBuVMFiDJnPNNOMOEzZhqWJ\n"
-                      "5EZxHvLw0BMCgYEAlWks+6DSj51hdpZk4Jv3PEUKxjPK8rbJrPFmWCMwVYwv6k/i\n"
-                      "jswuwqnCQmbMwuslG3Tevtbw2iFJQjyoSyTL7ajgbyN25iQk+JV5FK+J49wooFTf\n"
-                      "N/ID4Pd1O9A166pVdzSBpccZWGY5zXg0JWx4/+6vCsRPI7IJQQ2duHFnGrsCgYBr\n"
-                      "wTKobfRYG6jqOtbMZSUbjVVU+uVtmF7IbUcfLuOIayLtMxtBQej/OI8/OdUhiw/5\n"
-                      "H5QW1kbCpPyXAxW20kwwoET/VDRCTnuGX03b2+QTfgeC21Ygm+BD2GJIEF2ns9t4\n"
-                      "zqFf31ZurjEOjPkIjFtdvsB7XTnXId8kVjn7G5QyawKBgCmOEWavSitiyqeYiGUN\n"
-                      "7TAY+nnisxkGPa7JZg1Q32E8QysHsAjNQV3XKjXxICRt8MjDHaJ10CnHJAoio1r2\n"
-                      "+X55cjK4/JWFHSdTC10CWv2lyJVXw+iwKQ4vDhSfG3PMnirZ5NdkZ/67xrHblww3\n"
-                      "H6rHQ/1+7tZeGLa5KN8d8/Yr\n"
-                      "-----END PRIVATE KEY-----\n";
+const char* AAP_CERT = AAP_CERT_GENERATED;
+const char* AAP_KEY = AAP_KEY_GENERATED;
