@@ -12,8 +12,9 @@
 
 using namespace com::andrerinas::headunitrevived::aap::protocol::proto;
 
-// STRICT SINGLE-FIFO QUEUE: Guarantees TLS Sequence numbers perfectly match USB transmission order!
-std::queue<std::vector<std::vector<uint8_t>>> tx_queue;
+// STRICT SINGLE-FIFO QUEUE: Guarantees TLS Sequence numbers exactly match USB transmission order!
+std::queue<std::vector<std::vector<uint8_t>>> high_priority_queue;
+std::queue<std::vector<std::vector<uint8_t>>> low_priority_queue;
 std::mutex queue_mutex;
 std::condition_variable queue_cv;
 std::once_flag tx_thread_flag;
@@ -25,13 +26,21 @@ void tx_worker()
         std::vector<std::vector<uint8_t>> batch;
         {
             std::unique_lock<std::mutex> lock(queue_mutex);
-            queue_cv.wait(lock, [] { return !tx_queue.empty(); });
+            queue_cv.wait(lock, [] { return !high_priority_queue.empty() || !low_priority_queue.empty(); });
 
-            batch = tx_queue.front();
-            tx_queue.pop();
+            if (!high_priority_queue.empty())
+            {
+                batch = high_priority_queue.front();
+                high_priority_queue.pop();
+            }
+            else
+            {
+                batch = low_priority_queue.front();
+                low_priority_queue.pop();
+            }
         }
 
-        // Write the batch contiguously holding the USB pipe to prevent any interleaving
+        // Send entire message contiguously. No interleaving allowed for AAP Fragments!
         for (const auto& chunk : batch)
         {
             const uint8_t* ptr = chunk.data();
@@ -64,17 +73,19 @@ void init_tx_thread()
 void flush_usb_tx_queue()
 {
     std::lock_guard<std::mutex> lock(queue_mutex);
-    std::queue<std::vector<std::vector<uint8_t>>> empty;
-    std::swap(tx_queue, empty);
+    std::queue<std::vector<std::vector<uint8_t>>> empty1;
+    std::queue<std::vector<std::vector<uint8_t>>> empty2;
+    std::swap(high_priority_queue, empty1);
+    std::swap(low_priority_queue, empty2);
 }
 
 int get_media_tx_queue_size()
 {
     std::lock_guard<std::mutex> lock(queue_mutex);
-    return tx_queue.size();
+    return low_priority_queue.size();
 }
 
-void enqueue_batch(std::vector<std::vector<uint8_t>>& batch)
+void enqueue_batch(uint8_t channel, std::vector<std::vector<uint8_t>>& batch)
 {
     if (batch.empty())
         return;
@@ -82,7 +93,14 @@ void enqueue_batch(std::vector<std::vector<uint8_t>>& batch)
     init_tx_thread();
     {
         std::lock_guard<std::mutex> lock(queue_mutex);
-        tx_queue.push(std::move(batch));
+        if (channel == 2)
+        {
+            low_priority_queue.push(std::move(batch));
+        }
+        else
+        {
+            high_priority_queue.push(std::move(batch));
+        }
     }
     queue_cv.notify_one();
 }
@@ -94,7 +112,9 @@ void build_chunk(std::vector<std::vector<uint8_t>>& batch, const std::vector<uin
     uint16_t len_field = pt.size();
 
     if ((flags & 0x03) == 0x01)
+    {
         len_field += 4;
+    }
 
     out.push_back(target_channel);
     out.push_back(flags);
@@ -158,8 +178,47 @@ void fragment_and_batch(uint8_t channel, bool is_encrypted, const std::vector<ui
     }
 }
 
-void send_unencrypted(uint8_t channel, uint8_t flags, uint16_t type, const std::vector<uint8_t>& payload)
+void flush_ssl_buffers()
 {
+    std::lock_guard<std::recursive_mutex> aap_lock(aap_mutex);
+    int pending = BIO_ctrl_pending(wbio);
+    if (pending > 0)
+    {
+        std::vector<uint8_t> tls_record(pending);
+        BIO_read(wbio, tls_record.data(), pending);
+
+        std::vector<uint8_t> out;
+        uint16_t len = tls_record.size();
+
+        if (!is_tls_connected)
+        {
+            out.push_back(0);
+            out.push_back(0x03);
+            out.push_back((len + 2) >> 8);
+            out.push_back((len + 2) & 0xFF);
+            out.push_back((ControlMsgType::MESSAGE_ENCAPSULATED_SSL >> 8) & 0xFF);
+            out.push_back(ControlMsgType::MESSAGE_ENCAPSULATED_SSL & 0xFF);
+        }
+        else
+        {
+            out.push_back(0);
+            out.push_back(0x0B);
+            out.push_back(len >> 8);
+            out.push_back(len & 0xFF);
+        }
+        out.insert(out.end(), tls_record.begin(), tls_record.end());
+
+        std::vector<std::vector<uint8_t>> batch = {out};
+        enqueue_batch(0, batch);
+    }
+}
+
+void send_unencrypted(uint8_t channel, uint16_t type, const std::vector<uint8_t>& payload)
+{
+    uint8_t flags = 0x03;
+    if (channel != 0 && type <= 26)
+        flags = 0x07;
+
     uint16_t len_field = payload.size() + 2;
     std::vector<uint8_t> out;
     out.push_back(channel);
@@ -171,7 +230,40 @@ void send_unencrypted(uint8_t channel, uint8_t flags, uint16_t type, const std::
     out.insert(out.end(), payload.begin(), payload.end());
 
     std::vector<std::vector<uint8_t>> batch = {out};
-    enqueue_batch(batch);
+    enqueue_batch(channel, batch);
+}
+
+void send_message(uint8_t channel, uint16_t type, const google::protobuf::Message& proto_msg)
+{
+    std::vector<uint8_t> serialized(proto_msg.ByteSizeLong());
+    proto_msg.SerializeToArray(serialized.data(), serialized.size());
+
+    if (ssl_bypassed)
+    {
+        send_unencrypted(channel, type, serialized);
+        return;
+    }
+
+    std::vector<std::vector<uint8_t>> batch;
+    {
+        std::lock_guard<std::recursive_mutex> aap_lock(aap_mutex);
+        std::vector<uint8_t> pt;
+        pt.push_back((type >> 8) & 0xFF);
+        pt.push_back(type & 0xFF);
+        pt.insert(pt.end(), serialized.begin(), serialized.end());
+
+        SSL_write(ssl, pt.data(), pt.size());
+        int pending = BIO_ctrl_pending(wbio);
+        if (pending > 0)
+        {
+            std::vector<uint8_t> ciphertext(pending);
+            BIO_read(wbio, ciphertext.data(), pending);
+
+            fragment_and_batch(channel, true, ciphertext, batch);
+        }
+    }
+    if (!batch.empty())
+        enqueue_batch(channel, batch);
 }
 
 bool send_media_payload(uint8_t channel, const std::vector<uint8_t>& pt)
@@ -179,7 +271,7 @@ bool send_media_payload(uint8_t channel, const std::vector<uint8_t>& pt)
     std::vector<std::vector<uint8_t>> batch;
 
     {
-        // STRICT LOCK: Serializes TLS Encryption AND Queue Insertion to guarantee pristine sequence ordering!
+        // STRICT LOCK: Serializes TLS Encryption AND Queue Insertion.
         std::lock_guard<std::recursive_mutex> aap_lock(aap_mutex);
 
         if (ssl_bypassed)
@@ -197,80 +289,25 @@ bool send_media_payload(uint8_t channel, const std::vector<uint8_t>& pt)
                 fragment_and_batch(channel, true, ciphertext, batch);
             }
         }
-        enqueue_batch(batch); // Queued while holding AAP lock = Sequence Guaranteed!
     }
 
-    return true;
-}
+    if (batch.empty())
+        return true;
 
-void ssl_write_and_flush_unlocked(const std::vector<uint8_t>& pt, uint8_t target_channel, uint8_t encrypted_flag,
-                                  uint32_t unfragmented_size)
-{
-    std::vector<std::vector<uint8_t>> batch;
-
+    init_tx_thread();
+    std::lock_guard<std::mutex> lock(queue_mutex);
+    if (channel == 2)
     {
-        std::lock_guard<std::recursive_mutex> aap_lock(aap_mutex);
-
-        if (!pt.empty())
-        {
-            SSL_write(ssl, pt.data(), pt.size());
-        }
-
-        int pending = BIO_ctrl_pending(wbio);
-        if (pending > 0)
-        {
-            std::vector<uint8_t> tls_record(pending);
-            BIO_read(wbio, tls_record.data(), pending);
-
-            if (!is_tls_connected)
-            {
-                uint16_t len_field = tls_record.size() + 2;
-                std::vector<uint8_t> out;
-                out.push_back(0);
-                out.push_back(0x03);
-                out.push_back((len_field >> 8) & 0xFF);
-                out.push_back(len_field & 0xFF);
-                out.push_back((ControlMsgType::MESSAGE_ENCAPSULATED_SSL >> 8) & 0xFF);
-                out.push_back(ControlMsgType::MESSAGE_ENCAPSULATED_SSL & 0xFF);
-                out.insert(out.end(), tls_record.begin(), tls_record.end());
-
-                batch.push_back(std::move(out));
-            }
-            else
-            {
-                build_chunk(batch, tls_record, target_channel, encrypted_flag, unfragmented_size);
-            }
-        }
-        enqueue_batch(batch);
-    }
-}
-
-void send_message(uint8_t channel, uint16_t type, const google::protobuf::Message& proto_msg)
-{
-    std::vector<uint8_t> serialized(proto_msg.ByteSizeLong());
-    proto_msg.SerializeToArray(serialized.data(), serialized.size());
-
-    bool is_control = (type >= 1 && type <= 26);
-
-    if (ssl_bypassed)
-    {
-        uint8_t flags = 0x03;
-        if (channel != 0 && is_control)
-            flags = 0x07;
-
-        send_unencrypted(channel, flags, type, serialized);
+        // STRICT LIMIT: Instant Drop Policy! If queue is backed up, reject the frame.
+        if (low_priority_queue.size() >= 3)
+            return false;
+        low_priority_queue.push(std::move(batch));
     }
     else
     {
-        uint8_t flags = 0x0B;
-        if (channel != 0 && is_control)
-            flags = 0x0F;
-
-        std::vector<uint8_t> plaintext;
-        plaintext.push_back((type >> 8) & 0xFF);
-        plaintext.push_back(type & 0xFF);
-        plaintext.insert(plaintext.end(), serialized.begin(), serialized.end());
-
-        ssl_write_and_flush_unlocked(plaintext, channel, flags, 0);
+        high_priority_queue.push(std::move(batch));
     }
+    queue_cv.notify_one();
+
+    return true;
 }
