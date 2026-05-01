@@ -5,16 +5,43 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
-#include <thread>
+
+static void on_process(void* userdata)
+{
+    VideoEncoder* enc = static_cast<VideoEncoder*>(userdata);
+    struct pw_buffer* b = pw_stream_dequeue_buffer(enc->pw_stream);
+    if (!b)
+        return;
+
+    struct spa_buffer* buf = b->buffer;
+    if (buf->datas[0].data)
+    {
+        int stride = buf->datas[0].chunk->stride;
+        // The compositor negotiated to matching target dimensions
+        enc->process_pipewire_frame(buf->datas[0].data, stride, enc->get_desktop_width(), enc->get_desktop_height());
+    }
+    pw_stream_queue_buffer(enc->pw_stream, b);
+}
+
+// C++ safe initialization (avoids designated initializer warnings)
+static const struct pw_stream_events stream_events = []()
+{
+    struct pw_stream_events ev{};
+    ev.version = PW_VERSION_STREAM_EVENTS;
+    ev.process = on_process;
+    return ev;
+}();
 
 VideoEncoder::VideoEncoder(int width, int height, NalCallback callback)
     : target_width(width), target_height(height), nal_callback(callback)
 {
+    pw_init(NULL, NULL);
 }
 
 VideoEncoder::~VideoEncoder()
 {
     stop();
+    pw_deinit();
 }
 
 void VideoEncoder::start()
@@ -30,10 +57,10 @@ void VideoEncoder::stop()
     if (!running.load())
         return;
     running = false;
+    if (pw_loop)
+        pw_main_loop_quit(pw_loop);
     if (worker_thread.joinable())
-    {
         worker_thread.join();
-    }
 }
 
 void VideoEncoder::force_keyframe()
@@ -41,81 +68,61 @@ void VideoEncoder::force_keyframe()
     request_keyframe = true;
 }
 
-int VideoEncoder::get_desktop_width() const
+bool VideoEncoder::init_pipewire()
 {
-    return capture_w;
-}
-int VideoEncoder::get_desktop_height() const
-{
-    return capture_h;
-}
-int VideoEncoder::get_scaled_w() const
-{
-    return scaled_w;
-}
-int VideoEncoder::get_scaled_h() const
-{
-    return scaled_h;
-}
-int VideoEncoder::get_offset_x() const
-{
-    return offset_x;
-}
-int VideoEncoder::get_offset_y() const
-{
-    return offset_y;
-}
-
-bool VideoEncoder::init_x11()
-{
-    const char* disp_env = getenv("DISPLAY");
-    if (!disp_env)
-        setenv("DISPLAY", ":0", 1);
-
-    dpy = XOpenDisplay(NULL);
-    if (!dpy)
+    pw_loop = pw_main_loop_new(NULL);
+    if (!pw_loop)
         return false;
 
-    root_window = DefaultRootWindow(dpy);
-    XWindowAttributes attributes;
-    XGetWindowAttributes(dpy, root_window, &attributes);
-    capture_w = attributes.width;
-    capture_h = attributes.height;
-    capture_x = 0;
-    capture_y = 0;
+    pw_ctx = pw_context_new(pw_main_loop_get_loop(pw_loop), NULL, 0);
+    pw_core = pw_context_connect(pw_ctx, NULL, 0);
+    if (!pw_core)
+        return false;
 
-    img = XShmCreateImage(dpy, DefaultVisual(dpy, DefaultScreen(dpy)), DefaultDepth(dpy, DefaultScreen(dpy)), ZPixmap,
-                          NULL, &shminfo, capture_w, capture_h);
-    shminfo.shmid = shmget(IPC_PRIVATE, img->bytes_per_line * img->height, IPC_CREAT | 0777);
-    shminfo.shmaddr = img->data = (char*)shmat(shminfo.shmid, 0, 0);
-    shminfo.readOnly = False;
-    XShmAttach(dpy, &shminfo);
+    pw_stream = pw_stream_new(pw_core, "OpenGAL Capture",
+                              pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture",
+                                                PW_KEY_MEDIA_ROLE, "Screen", NULL));
+
+    pw_stream_add_listener(pw_stream, &stream_listener, &stream_events, this);
+
+    uint8_t buffer[1024];
+    struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+    const struct spa_pod* params[1];
+
+    // C++ Safe Struct Instantiation (fixes the "taking address of rvalue" compiler error)
+    struct spa_video_info_raw info;
+    memset(&info, 0, sizeof(info));
+    info.format = SPA_VIDEO_FORMAT_BGRx;
+    info.size = SPA_RECTANGLE((uint32_t)target_width, (uint32_t)target_height);
+    info.framerate = SPA_FRACTION(60, 1);
+
+    params[0] = spa_format_video_raw_build(&b, SPA_PARAM_EnumFormat, &info);
+
+    pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, PW_ID_ANY,
+                      (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 1);
 
     return true;
 }
 
-void VideoEncoder::cleanup_x11()
+void VideoEncoder::cleanup_pipewire()
 {
-    if (img)
-    {
-        XShmDetach(dpy, &shminfo);
-        XSync(dpy, False);
-        XDestroyImage(img);
-        shmdt(shminfo.shmaddr);
-        shmctl(shminfo.shmid, IPC_RMID, 0);
-        img = nullptr;
-    }
-    if (dpy)
-    {
-        XCloseDisplay(dpy);
-        dpy = nullptr;
-    }
+    if (pw_stream)
+        pw_stream_destroy(pw_stream);
+    if (pw_core)
+        pw_core_disconnect(pw_core);
+    if (pw_ctx)
+        pw_context_destroy(pw_ctx);
+    if (pw_loop)
+        pw_main_loop_destroy(pw_loop);
+    pw_stream = nullptr;
+    pw_core = nullptr;
+    pw_ctx = nullptr;
+    pw_loop = nullptr;
 }
 
 bool VideoEncoder::init_encoder()
 {
     std::vector<std::string> encoder_names;
-
     if (global_video_codec_type == 7)
         encoder_names = {"hevc_v4l2m2m", "libx265", "hevc"};
     else
@@ -133,59 +140,31 @@ bool VideoEncoder::init_encoder()
         }
 
         codec_ctx = avcodec_alloc_context3(codec);
-        if (!codec_ctx)
-            continue;
-
         codec_ctx->width = target_width;
         codec_ctx->height = target_height;
-        codec_ctx->pix_fmt = AV_PIX_FMT_YUV420P; // FIX: Restored missing pixel format
-
-        // 1. Optimize for 60 FPS Capture
+        codec_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
         codec_ctx->time_base = {1, 60};
         codec_ctx->framerate = {60, 1};
-        codec_ctx->gop_size = 60; // 1-second keyframe interval at 60 FPS
+        codec_ctx->gop_size = 60;
         codec_ctx->max_b_frames = 0;
-
-        // 2. Enable Multi-threading
         codec_ctx->thread_count = std::max(1u, std::thread::hardware_concurrency());
         codec_ctx->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
-
-        // 3. Dynamic Bitrate Scaling (0.12 bits per pixel @ 60 FPS)
-        int calc_bitrate = static_cast<int>(target_width * target_height * 60 * 0.12);
-        codec_ctx->bit_rate = std::clamp(calc_bitrate, 6000000, 16000000);
+        codec_ctx->bit_rate = std::clamp(static_cast<int>(target_width * target_height * 60 * 0.12), 6000000, 16000000);
 
         if (std::string(codec->name) == "libx264" || std::string(codec->name) == "libx265")
         {
             av_opt_set(codec_ctx->priv_data, "preset", "ultrafast", 0);
             av_opt_set(codec_ctx->priv_data, "tune", "zerolatency", 0);
-            if (std::string(codec->name) == "libx264")
-                av_opt_set(codec_ctx->priv_data, "profile", "baseline", 0);
-        }
-        else if (std::string(codec->name) == "h264_v4l2m2m" || std::string(codec->name) == "hevc_v4l2m2m")
-        {
-            av_opt_set(codec_ctx->priv_data, "num_capture_buffers", "32", 0);
-            av_opt_set(codec_ctx->priv_data, "num_output_buffers", "32", 0);
         }
 
         if (avcodec_open2(codec_ctx, codec, NULL) >= 0)
             break;
-        else
-        {
-            avcodec_free_context(&codec_ctx);
-            codec = nullptr;
-        }
+        avcodec_free_context(&codec_ctx);
+        codec = nullptr;
     }
 
-    if (!codec_ctx || !codec)
+    if (!codec_ctx)
         return false;
-
-    int usable_w = std::max(2, target_width - global_video_margin_w);
-    int usable_h = std::max(2, target_height - global_video_margin_h);
-
-    scaled_w = usable_w & ~1;
-    scaled_h = usable_h & ~1;
-    offset_x = (global_video_margin_w / 2) & ~1;
-    offset_y = (global_video_margin_h / 2) & ~1;
 
     frame = av_frame_alloc();
     frame->format = codec_ctx->pix_fmt;
@@ -194,12 +173,8 @@ bool VideoEncoder::init_encoder()
     av_frame_get_buffer(frame, 32);
     pkt = av_packet_alloc();
 
-    // 4. Fast-path CPU scaling: If the desktop perfectly matches the target, use SWS_POINT (no scaling, just fast color
-    // conversion)
-    int sws_flags = (capture_w == scaled_w && capture_h == scaled_h) ? SWS_POINT : SWS_FAST_BILINEAR;
-
-    sws_ctx = sws_getContext(capture_w, capture_h, AV_PIX_FMT_BGRA, scaled_w, scaled_h, AV_PIX_FMT_YUV420P, sws_flags,
-                             NULL, NULL, NULL);
+    sws_ctx = sws_getContext(target_width, target_height, AV_PIX_FMT_BGRA, target_width, target_height,
+                             AV_PIX_FMT_YUV420P, SWS_FAST_BILINEAR, NULL, NULL, NULL);
 
     return true;
 }
@@ -207,57 +182,30 @@ bool VideoEncoder::init_encoder()
 void VideoEncoder::cleanup_encoder()
 {
     if (sws_ctx)
-    {
         sws_freeContext(sws_ctx);
-        sws_ctx = nullptr;
-    }
     if (frame)
-    {
         av_frame_free(&frame);
-        frame = nullptr;
-    }
     if (pkt)
-    {
         av_packet_free(&pkt);
-        pkt = nullptr;
-    }
     if (codec_ctx)
-    {
         avcodec_free_context(&codec_ctx);
-        codec_ctx = nullptr;
-    }
+    sws_ctx = nullptr;
+    frame = nullptr;
+    pkt = nullptr;
+    codec_ctx = nullptr;
 }
 
-void VideoEncoder::encode_frame(uint8_t* bgra_data, int stride)
+void VideoEncoder::process_pipewire_frame(void* bgra_data, int stride, int /*pw_w*/, int pw_h)
 {
-    for (int y = 0; y < codec_ctx->height; ++y)
-        memset(frame->data[0] + y * frame->linesize[0], 0, codec_ctx->width);
-    for (int y = 0; y < codec_ctx->height / 2; ++y)
-    {
-        memset(frame->data[1] + y * frame->linesize[1], 128, codec_ctx->width / 2);
-        memset(frame->data[2] + y * frame->linesize[2], 128, codec_ctx->width / 2);
-    }
-
-    const uint8_t* in_data[1] = {bgra_data};
+    const uint8_t* in_data[1] = {(uint8_t*)bgra_data};
     int in_linesize[1] = {stride};
-    uint8_t* dst_data[4] = {frame->data[0] + offset_y * frame->linesize[0] + offset_x,
-                            frame->data[1] + (offset_y / 2) * frame->linesize[1] + (offset_x / 2),
-                            frame->data[2] + (offset_y / 2) * frame->linesize[2] + (offset_x / 2), NULL};
-    int dst_linesize[4] = {frame->linesize[0], frame->linesize[1], frame->linesize[2], 0};
 
-    sws_scale(sws_ctx, in_data, in_linesize, 0, capture_h, dst_data, dst_linesize);
+    sws_scale(sws_ctx, in_data, in_linesize, 0, pw_h, frame->data, frame->linesize);
 
     frame->pts = frame_pts++;
-
-    if (request_keyframe.exchange(false))
-        frame->pict_type = AV_PICTURE_TYPE_I;
-    else
-        frame->pict_type = AV_PICTURE_TYPE_NONE;
+    frame->pict_type = request_keyframe.exchange(false) ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_NONE;
 
     int ret = avcodec_send_frame(codec_ctx, frame);
-    if (ret < 0)
-        return;
-
     while (ret >= 0)
     {
         ret = avcodec_receive_packet(codec_ctx, pkt);
@@ -275,26 +223,15 @@ void VideoEncoder::encode_frame(uint8_t* bgra_data, int stride)
 
 void VideoEncoder::capture_loop()
 {
-    if (!init_x11() || !init_encoder())
+    if (!init_encoder() || !init_pipewire())
     {
-        cleanup_x11();
         cleanup_encoder();
+        cleanup_pipewire();
         return;
     }
 
-    // 5. Target 60 FPS capture rate
-    auto frame_duration = std::chrono::microseconds(1000000 / 60);
-    while (running.load())
-    {
-        auto start_time = std::chrono::steady_clock::now();
-        XShmGetImage(dpy, root_window, img, capture_x, capture_y, AllPlanes);
-        encode_frame((uint8_t*)img->data, img->bytes_per_line);
-        auto elapsed =
-            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start_time);
-        if (elapsed < frame_duration)
-            std::this_thread::sleep_for(frame_duration - elapsed);
-    }
+    pw_main_loop_run(pw_loop);
 
-    cleanup_x11();
+    cleanup_pipewire();
     cleanup_encoder();
 }

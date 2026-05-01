@@ -5,6 +5,7 @@
 #include "input.pb.h"
 #include "media.pb.h"
 #include "sensors.pb.h"
+#include <cstdlib>
 #include <iostream>
 #include <map>
 
@@ -119,53 +120,34 @@ void process_service_discovery_response(uint8_t* payload_data, int payload_len)
                                                                   : MediaCodecType::MEDIA_CODEC_VIDEO_H264_BP;
                             int res_type = vc.has_codec_resolution() ? vc.codec_resolution() : 1;
 
-                            int cfg_w = 800, cfg_h = 480;
                             std::string res_str = "Unknown";
                             switch (res_type)
                             {
                                 case 1:
-                                    cfg_w = 800;
-                                    cfg_h = 480;
                                     res_str = "800x480";
                                     break;
                                 case 2:
-                                    cfg_w = 1280;
-                                    cfg_h = 720;
                                     res_str = "1280x720";
                                     break;
                                 case 3:
-                                    cfg_w = 1920;
-                                    cfg_h = 1080;
                                     res_str = "1920x1080";
                                     break;
                                 case 4:
-                                    cfg_w = 2560;
-                                    cfg_h = 1440;
                                     res_str = "2560x1440";
                                     break;
                                 case 5:
-                                    cfg_w = 3840;
-                                    cfg_h = 2160;
                                     res_str = "3840x2160";
                                     break;
                                 case 6:
-                                    cfg_w = 720;
-                                    cfg_h = 1280;
                                     res_str = "720x1280";
                                     break;
                                 case 7:
-                                    cfg_w = 1080;
-                                    cfg_h = 1920;
                                     res_str = "1080x1920";
                                     break;
                                 case 8:
-                                    cfg_w = 1440;
-                                    cfg_h = 2560;
                                     res_str = "1440x2560";
                                     break;
                                 case 9:
-                                    cfg_w = 2160;
-                                    cfg_h = 3840;
                                     res_str = "2160x3840";
                                     break;
                             }
@@ -173,23 +155,18 @@ void process_service_discovery_response(uint8_t* payload_data, int payload_len)
                             std::cout << "  - Index " << k << ": Resolution=" << res_str << ", Codec=" << codec
                                       << std::endl;
 
-                            int score = 0;
-
                             // Massively prefer H.264 natively since Pi lacks HEVC encode hardware
-                            if (codec == MediaCodecType::MEDIA_CODEC_VIDEO_H264_BP)
-                                score += 10000;
-                            else if (codec == MediaCodecType::MEDIA_CODEC_VIDEO_H265)
-                                score += 1000;
+                            int score = (codec == MediaCodecType::MEDIA_CODEC_VIDEO_H264_BP) ? 10000
+                                        : (codec == MediaCodecType::MEDIA_CODEC_VIDEO_H265)  ? 1000
+                                                                                             : 0;
 
-                            // Strongly prefer an EXACT resolution match to prevent distortion and black bars
-                            if (cfg_w == os_desktop_width && cfg_h == os_desktop_height)
-                                score += 5000;
+                            // We can now dynamically resize! So pick the highest quality UI supported.
+                            if (res_type == 3)
+                                score += 500; // 1080p
                             else if (res_type == 2)
-                                score += 500; // 720p 2nd Choice
-                            else if (res_type == 3)
-                                score += 300; // 1080p 3rd Choice
+                                score += 400; // 720p
                             else if (res_type == 1)
-                                score += 100; // 480p 4th Choice
+                                score += 100; // 480p
 
                             if (score > best_score)
                             {
@@ -200,8 +177,8 @@ void process_service_discovery_response(uint8_t* payload_data, int payload_len)
 
                         global_video_config_index = best_idx;
                         const auto& video_config = svc.media_sink_service().video_configs(best_idx);
-
                         int res_type = video_config.has_codec_resolution() ? video_config.codec_resolution() : 1;
+
                         switch (res_type)
                         {
                             case 1:
@@ -246,10 +223,17 @@ void process_service_discovery_response(uint8_t* payload_data, int payload_len)
                                 break;
                         }
 
-                        if (video_config.has_margin_width())
-                            global_video_margin_w = video_config.margin_width();
-                        if (video_config.has_margin_height())
-                            global_video_margin_h = video_config.margin_height();
+                        os_desktop_width = global_video_width;
+                        os_desktop_height = global_video_height;
+
+                        // Execute Shell Bridge to dynamically adapt Wayland/X11 to the Head Unit
+                        std::string cmd = "/usr/local/bin/resize_desktop.sh " + std::to_string(global_video_width) +
+                                          " " + std::to_string(global_video_height);
+                        system(cmd.c_str());
+
+                        // Assuming a perfect 1:1 resize, margins are eliminated!
+                        global_video_margin_w = 0;
+                        global_video_margin_h = 0;
 
                         int codec = video_config.has_video_codec_type() ? video_config.video_codec_type()
                                                                         : MediaCodecType::MEDIA_CODEC_VIDEO_H264_BP;

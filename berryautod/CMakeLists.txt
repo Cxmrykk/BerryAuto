@@ -8,7 +8,8 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(OPENSSL REQUIRED openssl)
 pkg_check_modules(PROTOBUF REQUIRED protobuf)
 pkg_check_modules(FFMPEG REQUIRED libavcodec libavutil libswscale)
-pkg_check_modules(X11 REQUIRED x11 xext xrandr xtst)
+pkg_check_modules(DBUS REQUIRED dbus-1)
+pkg_check_modules(PIPEWIRE REQUIRED libpipewire-0.3)
 
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS 
     "${CMAKE_SOURCE_DIR}/certs/android_auto.crt" 
@@ -38,7 +39,16 @@ foreach(PROTO_FILE ${PROTO_FILES})
     )
 endforeach()
 
-include_directories(${PROTO_BUILD_DIR} ${OPENSSL_INCLUDE_DIRS} ${PROTOBUF_INCLUDE_DIRS} ${FFMPEG_INCLUDE_DIRS} ${X11_INCLUDE_DIRS} src ${GENERATED_DIR})
+include_directories(
+    ${PROTO_BUILD_DIR} 
+    ${OPENSSL_INCLUDE_DIRS} 
+    ${PROTOBUF_INCLUDE_DIRS} 
+    ${FFMPEG_INCLUDE_DIRS} 
+    ${DBUS_INCLUDE_DIRS}
+    ${PIPEWIRE_INCLUDE_DIRS}
+    src 
+    ${GENERATED_DIR}
+)
 
 file(GLOB SOURCES "src/*.cpp")
 file(GLOB PROTO_SRCS "${PROTO_BUILD_DIR}/*.pb.cc")
@@ -48,6 +58,7 @@ target_link_libraries(opengal_emitter
     ${OPENSSL_LIBRARIES} 
     ${PROTOBUF_LIBRARIES} 
     ${FFMPEG_LIBRARIES}
-    ${X11_LIBRARIES}
+    ${DBUS_LIBRARIES}
+    ${PIPEWIRE_LIBRARIES}
     pthread
 )

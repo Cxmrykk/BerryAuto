@@ -1,82 +1,115 @@
 #include "input_handler.hpp"
 #include "globals.hpp"
-#include "video_encoder.hpp"
-#include "x11_wrapper.hpp"
+#include <cstring>
+#include <fcntl.h>
+#include <iostream>
+#include <linux/uinput.h>
+#include <unistd.h>
 
-static Display* input_dpy = nullptr;
+static int uinput_fd = -1;
+const int ABS_MAX_VAL = 65535;
+
+void init_uinput()
+{
+    if (uinput_fd >= 0)
+        return;
+
+    uinput_fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
+    if (uinput_fd < 0)
+    {
+        LOG_E("Failed to open /dev/uinput. Are you running as root?");
+        return;
+    }
+
+    ioctl(uinput_fd, UI_SET_EVBIT, EV_KEY);
+    ioctl(uinput_fd, UI_SET_KEYBIT, BTN_TOUCH);
+    ioctl(uinput_fd, UI_SET_EVBIT, EV_ABS);
+    ioctl(uinput_fd, UI_SET_ABSBIT, ABS_X);
+    ioctl(uinput_fd, UI_SET_ABSBIT, ABS_Y);
+    ioctl(uinput_fd, UI_SET_ABSBIT, ABS_MT_POSITION_X);
+    ioctl(uinput_fd, UI_SET_ABSBIT, ABS_MT_POSITION_Y);
+
+    struct uinput_user_dev uidev;
+    memset(&uidev, 0, sizeof(uidev));
+    snprintf(uidev.name, UINPUT_MAX_NAME_SIZE, "BerryAuto Virtual Touch");
+    uidev.id.bustype = BUS_USB;
+    uidev.id.vendor = 0x1234;
+    uidev.id.product = 0x5678;
+    uidev.id.version = 1;
+
+    // Abstract Kernel scale to generic 0-65535 resolution
+    uidev.absmin[ABS_X] = 0;
+    uidev.absmax[ABS_X] = ABS_MAX_VAL;
+    uidev.absmin[ABS_Y] = 0;
+    uidev.absmax[ABS_Y] = ABS_MAX_VAL;
+    uidev.absmin[ABS_MT_POSITION_X] = 0;
+    uidev.absmax[ABS_MT_POSITION_X] = ABS_MAX_VAL;
+    uidev.absmin[ABS_MT_POSITION_Y] = 0;
+    uidev.absmax[ABS_MT_POSITION_Y] = ABS_MAX_VAL;
+
+    write(uinput_fd, &uidev, sizeof(uidev));
+    ioctl(uinput_fd, UI_DEV_CREATE);
+}
+
+void emit_uinput(int type, int code, int val)
+{
+    struct input_event ie;
+    memset(&ie, 0, sizeof(ie));
+    ie.type = type;
+    ie.code = code;
+    ie.value = val;
+    write(uinput_fd, &ie, sizeof(ie));
+}
 
 void handle_touch_event(const com::andrerinas::headunitrevived::aap::protocol::proto::InputReport& report)
 {
-    std::lock_guard<std::recursive_mutex> lock(aap_mutex); // Fix #4: Thread safety on touch event pointers
+    std::lock_guard<std::recursive_mutex> lock(aap_mutex);
+    init_uinput();
 
-    if (report.has_touch_event() && video_streamer != nullptr)
+    if (uinput_fd < 0 || !report.has_touch_event() || report.touch_event().pointer_data_size() == 0)
+        return;
+
+    int action = report.touch_event().action();
+    int raw_x = report.touch_event().pointer_data(0).x();
+    int raw_y = report.touch_event().pointer_data(0).y();
+
+    // Android Auto gives us coordinates in the negotiated Input space. Map it linearly to uinput.
+    float ratio_x = (float)raw_x / global_touch_width;
+    float ratio_y = (float)raw_y / global_touch_height;
+
+    int mapped_x = (int)(ratio_x * ABS_MAX_VAL);
+    int mapped_y = (int)(ratio_y * ABS_MAX_VAL);
+
+    if (action == 0 || action == 5) // Down
     {
-        if (report.touch_event().pointer_data_size() == 0)
-            return; // Safety guard
-
-        int action = report.touch_event().action();
-        int x = report.touch_event().pointer_data(0).x();
-        int y = report.touch_event().pointer_data(0).y();
-
-        // 1. Map raw phone coordinates (Touch Space) -> Stream Coordinates (Video Space)
-        float video_x = (float)x * global_video_width / global_touch_width;
-        float video_y = (float)y * global_video_height / global_touch_height;
-
-        // 2. Remove the margin offset (Inside Video Space)
-        float local_x = video_x - video_streamer->get_offset_x();
-        float local_y = video_y - video_streamer->get_offset_y();
-
-        int mapped_x = 0;
-        int mapped_y = 0;
-
-        // 3. Map valid interior pixel touches over to the Pi's internal X11 desktop space
-        if (video_streamer->get_scaled_w() > 0 && video_streamer->get_scaled_h() > 0)
-        {
-            mapped_x = (int)((local_x / video_streamer->get_scaled_w()) * video_streamer->get_desktop_width());
-            mapped_y = (int)((local_y / video_streamer->get_scaled_h()) * video_streamer->get_desktop_height());
-        }
-
-        // Clip constraints (ignore accidental touches in the black bar zones)
-        if (mapped_x < 0)
-            mapped_x = 0;
-        if (mapped_y < 0)
-            mapped_y = 0;
-        if (mapped_x > video_streamer->get_desktop_width())
-            mapped_x = video_streamer->get_desktop_width();
-        if (mapped_y > video_streamer->get_desktop_height())
-            mapped_y = video_streamer->get_desktop_height();
-
-        if (!input_dpy)
-        {
-            input_dpy = XOpenDisplay(NULL);
-        }
-
-        if (input_dpy)
-        {
-            if (action == 0 || action == 5)
-            {
-                XTestFakeMotionEvent(input_dpy, -1, mapped_x, mapped_y, CurrentTime);
-                XTestFakeButtonEvent(input_dpy, 1, True, CurrentTime);
-            }
-            else if (action == 1 || action == 6)
-            {
-                XTestFakeMotionEvent(input_dpy, -1, mapped_x, mapped_y, CurrentTime);
-                XTestFakeButtonEvent(input_dpy, 1, False, CurrentTime);
-            }
-            else if (action == 2)
-            {
-                XTestFakeMotionEvent(input_dpy, -1, mapped_x, mapped_y, CurrentTime);
-            }
-            XFlush(input_dpy);
-        }
+        emit_uinput(EV_ABS, ABS_X, mapped_x);
+        emit_uinput(EV_ABS, ABS_Y, mapped_y);
+        emit_uinput(EV_ABS, ABS_MT_POSITION_X, mapped_x);
+        emit_uinput(EV_ABS, ABS_MT_POSITION_Y, mapped_y);
+        emit_uinput(EV_KEY, BTN_TOUCH, 1);
+        emit_uinput(EV_SYN, SYN_REPORT, 0);
+    }
+    else if (action == 1 || action == 6) // Up
+    {
+        emit_uinput(EV_KEY, BTN_TOUCH, 0);
+        emit_uinput(EV_SYN, SYN_REPORT, 0);
+    }
+    else if (action == 2) // Move
+    {
+        emit_uinput(EV_ABS, ABS_X, mapped_x);
+        emit_uinput(EV_ABS, ABS_Y, mapped_y);
+        emit_uinput(EV_ABS, ABS_MT_POSITION_X, mapped_x);
+        emit_uinput(EV_ABS, ABS_MT_POSITION_Y, mapped_y);
+        emit_uinput(EV_SYN, SYN_REPORT, 0);
     }
 }
 
 void cleanup_input()
 {
-    if (input_dpy)
+    if (uinput_fd >= 0)
     {
-        XCloseDisplay(input_dpy);
-        input_dpy = nullptr;
+        ioctl(uinput_fd, UI_DEV_DESTROY);
+        close(uinput_fd);
+        uinput_fd = -1;
     }
 }

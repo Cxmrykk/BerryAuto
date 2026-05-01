@@ -22,7 +22,6 @@
 #include "input_handler.hpp"
 #include "message_handler.hpp"
 #include "video_encoder.hpp"
-#include "x11_wrapper.hpp"
 
 // Global Instantiations
 int ep_in, ep_out;
@@ -198,29 +197,10 @@ void ep0_thread(int ep0)
 
 int main()
 {
-    XInitThreads();
-
     LOG_I("Starting OpenGAL Emitter...");
 
-    const char* disp_env = getenv("DISPLAY");
-    if (!disp_env)
-        setenv("DISPLAY", ":0", 1);
-
-    Display* d = XOpenDisplay(NULL);
-    if (d)
-    {
-        int screen = DefaultScreen(d);
-        os_desktop_width = DisplayWidth(d, screen);
-        os_desktop_height = DisplayHeight(d, screen);
-        XCloseDisplay(d);
-        LOG_I("Detected OS Desktop Resolution: " << os_desktop_width << "x" << os_desktop_height);
-    }
-    else
-    {
-        LOG_E("Failed to open X11 Display. Defaulting to 800x480.");
-        os_desktop_width = 800;
-        os_desktop_height = 480;
-    }
+    os_desktop_width = 800;
+    os_desktop_height = 480;
 
     SSL_library_init();
     SSL_load_error_strings();
