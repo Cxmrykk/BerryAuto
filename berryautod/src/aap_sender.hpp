@@ -4,7 +4,7 @@
 #include <vector>
 
 void flush_usb_tx_queue();
-int get_media_tx_queue_size();
+bool is_tx_busy(); // New: Checks if the USB hardware is actively transmitting
 
 void send_unencrypted(uint8_t channel, uint8_t flags, uint16_t type, const std::vector<uint8_t>& payload);
 void ssl_write_and_flush_unlocked(const std::vector<uint8_t>& pt, uint8_t target_channel = 0,

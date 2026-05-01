@@ -127,13 +127,13 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
         return;
     }
 
-    // PRE-EMPTIVE HEAD-OF-LINE BLOCKING PREVENTION
-    // If the USB queue has even ONE frame waiting to be transmitted, drop this frame.
-    // This absolutely guarantees that the USB pipeline stays empty for Pings!
-    if (get_media_tx_queue_size() >= 1)
+    // STRICT LATENCY CONTROL:
+    // If the USB hardware is actively sending ANY data (like a previous video frame),
+    // we DROP this frame entirely. This guarantees the pipe is free when the Head Unit Pings!
+    if (is_tx_busy())
     {
         if (video_streamer)
-            video_streamer->force_keyframe();
+            video_streamer->force_keyframe(); // Recover immediately on the next pass
         return;
     }
 
