@@ -67,23 +67,11 @@ void flush_usb_tx_queue()
     std::swap(tx_queue, empty);
 }
 
-int get_media_tx_queue_size()
+// FIX: Properly expose the queue size to the Video Sender's Recovery State Machine
+int get_tx_queue_size()
 {
     std::lock_guard<std::mutex> lock(queue_mutex);
     return tx_queue.size();
-}
-
-void enqueue_batch(std::vector<std::vector<uint8_t>>& batch)
-{
-    if (batch.empty())
-        return;
-
-    init_tx_thread();
-    {
-        std::lock_guard<std::mutex> lock(queue_mutex);
-        tx_queue.push(std::move(batch));
-    }
-    queue_cv.notify_one();
 }
 
 void build_chunk(std::vector<std::vector<uint8_t>>& batch, const std::vector<uint8_t>& pt, uint8_t target_channel,
@@ -93,9 +81,7 @@ void build_chunk(std::vector<std::vector<uint8_t>>& batch, const std::vector<uin
     uint16_t len_field = pt.size();
 
     if ((flags & 0x03) == 0x01)
-    {
         len_field += 4;
-    }
 
     out.push_back(target_channel);
     out.push_back(flags);
@@ -163,8 +149,9 @@ void flush_ssl_buffers()
 {
     init_tx_thread();
 
-    // STRICT SIMULTANEOUS LOCK: Enforces flawless TLS ordering!
+    // SIMULTANEOUS LOCK: Enforces flawless TLS ordering!
     std::lock_guard<std::recursive_mutex> aap_lock(aap_mutex);
+    std::lock_guard<std::mutex> tx_lock(queue_mutex);
 
     int pending = BIO_ctrl_pending(wbio);
     if (pending > 0)
@@ -194,7 +181,8 @@ void flush_ssl_buffers()
         out.insert(out.end(), tls_record.begin(), tls_record.end());
 
         std::vector<std::vector<uint8_t>> batch = {out};
-        enqueue_batch(batch); // Queued while holding AAP lock!
+        tx_queue.push(std::move(batch));
+        queue_cv.notify_one();
     }
 }
 
@@ -214,8 +202,11 @@ void send_unencrypted(uint8_t channel, uint16_t type, const std::vector<uint8_t>
     out.push_back(type & 0xFF);
     out.insert(out.end(), payload.begin(), payload.end());
 
+    init_tx_thread();
+    std::lock_guard<std::mutex> tx_lock(queue_mutex);
     std::vector<std::vector<uint8_t>> batch = {out};
-    enqueue_batch(batch);
+    tx_queue.push(std::move(batch));
+    queue_cv.notify_one();
 }
 
 void send_message(uint8_t channel, uint16_t type, const google::protobuf::Message& proto_msg)
@@ -231,42 +222,49 @@ void send_message(uint8_t channel, uint16_t type, const google::protobuf::Messag
 
     std::vector<std::vector<uint8_t>> batch;
 
-    // STRICT LOCK: Ties TLS Sequence generation to TX Queue insertion.
-    // Absolutely prevents Touch Events (Ch 3) from racing Video Frames (Ch 2)!
-    std::lock_guard<std::recursive_mutex> aap_lock(aap_mutex);
-
-    std::vector<uint8_t> pt;
-    pt.push_back((type >> 8) & 0xFF);
-    pt.push_back(type & 0xFF);
-    pt.insert(pt.end(), serialized.begin(), serialized.end());
-
-    SSL_write(ssl, pt.data(), pt.size());
-    int pending = BIO_ctrl_pending(wbio);
-    if (pending > 0)
+    init_tx_thread();
     {
-        std::vector<uint8_t> ciphertext(pending);
-        BIO_read(wbio, ciphertext.data(), pending);
+        // STRICT LOCK: Ties TLS Sequence generation to TX Queue insertion.
+        // Absolutely prevents Touch Events (Ch 3) from racing Video Frames (Ch 2)!
+        std::lock_guard<std::recursive_mutex> aap_lock(aap_mutex);
+        std::lock_guard<std::mutex> tx_lock(queue_mutex);
 
-        uint8_t flag = 0x0B;
-        if (channel != 0 && type <= 26)
-            flag = 0x0F;
+        std::vector<uint8_t> pt;
+        pt.push_back((type >> 8) & 0xFF);
+        pt.push_back(type & 0xFF);
+        pt.insert(pt.end(), serialized.begin(), serialized.end());
 
-        build_chunk(batch, ciphertext, channel, flag, 0);
-    }
+        SSL_write(ssl, pt.data(), pt.size());
+        int pending = BIO_ctrl_pending(wbio);
+        if (pending > 0)
+        {
+            std::vector<uint8_t> ciphertext(pending);
+            BIO_read(wbio, ciphertext.data(), pending);
 
-    if (!batch.empty())
-    {
-        enqueue_batch(batch); // Inserted while holding AAP lock!
+            uint8_t flag = 0x0B;
+            if (channel != 0 && type <= 26)
+                flag = 0x0F;
+
+            build_chunk(batch, ciphertext, channel, flag, 0);
+        }
+
+        if (!batch.empty())
+        {
+            tx_queue.push(std::move(batch));
+            queue_cv.notify_one();
+        }
     }
 }
 
 bool send_media_payload(uint8_t channel, const std::vector<uint8_t>& pt)
 {
+    init_tx_thread();
     std::vector<std::vector<uint8_t>> batch;
 
     {
         // STRICT LOCK: Serializes TLS Encryption AND Queue Insertion!
         std::lock_guard<std::recursive_mutex> aap_lock(aap_mutex);
+        std::lock_guard<std::mutex> tx_lock(queue_mutex);
 
         if (ssl_bypassed)
         {
@@ -286,7 +284,8 @@ bool send_media_payload(uint8_t channel, const std::vector<uint8_t>& pt)
 
         if (!batch.empty())
         {
-            enqueue_batch(batch); // Queued while holding AAP lock = Sequence Guaranteed!
+            tx_queue.push(std::move(batch));
+            queue_cv.notify_one();
         }
     }
 
