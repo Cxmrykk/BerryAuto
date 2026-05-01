@@ -23,14 +23,9 @@ void send_video_frame_internal(const std::vector<uint8_t>& nal_data, uint64_t ti
 
     pt.insert(pt.end(), nal_data.begin(), nal_data.end());
 
-    if (ssl_bypassed)
-    {
-        aap_send_raw(pt, video_channel_id, 0x03, 0); // 0x03 = Unencrypted
-    }
-    else
-    {
-        ssl_write_and_flush_unlocked(pt, video_channel_id, 0x0B, 0); // 0x0B = Encrypted
-    }
+    // CRITICAL: Raw Media payloads MUST NOT be encrypted!
+    // We force the 0x00 base flag (Unencrypted Data) regardless of SSL status.
+    aap_send_raw(pt, video_channel_id, 0x00, 0);
 
     video_unacked_count++;
 }
@@ -125,14 +120,9 @@ void inject_cached_video_config()
     pt.insert(pt.end(), config_copy.begin(), config_copy.end());
 
     LOG_I(">>> Sending CODEC_CONFIG to Head Unit (" << config_copy.size() << " bytes)... <<<");
-    if (ssl_bypassed)
-    {
-        aap_send_raw(pt, video_channel_id, 0x03, 0);
-    }
-    else
-    {
-        ssl_write_and_flush_unlocked(pt, video_channel_id, 0x0B, 0);
-    }
+
+    // CRITICAL: Codec Configs are part of the Media Payload and MUST NOT be encrypted!
+    aap_send_raw(pt, video_channel_id, 0x00, 0);
 }
 
 void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
