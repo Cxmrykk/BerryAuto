@@ -2,6 +2,7 @@
 #include "control.pb.h"
 #include "globals.hpp"
 #include <algorithm>
+#include <iostream>
 #include <mutex>
 #include <unistd.h>
 
@@ -50,6 +51,11 @@ void write_fragmented_packet(const std::vector<uint8_t>& payload, uint8_t target
         out.push_back((len_field >> 8) & 0xFF);
         out.push_back(len_field & 0xFF);
         out.insert(out.end(), payload.begin(), payload.end());
+
+        std::cout << "[DEBUG-TX] " << (is_encrypted ? "Encrypted" : "Unencrypted")
+                  << " - Channel: " << (int)target_channel << " Flags: 0x" << std::hex << (int)flag << std::dec
+                  << " Size: " << out.size() << std::endl;
+
         write_to_usb(out);
     }
     else
@@ -96,6 +102,10 @@ void write_fragmented_packet(const std::vector<uint8_t>& payload, uint8_t target
 
             offset += chunk_size;
         }
+
+        std::cout << "[DEBUG-TX] " << (is_encrypted ? "Encrypted" : "Unencrypted")
+                  << " (Fragmented) - Channel: " << (int)target_channel << " Total Payload Size: " << out_payload.size()
+                  << std::endl;
 
         // Write all fragments at once atomically to prevent interleaving
         write_to_usb(out_payload);
@@ -159,8 +169,8 @@ void send_message(uint8_t channel, uint16_t type, const google::protobuf::Messag
     std::cout << "[DEBUG] SEND Channel: " << (int)channel << " Type: " << type << " Size: " << serialized.size()
               << std::endl;
 
-    // FIX 2: All Protobuf messages are Control Messages.
-    bool is_control = true;
+    // FIX: Only messages < 0x8000 get the 0x04 Control Message flag.
+    bool is_control = (type < 0x8000);
 
     std::vector<uint8_t> pt;
     pt.push_back((type >> 8) & 0xFF);
@@ -179,8 +189,15 @@ void send_message(uint8_t channel, uint16_t type, const google::protobuf::Messag
 
 void send_media_message(uint8_t channel, const std::vector<uint8_t>& payload)
 {
-    // FIX 1: Media Payloads (Video/Audio/Codec Configs) are Data Messages, and must NEVER be encrypted.
-    write_fragmented_packet(payload, channel, false, false);
+    // FIX: Media Payloads (Video/Audio/Codec Configs) MUST be encrypted when TLS is enabled.
+    if (ssl_bypassed)
+    {
+        write_fragmented_packet(payload, channel, false, false);
+    }
+    else
+    {
+        send_encrypted_message(channel, false, payload);
+    }
 }
 
 void send_version_response(uint16_t major, uint16_t minor)
