@@ -69,8 +69,6 @@ int get_tx_queue_size()
     return tx_queue.size();
 }
 
-// Master packet builder. Because video is sliced into 14KB chunks before arriving here,
-// EVERY message is guaranteed to fit in a single Unfragmented AAP packet!
 void queue_packet(uint8_t channel, bool is_encrypted, bool is_control, const std::vector<uint8_t>& plaintext)
 {
     init_tx_thread();
@@ -156,14 +154,13 @@ void flush_ssl_buffers()
     }
 }
 
-void send_unencrypted(uint8_t channel, uint8_t flags, uint16_t type, const std::vector<uint8_t>& payload)
+void send_unencrypted(uint8_t channel, uint16_t type, const std::vector<uint8_t>& payload)
 {
     std::vector<uint8_t> pt;
     pt.push_back(type >> 8);
     pt.push_back(type & 0xFF);
     pt.insert(pt.end(), payload.begin(), payload.end());
 
-    // Handshake messages are unencrypted
     queue_packet(channel, false, true, pt);
 }
 
@@ -171,6 +168,12 @@ void send_message(uint8_t channel, uint16_t type, const google::protobuf::Messag
 {
     std::vector<uint8_t> serialized(proto_msg.ByteSizeLong());
     proto_msg.SerializeToArray(serialized.data(), serialized.size());
+
+    if (ssl_bypassed)
+    {
+        send_unencrypted(channel, type, serialized);
+        return;
+    }
 
     std::vector<uint8_t> pt;
     pt.push_back(type >> 8);
@@ -183,6 +186,5 @@ void send_message(uint8_t channel, uint16_t type, const google::protobuf::Messag
 
 void send_media_payload(uint8_t channel, const std::vector<uint8_t>& pt)
 {
-    // Video slices arrive here pre-chunked to 14KB!
     queue_packet(channel, true, false, pt);
 }
