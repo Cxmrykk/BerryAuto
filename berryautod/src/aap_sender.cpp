@@ -28,47 +28,63 @@ void write_to_usb(const std::vector<uint8_t>& data)
     }
 }
 
-void write_fragmented_packet(const std::vector<uint8_t>& payload, uint8_t target_channel, bool is_encrypted,
-                             bool is_control)
+// The master framing function that perfectly mirrors the official Android Auto spec
+void send_aap_message(uint8_t channel, bool is_encrypted, bool is_control, const std::vector<uint8_t>& plaintext)
 {
     uint8_t base_flag = 0;
     if (is_encrypted)
         base_flag |= 0x08;
 
-    // Channel 0 is implicitly a control channel, so the 0x04 flag is only needed for service channels
-    if (is_control && target_channel != 0)
+    // Channel 0 is implicitly a control channel, so the 0x04 flag is only required for service channels
+    if (is_control && channel != 0)
         base_flag |= 0x04;
 
-    const size_t MAX_CHUNK_SIZE = 16000;
+    const size_t MAX_PAYLOAD_SIZE = 16000;
+    std::vector<uint8_t> final_usb_payload;
 
-    if (payload.size() <= MAX_CHUNK_SIZE)
+    if (plaintext.size() <= MAX_PAYLOAD_SIZE)
     {
-        uint8_t flag = base_flag | 0x03; // Unfragmented
-        uint16_t len_field = payload.size();
-        std::vector<uint8_t> out;
-        out.push_back(target_channel);
-        out.push_back(flag);
-        out.push_back((len_field >> 8) & 0xFF);
-        out.push_back(len_field & 0xFF);
-        out.insert(out.end(), payload.begin(), payload.end());
+        uint8_t flag = base_flag | 0x03; // 0x03 = Unfragmented
 
-        std::cout << "[DEBUG-TX] " << (is_encrypted ? "Encrypted" : "Unencrypted")
-                  << " - Channel: " << (int)target_channel << " Flags: 0x" << std::hex << (int)flag << std::dec
-                  << " Size: " << out.size() << std::endl;
+        std::vector<uint8_t> payload_to_send;
+        if (is_encrypted)
+        {
+            std::lock_guard<std::recursive_mutex> lock(aap_mutex);
+            SSL_write(ssl, plaintext.data(), plaintext.size());
+            int pending = BIO_ctrl_pending(wbio);
+            if (pending > 0)
+            {
+                payload_to_send.resize(pending);
+                BIO_read(wbio, payload_to_send.data(), pending);
+            }
+        }
+        else
+        {
+            payload_to_send = plaintext;
+        }
 
-        write_to_usb(out);
+        uint16_t len_field = payload_to_send.size();
+        final_usb_payload.push_back(channel);
+        final_usb_payload.push_back(flag);
+        final_usb_payload.push_back((len_field >> 8) & 0xFF);
+        final_usb_payload.push_back(len_field & 0xFF);
+        final_usb_payload.insert(final_usb_payload.end(), payload_to_send.begin(), payload_to_send.end());
     }
     else
     {
-        std::vector<uint8_t> out_payload;
-        uint32_t total_size = payload.size();
+        uint32_t total_size = plaintext.size();
         size_t offset = 0;
 
         while (offset < total_size)
         {
-            size_t remain = total_size - offset;
-            size_t chunk_size = std::min(remain, MAX_CHUNK_SIZE);
             bool is_first = (offset == 0);
+            size_t max_chunk = MAX_PAYLOAD_SIZE;
+
+            // Leave 4 bytes of room for the total_size header in the first fragment
+            if (is_first)
+                max_chunk -= 4;
+
+            size_t chunk_size = std::min(total_size - offset, max_chunk);
             bool is_last = (offset + chunk_size >= total_size);
 
             uint8_t flag = base_flag;
@@ -79,37 +95,51 @@ void write_fragmented_packet(const std::vector<uint8_t>& payload, uint8_t target
             else
                 flag |= 0x00;
 
-            uint16_t len_field = chunk_size;
-            if (is_first)
-                len_field += 4;
-
-            std::vector<uint8_t> chunk;
-            chunk.push_back(target_channel);
-            chunk.push_back(flag);
-            chunk.push_back((len_field >> 8) & 0xFF);
-            chunk.push_back(len_field & 0xFF);
-
+            // 1. Build the plaintext chunk
+            std::vector<uint8_t> frag_plaintext;
             if (is_first)
             {
-                chunk.push_back((total_size >> 24) & 0xFF);
-                chunk.push_back((total_size >> 16) & 0xFF);
-                chunk.push_back((total_size >> 8) & 0xFF);
-                chunk.push_back(total_size & 0xFF);
+                // The Total Size goes inside the encrypted payload of the FIRST fragment ONLY
+                frag_plaintext.push_back((total_size >> 24) & 0xFF);
+                frag_plaintext.push_back((total_size >> 16) & 0xFF);
+                frag_plaintext.push_back((total_size >> 8) & 0xFF);
+                frag_plaintext.push_back(total_size & 0xFF);
+            }
+            frag_plaintext.insert(frag_plaintext.end(), plaintext.begin() + offset,
+                                  plaintext.begin() + offset + chunk_size);
+
+            // 2. Encrypt the individual chunk (creates an isolated TLS record)
+            std::vector<uint8_t> payload_to_send;
+            if (is_encrypted)
+            {
+                std::lock_guard<std::recursive_mutex> lock(aap_mutex);
+                SSL_write(ssl, frag_plaintext.data(), frag_plaintext.size());
+                int pending = BIO_ctrl_pending(wbio);
+                if (pending > 0)
+                {
+                    payload_to_send.resize(pending);
+                    BIO_read(wbio, payload_to_send.data(), pending);
+                }
+            }
+            else
+            {
+                payload_to_send = frag_plaintext;
             }
 
-            chunk.insert(chunk.end(), payload.begin() + offset, payload.begin() + offset + chunk_size);
-            out_payload.insert(out_payload.end(), chunk.begin(), chunk.end());
+            // 3. Wrap the TLS record in an AAP Header
+            uint16_t len_field = payload_to_send.size();
+            final_usb_payload.push_back(channel);
+            final_usb_payload.push_back(flag);
+            final_usb_payload.push_back((len_field >> 8) & 0xFF);
+            final_usb_payload.push_back(len_field & 0xFF);
+            final_usb_payload.insert(final_usb_payload.end(), payload_to_send.begin(), payload_to_send.end());
 
             offset += chunk_size;
         }
-
-        std::cout << "[DEBUG-TX] " << (is_encrypted ? "Encrypted" : "Unencrypted")
-                  << " (Fragmented) - Channel: " << (int)target_channel << " Total Payload Size: " << out_payload.size()
-                  << std::endl;
-
-        // Write all fragments at once atomically to prevent interleaving
-        write_to_usb(out_payload);
     }
+
+    // 4. Atomically write the ENTIRE sequence of fragments to USB to prevent interleaving
+    write_to_usb(final_usb_payload);
 }
 
 void ssl_write_and_flush_handshake()
@@ -133,31 +163,9 @@ void ssl_write_and_flush_handshake()
         pt.push_back((ControlMsgType::MESSAGE_ENCAPSULATED_SSL >> 8) & 0xFF);
         pt.push_back(ControlMsgType::MESSAGE_ENCAPSULATED_SSL & 0xFF);
         pt.insert(pt.end(), ciphertext.begin(), ciphertext.end());
-        write_fragmented_packet(pt, 0, false, false);
-    }
-}
 
-void send_encrypted_message(uint8_t channel, bool is_control, const std::vector<uint8_t>& pt)
-{
-    std::vector<uint8_t> ciphertext;
-    {
-        std::lock_guard<std::recursive_mutex> lock(aap_mutex);
-        if (!pt.empty())
-        {
-            SSL_write(ssl, pt.data(), pt.size());
-        }
-        int pending = BIO_ctrl_pending(wbio);
-        while (pending > 0)
-        {
-            std::vector<uint8_t> temp(pending);
-            BIO_read(wbio, temp.data(), pending);
-            ciphertext.insert(ciphertext.end(), temp.begin(), temp.end());
-            pending = BIO_ctrl_pending(wbio);
-        }
-    }
-    if (!ciphertext.empty())
-    {
-        write_fragmented_packet(ciphertext, channel, true, is_control);
+        // Handshake TLS records are sent unencrypted over AAP Channel 0
+        send_aap_message(0, false, false, pt);
     }
 }
 
@@ -166,10 +174,7 @@ void send_message(uint8_t channel, uint16_t type, const google::protobuf::Messag
     std::vector<uint8_t> serialized(proto_msg.ByteSizeLong());
     proto_msg.SerializeToArray(serialized.data(), serialized.size());
 
-    std::cout << "[DEBUG] SEND Channel: " << (int)channel << " Type: " << type << " Size: " << serialized.size()
-              << std::endl;
-
-    // FIX: Only messages < 0x8000 get the 0x04 Control Message flag.
+    // In AAP, all Protocol Buffer messages are considered "Control Messages" (Type < 0x8000)
     bool is_control = (type < 0x8000);
 
     std::vector<uint8_t> pt;
@@ -177,27 +182,13 @@ void send_message(uint8_t channel, uint16_t type, const google::protobuf::Messag
     pt.push_back(type & 0xFF);
     pt.insert(pt.end(), serialized.begin(), serialized.end());
 
-    if (ssl_bypassed)
-    {
-        write_fragmented_packet(pt, channel, false, is_control);
-    }
-    else
-    {
-        send_encrypted_message(channel, is_control, pt);
-    }
+    send_aap_message(channel, !ssl_bypassed, is_control, pt);
 }
 
 void send_media_message(uint8_t channel, const std::vector<uint8_t>& payload)
 {
-    // FIX: Media Payloads (Video/Audio/Codec Configs) MUST be encrypted when TLS is enabled.
-    if (ssl_bypassed)
-    {
-        write_fragmented_packet(payload, channel, false, false);
-    }
-    else
-    {
-        send_encrypted_message(channel, false, payload);
-    }
+    // Media Payloads (Video/Audio/Config) are "Data Messages" (Not Control) and are encrypted if TLS is active.
+    send_aap_message(channel, !ssl_bypassed, false, payload);
 }
 
 void send_version_response(uint16_t major, uint16_t minor)
@@ -213,5 +204,5 @@ void send_version_response(uint16_t major, uint16_t minor)
     pt.push_back(0x00);
     pt.push_back(0x00);
 
-    write_fragmented_packet(pt, 0, false, false);
+    send_aap_message(0, false, false, pt);
 }
