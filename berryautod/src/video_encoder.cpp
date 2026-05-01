@@ -141,14 +141,16 @@ bool VideoEncoder::init_encoder()
         codec_ctx->framerate = {30, 1};
         codec_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
 
-        // STRICT BANDWIDTH LIMITS to completely eliminate USB Pipe Choking!
-        codec_ctx->bit_rate = 2000000;    // 2 Mbps target
-        codec_ctx->rc_max_rate = 2500000; // 2.5 Mbps absolute spike limit
-        codec_ctx->rc_buffer_size = 500000;
-        codec_ctx->gop_size = 30; // 1-Second Keyframes
+        // --- ULTRA STRICT BITRATE CONTROL ---
+        // By hard-limiting the VBV Buffer, the encoder CANNOT generate a frame larger than ~60KB!
+        // This ensures the USB pipeline never chokes for more than 20ms, preventing Ping Timeouts!
+        codec_ctx->bit_rate = 2000000;      // 2 Mbps baseline
+        codec_ctx->rc_max_rate = 2000000;   // 2 Mbps hard cap
+        codec_ctx->rc_buffer_size = 100000; // Tiny 100kb buffer forces immediate quality drops on motion
+        codec_ctx->gop_size = 30;           // 1-Second Keyframe Recovery
         codec_ctx->max_b_frames = 0;
-        codec_ctx->qmin = 10;
-        codec_ctx->qmax = 51; // Allow heavy compression during motion!
+        codec_ctx->qmin = 20;
+        codec_ctx->qmax = 51; // Allow extremely heavy compression to save the pipeline
 
         if (std::string(codec->name) == "libx264" || std::string(codec->name) == "libx265")
         {

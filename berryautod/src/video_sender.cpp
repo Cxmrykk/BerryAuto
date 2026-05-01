@@ -11,7 +11,23 @@ std::mutex config_mutex;
 std::vector<uint8_t> cached_config_nal;
 bool has_cached_config = false;
 
-static bool is_recovering = false;
+// Keeps track of consecutive drops so we know when to request a Keyframe
+int consecutive_drops = 0;
+
+void send_video_frame_internal(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
+{
+    std::vector<uint8_t> pt;
+    pt.push_back(0x00);
+    pt.push_back(0x00);
+    for (int i = 7; i >= 0; --i)
+    {
+        pt.push_back((timestamp >> (i * 8)) & 0xFF);
+    }
+    pt.insert(pt.end(), nal_data.begin(), nal_data.end());
+
+    send_media_payload(video_channel_id, pt);
+    video_unacked_count++;
+}
 
 void extract_and_cache_sps_pps(const std::vector<uint8_t>& frame)
 {
@@ -91,10 +107,7 @@ void inject_cached_video_config()
 void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
 {
     if (!(is_tls_connected || ssl_bypassed) || !video_channel_ready || !is_video_streaming.load())
-    {
-        is_recovering = false;
         return;
-    }
 
     if (!has_cached_config)
     {
@@ -103,70 +116,26 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
             inject_cached_video_config();
     }
 
-    // --- DRAIN & RECOVER STATE MACHINE ---
-    if (is_recovering)
-    {
-        // Wait for the TX queue to hit 0 AND for the car to catch up on ACKs
-        if (get_media_tx_queue_size() > 0 || video_unacked_count.load() >= max_video_unacked)
-        {
-            return; // Silently drop frame, wait for pipeline to drain
-        }
+    // --- INSTANT DROP POLICY ---
+    // Instead of waiting 1000ms for ACKs (which blocks the thread and kills Pings),
+    // we check the queue size instantly. If the pipe is busy, we throw the frame in the trash.
+    bool pipe_full = get_media_tx_queue_size() > 0 || video_unacked_count.load() >= max_video_unacked;
 
-        // Pipeline is completely clear! Request a fresh Keyframe to resume.
-        if (video_streamer)
-            video_streamer->force_keyframe();
-        is_recovering = false;
-        LOG_I("[RECOVERY] USB Pipeline is clear. Requesting Keyframe to resume stream.");
-        return;
+    if (pipe_full)
+    {
+        consecutive_drops++;
+        return; // Return immediately to keep the thread alive!
     }
 
-    // Pre-emptive USB Queue Check
-    if (get_media_tx_queue_size() >= 2)
+    // If we dropped frames previously, the decoder is desynced.
+    // Force a keyframe now to repair the stream!
+    if (consecutive_drops > 0 && video_streamer)
     {
-        LOG_E("[WARNING] USB Queue Congested! Entering Recovery Mode.");
-        is_recovering = true;
-        return;
+        video_streamer->force_keyframe();
+        consecutive_drops = 0;
     }
 
-    // Car ACK Check
-    int wait_cycles = 0;
-    while (is_video_streaming.load() && video_unacked_count.load() >= max_video_unacked && wait_cycles < 250)
-    {
-        std::this_thread::yield();
-        usleep(2000);
-        wait_cycles++;
-    }
-
-    if (!is_video_streaming.load())
-        return;
-
-    if (wait_cycles >= 250)
-    {
-        LOG_E("[WARNING] Video ACK timeout. Entering Recovery Mode.");
-        is_recovering = true;
-        video_unacked_count = 0;
-        return;
-    }
-
-    // We survived all checks! Build and send the packet.
-    std::vector<uint8_t> pt;
-    pt.push_back(0x00);
-    pt.push_back(0x00);
-    for (int i = 7; i >= 0; --i)
-    {
-        pt.push_back((timestamp >> (i * 8)) & 0xFF);
-    }
-    pt.insert(pt.end(), nal_data.begin(), nal_data.end());
-
-    if (send_media_payload(video_channel_id, pt))
-    {
-        video_unacked_count++;
-    }
-    else
-    {
-        LOG_E("[WARNING] Frame rejected by TX Queue. Entering Recovery Mode.");
-        is_recovering = true;
-    }
+    send_video_frame_internal(nal_data, timestamp);
 }
 
 void on_video_nal_ready(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
