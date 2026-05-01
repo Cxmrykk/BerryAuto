@@ -23,10 +23,12 @@ void send_video_frame_internal(const std::vector<uint8_t>& nal_data, uint64_t ti
 
     pt.insert(pt.end(), nal_data.begin(), nal_data.end());
 
-    // Offload complex Encryption & Fragmentation to AAP Sender!
-    send_media_payload(video_channel_id, pt);
-
-    video_unacked_count++;
+    // Only increment the unacked count if the frame was successfully pushed to the queue
+    // If it was dropped due to backpressure, we don't expect an ACK from the car!
+    if (send_media_payload(video_channel_id, pt))
+    {
+        video_unacked_count++;
+    }
 }
 
 void extract_and_cache_sps_pps(const std::vector<uint8_t>& frame)
@@ -157,6 +159,8 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
 
     if (wait_cycles >= 500)
     {
+        // We timed out waiting for the CAR to ACK our frames.
+        // Drop the frame locally to relieve the pipeline!
         LOG_E("[WARNING] Video ACK timeout (1000ms). Stream bottlenecked, dropping frame to relieve pipeline...");
         if (video_streamer)
             video_streamer->force_keyframe();
