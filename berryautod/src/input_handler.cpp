@@ -1,13 +1,83 @@
 #include "input_handler.hpp"
 #include "globals.hpp"
 #include "video_encoder.hpp"
-#include "x11_wrapper.hpp"
+#include <cstring>
+#include <fcntl.h>
+#include <iostream>
+#include <linux/uinput.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
 
-static Display* input_dpy = nullptr;
+static int uinput_fd = -1;
+
+static void emit_event(int fd, uint16_t type, uint16_t code, int32_t val)
+{
+    struct input_event ie;
+    memset(&ie, 0, sizeof(ie));
+    ie.type = type;
+    ie.code = code;
+    ie.value = val;
+    // Note: The kernel will automatically populate the timestamp
+    write(fd, &ie, sizeof(ie));
+}
+
+static bool init_uinput(int max_x, int max_y)
+{
+    if (uinput_fd >= 0)
+        return true;
+
+    uinput_fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
+    if (uinput_fd < 0)
+    {
+        LOG_E("Failed to open /dev/uinput. Ensure the uinput kernel module is loaded and daemon is running as root.");
+        return false;
+    }
+
+    // Configure the virtual device to emit Key (Touch) and Absolute (X/Y) events
+    ioctl(uinput_fd, UI_SET_EVBIT, EV_KEY);
+    ioctl(uinput_fd, UI_SET_KEYBIT, BTN_TOUCH);
+
+    ioctl(uinput_fd, UI_SET_EVBIT, EV_ABS);
+    ioctl(uinput_fd, UI_SET_ABSBIT, ABS_X);
+    ioctl(uinput_fd, UI_SET_ABSBIT, ABS_Y);
+
+    struct uinput_user_dev uidev;
+    memset(&uidev, 0, sizeof(uidev));
+    snprintf(uidev.name, UINPUT_MAX_NAME_SIZE, "BerryAuto Virtual Touch");
+    uidev.id.bustype = BUS_USB;
+    uidev.id.vendor = 0x1234;
+    uidev.id.product = 0x5678;
+    uidev.id.version = 1;
+
+    // Set the absolute min/max limits for the touchscreen
+    uidev.absmin[ABS_X] = 0;
+    uidev.absmax[ABS_X] = max_x;
+    uidev.absmin[ABS_Y] = 0;
+    uidev.absmax[ABS_Y] = max_y;
+
+    if (write(uinput_fd, &uidev, sizeof(uidev)) < 0)
+    {
+        LOG_E("Failed to write to uinput device.");
+        close(uinput_fd);
+        uinput_fd = -1;
+        return false;
+    }
+
+    if (ioctl(uinput_fd, UI_DEV_CREATE) < 0)
+    {
+        LOG_E("Failed to create uinput device.");
+        close(uinput_fd);
+        uinput_fd = -1;
+        return false;
+    }
+
+    LOG_I("Successfully created /dev/uinput virtual touch device.");
+    return true;
+}
 
 void handle_touch_event(const com::andrerinas::headunitrevived::aap::protocol::proto::InputReport& report)
 {
-    std::lock_guard<std::recursive_mutex> lock(aap_mutex); // Fix #4: Thread safety on touch event pointers
+    std::lock_guard<std::recursive_mutex> lock(aap_mutex);
 
     if (report.has_touch_event() && video_streamer != nullptr)
     {
@@ -29,7 +99,7 @@ void handle_touch_event(const com::andrerinas::headunitrevived::aap::protocol::p
         int mapped_x = 0;
         int mapped_y = 0;
 
-        // 3. Map valid interior pixel touches over to the Pi's internal X11 desktop space
+        // 3. Map valid interior pixel touches over to the Pi's internal desktop space
         if (video_streamer->get_scaled_w() > 0 && video_streamer->get_scaled_h() > 0)
         {
             mapped_x = (int)((local_x / video_streamer->get_scaled_w()) * video_streamer->get_desktop_width());
@@ -46,37 +116,46 @@ void handle_touch_event(const com::andrerinas::headunitrevived::aap::protocol::p
         if (mapped_y > video_streamer->get_desktop_height())
             mapped_y = video_streamer->get_desktop_height();
 
-        if (!input_dpy)
+        // Initialize uinput dynamically on the first touch event
+        if (uinput_fd < 0)
         {
-            input_dpy = XOpenDisplay(NULL);
+            if (!init_uinput(video_streamer->get_desktop_width(), video_streamer->get_desktop_height()))
+            {
+                return;
+            }
         }
 
-        if (input_dpy)
+        if (uinput_fd >= 0)
         {
-            if (action == 0 || action == 5)
+            if (action == 0 || action == 5) // TOUCH_ACTION_DOWN or TOUCH_ACTION_POINTER_DOWN
             {
-                XTestFakeMotionEvent(input_dpy, -1, mapped_x, mapped_y, CurrentTime);
-                XTestFakeButtonEvent(input_dpy, 1, True, CurrentTime);
+                emit_event(uinput_fd, EV_ABS, ABS_X, mapped_x);
+                emit_event(uinput_fd, EV_ABS, ABS_Y, mapped_y);
+                emit_event(uinput_fd, EV_KEY, BTN_TOUCH, 1);
+                emit_event(uinput_fd, EV_SYN, SYN_REPORT, 0);
             }
-            else if (action == 1 || action == 6)
+            else if (action == 1 || action == 6) // TOUCH_ACTION_UP or TOUCH_ACTION_POINTER_UP
             {
-                XTestFakeMotionEvent(input_dpy, -1, mapped_x, mapped_y, CurrentTime);
-                XTestFakeButtonEvent(input_dpy, 1, False, CurrentTime);
+                emit_event(uinput_fd, EV_KEY, BTN_TOUCH, 0);
+                emit_event(uinput_fd, EV_SYN, SYN_REPORT, 0);
             }
-            else if (action == 2)
+            else if (action == 2) // TOUCH_ACTION_MOVE
             {
-                XTestFakeMotionEvent(input_dpy, -1, mapped_x, mapped_y, CurrentTime);
+                emit_event(uinput_fd, EV_ABS, ABS_X, mapped_x);
+                emit_event(uinput_fd, EV_ABS, ABS_Y, mapped_y);
+                emit_event(uinput_fd, EV_SYN, SYN_REPORT, 0);
             }
-            XFlush(input_dpy);
         }
     }
 }
 
 void cleanup_input()
 {
-    if (input_dpy)
+    if (uinput_fd >= 0)
     {
-        XCloseDisplay(input_dpy);
-        input_dpy = nullptr;
+        ioctl(uinput_fd, UI_DEV_DESTROY);
+        close(uinput_fd);
+        uinput_fd = -1;
+        LOG_I("Destroyed /dev/uinput virtual touch device.");
     }
 }
