@@ -13,38 +13,19 @@ bool has_cached_config = false;
 
 void send_video_frame_internal(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
 {
-    // SLICING MAGIC: By slicing the video into 14KB chunks, we bypass AAP Fragmentation entirely.
-    // This prevents Head-of-Line blocking and allows Pings to interleave safely!
-    const size_t MAX_PAYLOAD_SIZE = 14000;
-    size_t offset = 0;
-    bool all_queued = true;
-
-    while (offset < nal_data.size())
+    std::vector<uint8_t> pt;
+    pt.push_back(0x00); // MEDIA_MESSAGE_DATA (msg_type_hi)
+    pt.push_back(0x00); // MEDIA_MESSAGE_DATA (msg_type_lo)
+    for (int i = 7; i >= 0; --i)
     {
-        size_t remain = nal_data.size() - offset;
-        size_t chunk_size = std::min(remain, MAX_PAYLOAD_SIZE);
-
-        std::vector<uint8_t> pt;
-        pt.push_back(0x00); // MEDIA_MESSAGE_DATA (msg_type_hi)
-        pt.push_back(0x00); // MEDIA_MESSAGE_DATA (msg_type_lo)
-
-        // Every slice gets the exact same timestamp header so the decoder merges them
-        for (int i = 7; i >= 0; --i)
-        {
-            pt.push_back((timestamp >> (i * 8)) & 0xFF);
-        }
-
-        pt.insert(pt.end(), nal_data.begin() + offset, nal_data.begin() + offset + chunk_size);
-
-        if (!send_media_payload(video_channel_id, pt))
-        {
-            all_queued = false;
-            break; // Dropped due to backpressure queue limit
-        }
-        offset += chunk_size;
+        pt.push_back((timestamp >> (i * 8)) & 0xFF);
     }
 
-    if (all_queued)
+    pt.insert(pt.end(), nal_data.begin(), nal_data.end());
+
+    // Send the entire frame as a single logical AAP message.
+    // The aap_sender will safely fragment it and interleave it with Pings on the wire!
+    if (send_media_payload(video_channel_id, pt))
     {
         video_unacked_count++;
     }
