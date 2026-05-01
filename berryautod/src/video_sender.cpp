@@ -29,9 +29,9 @@ void send_video_frame_internal(const std::vector<uint8_t>& nal_data, uint64_t ti
     }
     else
     {
-        LOG_E("[WARNING] Video Frame dropped pre-emptively. Transmit Queue is full!");
-        // CRITICAL FIX: DO NOT CALL force_keyframe() HERE.
-        // Forcing a keyframe generates another massive frame and causes a death spiral!
+        LOG_E("[WARNING] Video Frame dropped. Re-syncing Keyframe...");
+        if (video_streamer)
+            video_streamer->force_keyframe();
     }
 }
 
@@ -123,8 +123,7 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
     }
 
     int wait_cycles = 0;
-    // Reduced timeout from 500 loops (1000ms) to 250 loops (500ms) to bail out faster
-    while (is_video_streaming.load() && video_unacked_count.load() >= max_video_unacked && wait_cycles < 250)
+    while (is_video_streaming.load() && video_unacked_count.load() >= max_video_unacked && wait_cycles < 500)
     {
         std::this_thread::yield();
         usleep(2000);
@@ -134,10 +133,11 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
     if (!is_video_streaming.load())
         return;
 
-    if (wait_cycles >= 250)
+    if (wait_cycles >= 500)
     {
-        LOG_E("[WARNING] Video ACK timeout (500ms). Dropping frame.");
-        // CRITICAL FIX: DO NOT CALL force_keyframe() HERE!
+        LOG_E("[WARNING] Video ACK timeout (1000ms). Dropping frame to relieve pipeline.");
+        if (video_streamer)
+            video_streamer->force_keyframe();
         return;
     }
 

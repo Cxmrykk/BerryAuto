@@ -18,6 +18,7 @@ struct TxPacket
     std::vector<uint8_t> payload;
     bool is_control;
     bool is_raw_ssl;
+    bool encrypt;
 };
 
 std::queue<TxPacket> high_priority_queue;
@@ -152,8 +153,9 @@ void tx_worker()
         }
         else
         {
-            if (ssl_bypassed)
+            if (!pkt.encrypt)
             {
+                // MASSIVE SPEEDUP: Plaintext media bypasses OpenSSL completely!
                 transmit_atomic(pkt.channel, false, pkt.payload, pkt.is_control);
             }
             else
@@ -290,6 +292,7 @@ void send_message(uint8_t channel, uint16_t type, const google::protobuf::Messag
     pkt.payload = pt;
     pkt.is_control = (type <= 26);
     pkt.is_raw_ssl = false;
+    pkt.encrypt = true;
 
     init_tx_thread();
     {
@@ -304,16 +307,19 @@ bool send_media_payload(uint8_t channel, const std::vector<uint8_t>& pt)
     init_tx_thread();
     std::lock_guard<std::mutex> lock(queue_mutex);
 
-    // ULTRA-TIGHT BACKPRESSURE: If the queue has EVEN ONE frame, drop this new one.
-    // The USB pipeline must remain absolutely clear for Ping Responses!
-    if (channel == 2 && low_priority_queue.size() >= 1)
+    if (channel == 2 && low_priority_queue.size() > 10)
         return false;
+
+    // MAGICAL FIX: Android Auto media frames (Type < 0x8000) are NEVER encrypted!
+    uint16_t type = (pt[0] << 8) | pt[1];
+    bool should_encrypt = (!ssl_bypassed) && (type >= 0x8000);
 
     TxPacket pkt;
     pkt.channel = channel;
     pkt.payload = pt;
     pkt.is_control = false;
     pkt.is_raw_ssl = false;
+    pkt.encrypt = should_encrypt;
 
     if (channel == 2)
         low_priority_queue.push(pkt);
