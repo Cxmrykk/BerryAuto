@@ -33,6 +33,8 @@ void write_fragmented_packet(const std::vector<uint8_t>& payload, uint8_t target
     uint8_t base_flag = 0;
     if (is_encrypted)
         base_flag |= 0x08;
+
+    // Channel 0 is implicitly a control channel, so the 0x04 flag is only needed for service channels
     if (is_control && target_channel != 0)
         base_flag |= 0x04;
 
@@ -157,7 +159,8 @@ void send_message(uint8_t channel, uint16_t type, const google::protobuf::Messag
     std::cout << "[DEBUG] SEND Channel: " << (int)channel << " Type: " << type << " Size: " << serialized.size()
               << std::endl;
 
-    bool is_control = (type >= 1 && type <= 26);
+    // FIX 2: All Protobuf messages are Control Messages.
+    bool is_control = true;
 
     std::vector<uint8_t> pt;
     pt.push_back((type >> 8) & 0xFF);
@@ -176,14 +179,8 @@ void send_message(uint8_t channel, uint16_t type, const google::protobuf::Messag
 
 void send_media_message(uint8_t channel, const std::vector<uint8_t>& payload)
 {
-    if (ssl_bypassed)
-    {
-        write_fragmented_packet(payload, channel, false, false);
-    }
-    else
-    {
-        send_encrypted_message(channel, false, payload);
-    }
+    // FIX 1: Media Payloads (Video/Audio/Codec Configs) are Data Messages, and must NEVER be encrypted.
+    write_fragmented_packet(payload, channel, false, false);
 }
 
 void send_version_response(uint16_t major, uint16_t minor)
