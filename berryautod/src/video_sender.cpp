@@ -13,19 +13,38 @@ bool has_cached_config = false;
 
 void send_video_frame_internal(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
 {
-    std::vector<uint8_t> pt;
-    pt.push_back(0x00); // MEDIA_MESSAGE_DATA (msg_type_hi)
-    pt.push_back(0x00); // MEDIA_MESSAGE_DATA (msg_type_lo)
-    for (int i = 7; i >= 0; --i)
+    // SLICING MAGIC: By slicing the video into 14KB chunks, we bypass AAP Fragmentation entirely.
+    // This prevents Head-of-Line blocking and allows Pings to interleave safely!
+    const size_t MAX_PAYLOAD_SIZE = 14000;
+    size_t offset = 0;
+    bool all_queued = true;
+
+    while (offset < nal_data.size())
     {
-        pt.push_back((timestamp >> (i * 8)) & 0xFF);
+        size_t remain = nal_data.size() - offset;
+        size_t chunk_size = std::min(remain, MAX_PAYLOAD_SIZE);
+
+        std::vector<uint8_t> pt;
+        pt.push_back(0x00); // MEDIA_MESSAGE_DATA (msg_type_hi)
+        pt.push_back(0x00); // MEDIA_MESSAGE_DATA (msg_type_lo)
+
+        // Every slice gets the exact same timestamp header so the decoder merges them
+        for (int i = 7; i >= 0; --i)
+        {
+            pt.push_back((timestamp >> (i * 8)) & 0xFF);
+        }
+
+        pt.insert(pt.end(), nal_data.begin() + offset, nal_data.begin() + offset + chunk_size);
+
+        if (!send_media_payload(video_channel_id, pt))
+        {
+            all_queued = false;
+            break; // Dropped due to backpressure queue limit
+        }
+        offset += chunk_size;
     }
 
-    pt.insert(pt.end(), nal_data.begin(), nal_data.end());
-
-    // Only increment the unacked count if the frame was successfully pushed to the queue
-    // If it was dropped due to backpressure, we don't expect an ACK from the car!
-    if (send_media_payload(video_channel_id, pt))
+    if (all_queued)
     {
         video_unacked_count++;
     }
@@ -159,8 +178,6 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
 
     if (wait_cycles >= 500)
     {
-        // We timed out waiting for the CAR to ACK our frames.
-        // Drop the frame locally to relieve the pipeline!
         LOG_E("[WARNING] Video ACK timeout (1000ms). Stream bottlenecked, dropping frame to relieve pipeline...");
         if (video_streamer)
             video_streamer->force_keyframe();

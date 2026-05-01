@@ -29,7 +29,6 @@ void tx_worker()
             std::unique_lock<std::mutex> lock(queue_mutex);
             queue_cv.wait(lock, [] { return !high_priority_queue.empty() || !low_priority_queue.empty(); });
 
-            // Priority Dispatch: Pings and Control messages ALWAYS jump ahead of Video!
             if (!high_priority_queue.empty())
             {
                 batch = high_priority_queue.front();
@@ -42,7 +41,6 @@ void tx_worker()
             }
         }
 
-        // Send entire batch contiguously holding the USB pipe to guarantee zero interleaving
         for (const auto& chunk : batch)
         {
             const uint8_t* ptr = chunk.data();
@@ -92,8 +90,8 @@ bool enqueue_batch(uint8_t channel, std::vector<std::vector<uint8_t>>& batch)
 
         if (channel == 2)
         {
-            // BACKPRESSURE DROP: If video queue is overflowing, drop the frame to prevent latency death!
-            if (low_priority_queue.size() >= 3)
+            // BACKPRESSURE: Increased to 150 because a single I-Frame is now split into ~10 independent batches
+            if (low_priority_queue.size() >= 150)
             {
                 return false;
             }
@@ -101,7 +99,6 @@ bool enqueue_batch(uint8_t channel, std::vector<std::vector<uint8_t>>& batch)
         }
         else
         {
-            // High Priority Channel (0 = Control/Ping, 3 = Input, 1 = Audio)
             high_priority_queue.push(std::move(batch));
         }
     }
@@ -143,7 +140,7 @@ void fragment_and_batch(uint8_t channel, bool is_encrypted, const std::vector<ui
                         std::vector<std::vector<uint8_t>>& batch)
 {
     const size_t MAX_CHUNK = 15000;
-    uint32_t total_size = payload.size(); // CRITICAL: This is the Ciphertext size if encrypted!
+    uint32_t total_size = payload.size();
 
     if (total_size <= MAX_CHUNK)
     {
@@ -152,6 +149,7 @@ void fragment_and_batch(uint8_t channel, bool is_encrypted, const std::vector<ui
     }
     else
     {
+        // This path is practically unused now for media due to slicing, but remains robust for giant Control messages
         uint8_t base_flag = is_encrypted ? 0x08 : 0x00;
         size_t offset = 0;
 
@@ -166,16 +164,16 @@ void fragment_and_batch(uint8_t channel, bool is_encrypted, const std::vector<ui
 
             if (offset == 0)
             {
-                flag |= 0x01;             // First Fragment
-                unfrag_size = total_size; // MUST BE CIPHERTEXT TOTAL SIZE TO PREVENT -251 BUFFER OVERFLOW!
+                flag |= 0x01;
+                unfrag_size = total_size;
             }
             else if (offset + chunk_size >= total_size)
             {
-                flag |= 0x02; // Last Fragment
+                flag |= 0x02;
             }
             else
             {
-                flag |= 0x00; // Middle Fragment
+                flag |= 0x00;
             }
 
             build_chunk(batch, chunk, channel, flag, unfrag_size);
@@ -210,7 +208,6 @@ bool send_media_payload(uint8_t channel, const std::vector<uint8_t>& pt)
     std::vector<std::vector<uint8_t>> batch;
 
     {
-        // aap_mutex ensures pristine TLS Sequence order
         std::lock_guard<std::recursive_mutex> aap_lock(aap_mutex);
 
         if (ssl_bypassed)
