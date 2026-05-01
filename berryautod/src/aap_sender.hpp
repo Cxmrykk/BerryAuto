@@ -4,7 +4,8 @@
 #include <vector>
 
 void flush_usb_tx_queue();
-void send_message(uint8_t channel, uint16_t type, const google::protobuf::Message& proto_msg);
+void flush_ssl_buffers(); // New replacement for ssl_write_and_flush_unlocked
 
-// Media handler returns false if the queue is overloaded, allowing pre-emptive frame drops
+void send_unencrypted(uint8_t channel, uint8_t flags, uint16_t type, const std::vector<uint8_t>& payload);
+void send_message(uint8_t channel, uint16_t type, const google::protobuf::Message& proto_msg);
 bool send_media_payload(uint8_t channel, const std::vector<uint8_t>& pt);
