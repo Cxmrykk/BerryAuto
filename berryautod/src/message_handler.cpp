@@ -316,7 +316,7 @@ void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload
             }
         }
 
-        ssl_write_and_flush_unlocked({}, 0, 0x0B, 0);
+        flush_ssl_handshake();
 
         if (handshake_just_completed)
         {
