@@ -2,7 +2,9 @@
 #include "control.pb.h"
 #include "globals.hpp"
 #include <algorithm>
+#include <errno.h>
 #include <mutex>
+#include <string.h>
 #include <unistd.h>
 
 using namespace com::andrerinas::headunitrevived::aap::protocol::proto;
@@ -19,7 +21,13 @@ void write_to_usb(const std::vector<uint8_t>& data)
         int w = write(ep_in, ptr, remain);
         if (w < 0)
         {
-            LOG_E("USB TX Write Failed!");
+            // Protect against kernel interrupts causing dropped packets
+            if (errno == EINTR || errno == EAGAIN)
+            {
+                usleep(100);
+                continue;
+            }
+            LOG_E("USB TX Write Failed! " << strerror(errno));
             break;
         }
         ptr += w;
@@ -49,7 +57,6 @@ void aap_send_raw(const std::vector<uint8_t>& pt, uint8_t target_channel, uint8_
     std::vector<uint8_t> out;
     uint16_t len_field = pt.size();
 
-    // CRITICAL FIX: Add 4 bytes for the unfragmented size header
     if ((flags & 0x03) == 0x01)
     {
         len_field += 4;
@@ -70,6 +77,81 @@ void aap_send_raw(const std::vector<uint8_t>& pt, uint8_t target_channel, uint8_
 
     out.insert(out.end(), pt.begin(), pt.end());
     write_to_usb(out);
+}
+
+void fragment_and_send(uint8_t channel, bool is_encrypted, const std::vector<uint8_t>& full_payload)
+{
+    // Max chunk safely below 16384 Android limit to prevent host-side bulkTransfer truncation
+    const size_t MAX_CHUNK = 15000;
+    uint32_t total_size = full_payload.size();
+
+    if (total_size <= MAX_CHUNK)
+    {
+        // Send unfragmented
+        uint8_t flag = is_encrypted ? 0x0B : 0x03;
+        aap_send_raw(full_payload, channel, flag, 0);
+    }
+    else
+    {
+        // Fragment
+        uint8_t base_flag = is_encrypted ? 0x08 : 0x00;
+        size_t offset = 0;
+
+        while (offset < total_size)
+        {
+            size_t remain = total_size - offset;
+            size_t chunk_size = std::min(remain, MAX_CHUNK);
+            std::vector<uint8_t> chunk(full_payload.begin() + offset, full_payload.begin() + offset + chunk_size);
+
+            uint8_t flag = base_flag;
+            uint32_t unfrag_size = 0;
+
+            if (offset == 0)
+            {
+                flag |= 0x01; // First
+                unfrag_size = total_size;
+            }
+            else if (offset + chunk_size >= total_size)
+            {
+                flag |= 0x02; // Last
+            }
+            else
+            {
+                flag |= 0x00; // Middle
+            }
+
+            aap_send_raw(chunk, channel, flag, unfrag_size);
+            offset += chunk_size;
+        }
+    }
+}
+
+void send_media_payload(uint8_t channel, const std::vector<uint8_t>& pt)
+{
+    if (ssl_bypassed)
+    {
+        fragment_and_send(channel, false, pt);
+    }
+    else
+    {
+        std::vector<uint8_t> ciphertext;
+        {
+            std::lock_guard<std::recursive_mutex> lock(aap_mutex);
+            SSL_write(ssl, pt.data(), pt.size());
+            int pending = BIO_ctrl_pending(wbio);
+            if (pending > 0)
+            {
+                ciphertext.resize(pending);
+                BIO_read(wbio, ciphertext.data(), pending);
+            }
+        }
+
+        // Ciphertext is passed to fragmenter ensuring proper protocol order
+        if (!ciphertext.empty())
+        {
+            fragment_and_send(channel, true, ciphertext);
+        }
+    }
 }
 
 void ssl_write_and_flush_unlocked(const std::vector<uint8_t>& pt, uint8_t target_channel, uint8_t encrypted_flag,
@@ -108,7 +190,6 @@ void ssl_write_and_flush_unlocked(const std::vector<uint8_t>& pt, uint8_t target
                 uint16_t len_field = tls_record.size();
                 std::vector<uint8_t> out;
 
-                // CRITICAL FIX: Add 4 bytes for the unfragmented size header
                 if ((encrypted_flag & 0x03) == 0x01)
                 {
                     len_field += 4;
@@ -146,7 +227,6 @@ void ssl_write_and_flush_unlocked(const std::vector<uint8_t>& pt, uint8_t target
     }
 }
 
-// Master wrapper to automatically handle Car TLS Bypasses
 void send_message(uint8_t channel, uint16_t type, const google::protobuf::Message& proto_msg)
 {
     std::vector<uint8_t> serialized(proto_msg.ByteSizeLong());
