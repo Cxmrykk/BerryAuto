@@ -11,7 +11,6 @@ std::mutex config_mutex;
 std::vector<uint8_t> cached_config_nal;
 bool has_cached_config = false;
 
-// THE STATE MACHINE: Prevents "Decoding Error" spam on the Head Unit
 static bool is_recovering = false;
 
 void extract_and_cache_sps_pps(const std::vector<uint8_t>& frame)
@@ -129,13 +128,13 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
     // --- DRAIN & RECOVER STATE MACHINE ---
     if (is_recovering)
     {
-        // Wait for the TX queue to hit 0 AND for the car to catch up on ACKs
-        if (get_media_tx_queue_size() > 0 || video_unacked_count.load() >= max_video_unacked)
+        // Wait for the TX queue to drain to 0 AND the car to catch up on ACKs
+        if (get_tx_queue_size() > 0 || video_unacked_count.load() >= max_video_unacked)
         {
-            return; // Silently drop frame, wait for pipeline to drain completely
+            return; // Silently drop frame, wait for pipeline to clear
         }
 
-        // Pipeline is completely clear! Request a fresh Keyframe to resume cleanly.
+        // Pipeline is clear! Request a fresh Keyframe to resume perfectly.
         if (video_streamer)
             video_streamer->force_keyframe();
         is_recovering = false;
@@ -143,7 +142,7 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
         return;
     }
 
-    // Car ACK Check (Wait max 500ms for Head Unit to ACK before panicking)
+    // Car ACK Check (Wait max 500ms for Head Unit to ACK before entering recovery)
     int wait_cycles = 0;
     while (is_video_streaming.load() && video_unacked_count.load() >= max_video_unacked && wait_cycles < 250)
     {
@@ -159,7 +158,7 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
     {
         LOG_E("[WARNING] Video ACK timeout. Entering Recovery Mode.");
         is_recovering = true;
-        video_unacked_count = 0;
+        video_unacked_count = 0; // Reset artificially so recovery can complete
         return;
     }
 
