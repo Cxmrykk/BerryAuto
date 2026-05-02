@@ -71,7 +71,8 @@ void extract_and_cache_sps_pps(const std::vector<uint8_t>& frame)
     }
 }
 
-// NEW: Strip out SPS/PPS headers before sending frames to the car to prevent decoder crashes
+// Android Auto requires SPS/PPS config headers to be sent ONCE during setup.
+// If they are left in the video stream, the car's decoder crashes.
 std::vector<uint8_t> filter_sps_pps(const std::vector<uint8_t>& frame)
 {
     std::vector<uint8_t> filtered;
@@ -176,20 +177,17 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
             inject_cached_video_config();
     }
 
-    // CRITICAL: Strip out the SPS/PPS headers before sending the data to the car
     std::vector<uint8_t> clean_nal_data = filter_sps_pps(nal_data);
     if (clean_nal_data.empty())
-        return; // If the packet was *only* config data, drop it safely.
+        return; // Packet was purely config
 
     // --- DRAIN & RECOVER STATE MACHINE ---
     if (is_recovering)
     {
         if (get_tx_queue_size() > 0)
         {
-            return; // Wait for pipeline to drain completely
+            return; // Wait for USB pipeline to drain completely
         }
-
-        // Pipeline is completely clear! Request a fresh Keyframe to resume perfectly.
         if (video_streamer)
             video_streamer->force_keyframe();
         is_recovering = false;
@@ -197,31 +195,10 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
         return;
     }
 
-    // Relaxed queue tolerance to 60 packets
+    // Rely entirely on USB Queue backpressure, completely ignoring max_unacked deadlocks
     if (get_tx_queue_size() >= 60)
     {
-        LOG_E("[WARNING] USB Queue Congested! Entering Recovery Mode.");
-        flush_usb_tx_queue();
-        video_unacked_count = 0;
-        is_recovering = true;
-        return;
-    }
-
-    // Car ACK Check (Waits max 1000ms for Head Unit to ACK before failing)
-    int wait_cycles = 0;
-    while (is_video_streaming.load() && video_unacked_count.load() >= max_video_unacked && wait_cycles < 500)
-    {
-        std::this_thread::yield();
-        usleep(2000);
-        wait_cycles++;
-    }
-
-    if (!is_video_streaming.load())
-        return;
-
-    if (wait_cycles >= 500)
-    {
-        LOG_E("[WARNING] Video ACK timeout. Entering Recovery Mode.");
+        LOG_E("[WARNING] USB Queue Congested! Head unit is falling behind. Dropping frames.");
         flush_usb_tx_queue();
         video_unacked_count = 0;
         is_recovering = true;

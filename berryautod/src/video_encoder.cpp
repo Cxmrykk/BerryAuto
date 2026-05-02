@@ -204,10 +204,10 @@ bool VideoEncoder::init_encoder()
         codec_ctx->gop_size = 60;
         codec_ctx->max_b_frames = 0;
 
-        // Android Auto mandates Baseline profile
         codec_ctx->profile = FF_PROFILE_H264_BASELINE;
 
-        int target_bitrate = 1500000;
+        int target_bitrate = static_cast<int>(target_width * target_height * 60 * 0.12);
+        target_bitrate = std::clamp(target_bitrate, 2000000, 8000000);
 
         codec_ctx->bit_rate = target_bitrate;
         codec_ctx->rc_min_rate = target_bitrate;
@@ -281,7 +281,7 @@ void VideoEncoder::process_raw_frame(void* bgra_data, int stride, int /*pw_w*/, 
         if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF || ret < 0)
             break;
 
-        // CRITICAL FIX: Monotonic clock to prevent timestamp jitters/drifts causing decoder panics
+        // Perfectly timed monotonic absolute timestamp. Required by Android Auto.
         auto now = std::chrono::steady_clock::now().time_since_epoch();
         uint64_t absolute_ts = std::chrono::duration_cast<std::chrono::microseconds>(now).count();
 
@@ -319,7 +319,6 @@ void VideoEncoder::capture_loop()
                 process_raw_frame((uint8_t*)img->data, img->bytes_per_line, img->width, img->height);
 
                 auto now = std::chrono::steady_clock::now();
-
                 if (next_frame_time < now)
                 {
                     next_frame_time = now + frame_duration;
