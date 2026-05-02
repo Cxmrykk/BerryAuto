@@ -133,12 +133,24 @@ bool VideoEncoder::init_pipewire()
 {
     pw_loop = pw_main_loop_new(NULL);
     if (!pw_loop)
+    {
+        LOG_E("[PipeWire] Failed to create main loop");
         return false;
+    }
 
     pw_ctx = pw_context_new(pw_main_loop_get_loop(pw_loop), NULL, 0);
+    if (!pw_ctx)
+    {
+        LOG_E("[PipeWire] Failed to create context");
+        return false;
+    }
+
     pw_core = pw_context_connect(pw_ctx, NULL, 0);
     if (!pw_core)
+    {
+        LOG_E("[PipeWire] Failed to connect to core. Check if PipeWire is running and XDG_RUNTIME_DIR is valid.");
         return false;
+    }
 
     pw_stream = pw_stream_new(pw_core, "OpenGAL Capture",
                               pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture",
@@ -162,7 +174,12 @@ bool VideoEncoder::init_pipewire()
                                 (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 1);
 
     if (res < 0)
+    {
+        LOG_E("[PipeWire] Failed to connect stream: " << spa_strerror(res));
         return false;
+    }
+
+    LOG_I("[PipeWire] Stream connected successfully");
     return true;
 }
 
@@ -207,22 +224,18 @@ bool VideoEncoder::init_encoder()
         codec_ctx->height = target_height;
         codec_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
 
-        // Force High-Definition color metadata to fix washed out colors on Head Units
         codec_ctx->colorspace = AVCOL_SPC_BT709;
         codec_ctx->color_range = AVCOL_RANGE_MPEG;
         codec_ctx->color_primaries = AVCOL_PRI_BT709;
         codec_ctx->color_trc = AVCOL_TRC_BT709;
 
-        // Dynamic FPS pacing
         codec_ctx->time_base = {1, 1000000};
         codec_ctx->framerate = {target_fps, 1};
-        codec_ctx->gop_size = target_fps * 2; // Keyframe every 2 seconds
-        codec_ctx->max_b_frames = 0;          // AA requires no B frames for lowest latency
+        codec_ctx->gop_size = target_fps * 2;
+        codec_ctx->max_b_frames = 0;
 
-        // Upgrade from Main to High profile for superior color gradient handling
         codec_ctx->profile = FF_PROFILE_H264_HIGH;
 
-        // Increased Bitrate - Scale elegantly up to 4K limits. Cap at 40 Mbps.
         int target_bitrate = static_cast<int>(target_width * target_height * target_fps * 0.15);
         target_bitrate = std::clamp(target_bitrate, 4000000, 40000000);
 
@@ -236,7 +249,6 @@ bool VideoEncoder::init_encoder()
 
         if (std::string(codec->name) == "h264_v4l2m2m")
         {
-            // The v4l2m2m hardware wrapper requires the string variant
             av_opt_set(codec_ctx->priv_data, "profile", "high", 0);
         }
         else if (std::string(codec->name) == "libx264" || std::string(codec->name) == "libx265")
@@ -261,7 +273,6 @@ bool VideoEncoder::init_encoder()
     av_frame_get_buffer(frame, 32);
     pkt = av_packet_alloc();
 
-    // SWS_BILINEAR fixes blocky chroma smearing over SWS_FAST_BILINEAR.
     sws_ctx = sws_getContext(target_width, target_height, AV_PIX_FMT_BGRA, target_width, target_height,
                              AV_PIX_FMT_YUV420P, SWS_BILINEAR, NULL, NULL, NULL);
     return true;
@@ -300,9 +311,7 @@ void VideoEncoder::process_raw_frame(void* bgra_data, int stride, int /*pw_w*/, 
         if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF || ret < 0)
             break;
 
-        // Extract the EXACT timestamp used by the encoder to prevent container/stream mismatches
         uint64_t absolute_ts = pkt->pts;
-
         std::vector<uint8_t> nal_data(pkt->data, pkt->data + pkt->size);
         nal_callback(nal_data, absolute_ts);
         av_packet_unref(pkt);
@@ -321,6 +330,10 @@ void VideoEncoder::capture_loop()
         {
             pw_main_loop_run(pw_loop);
             cleanup_pipewire();
+        }
+        else
+        {
+            LOG_E("[Capture] Failed to initialize PipeWire engine.");
         }
     }
     else
@@ -344,7 +357,6 @@ void VideoEncoder::capture_loop()
                 }
                 else
                 {
-                    // We lagged slightly, advance next frame to prevent rapid burst catch-ups
                     next_frame_time = now + frame_interval_us;
                 }
             }
