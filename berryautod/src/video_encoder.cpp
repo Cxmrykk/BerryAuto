@@ -186,6 +186,10 @@ static void on_process(void* userdata)
         int stride = buf->datas[0].chunk->stride;
         enc->process_raw_frame(buf->datas[0].data, stride, enc->pw_w, enc->pw_h);
     }
+    else
+    {
+        LOG_E("[PipeWire] Buffer data is null! DMA-BUF negotiation failure.");
+    }
     pw_stream_queue_buffer(enc->pw_stream, b);
 }
 
@@ -212,6 +216,14 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
             case SPA_VIDEO_FORMAT_BGRx:
             case SPA_VIDEO_FORMAT_BGRA:
                 enc->pw_fmt = AV_PIX_FMT_BGRA;
+                break;
+            case SPA_VIDEO_FORMAT_xBGR:
+            case SPA_VIDEO_FORMAT_ABGR:
+                enc->pw_fmt = AV_PIX_FMT_ABGR;
+                break;
+            case SPA_VIDEO_FORMAT_xRGB:
+            case SPA_VIDEO_FORMAT_ARGB:
+                enc->pw_fmt = AV_PIX_FMT_ARGB;
                 break;
             case SPA_VIDEO_FORMAT_RGB:
                 enc->pw_fmt = AV_PIX_FMT_RGB24;
@@ -378,21 +390,17 @@ bool VideoEncoder::init_pipewire(uint32_t node_id)
     struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
     const struct spa_pod* params[1];
 
-    struct spa_rectangle pw_size = SPA_RECTANGLE((uint32_t)target_width, (uint32_t)target_height);
-    struct spa_fraction pw_framerate = SPA_FRACTION((uint32_t)target_fps, 1);
-
-    // Flexible Format Negotiation! Offer multiple common formats and allow the compositor to choose.
-    // The macro SPA_POD_CHOICE_ENUM_Id requires the total number of items including the default preferred item.
+    // Highly Permissive Format Negotiation!
+    // Omitting Size and Framerate entirely to let Wayland send whatever it's currently rendering.
     params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
-        &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_VIDEO_format,
-        SPA_POD_CHOICE_ENUM_Id(6,
-                               SPA_VIDEO_FORMAT_BGRA, // Preferred Default
-                               SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_RGBA,
-                               SPA_VIDEO_FORMAT_RGBx, SPA_VIDEO_FORMAT_RGB),
-        SPA_FORMAT_VIDEO_size, SPA_POD_Rectangle(&pw_size), SPA_FORMAT_VIDEO_framerate, SPA_POD_Fraction(&pw_framerate),
-        SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video), SPA_FORMAT_mediaSubtype,
-        SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw));
+        &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
+        SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), SPA_FORMAT_VIDEO_format,
+        SPA_POD_CHOICE_ENUM_Id(7,
+                               SPA_VIDEO_FORMAT_BGRx, // Preferred Default
+                               SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_RGBx,
+                               SPA_VIDEO_FORMAT_RGBA, SPA_VIDEO_FORMAT_xBGR, SPA_VIDEO_FORMAT_xRGB));
 
+    // Map Buffers flag enforces SHM memory pointers (buf->datas[0].data) instead of raw DMA fds.
     int res = pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, PW_ID_ANY,
                                 (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 1);
 
@@ -512,7 +520,7 @@ void VideoEncoder::cleanup_encoder()
     codec_ctx = nullptr;
 }
 
-void VideoEncoder::process_raw_frame(void* bgra_data, int stride, int /*pw_w*/, int pw_h)
+void VideoEncoder::process_raw_frame(void* bgra_data, int stride, int pw_w, int pw_h)
 {
     std::lock_guard<std::mutex> lock(sws_mutex);
     if (!sws_ctx)
