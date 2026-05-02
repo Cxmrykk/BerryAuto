@@ -80,6 +80,7 @@ static bool negotiate_wayland_screencast(uint32_t& out_node_id)
         return false;
     }
 
+    // Determine deterministic session and request paths based on our unique D-Bus name
     std::string sender = g_dbus_connection_get_unique_name(conn);
     sender.erase(std::remove(sender.begin(), sender.end(), ':'), sender.end());
     std::replace(sender.begin(), sender.end(), '.', '_');
@@ -365,6 +366,7 @@ bool VideoEncoder::init_pipewire(uint32_t node_id)
         return false;
     }
 
+    // TARGET THE SPECIFIC NODE ID NEGOTIATED VIA D-BUS
     pw_stream =
         pw_stream_new(pw_core, "OpenGAL Capture",
                       pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture", PW_KEY_MEDIA_ROLE,
@@ -376,12 +378,20 @@ bool VideoEncoder::init_pipewire(uint32_t node_id)
     struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
     const struct spa_pod* params[1];
 
+    struct spa_rectangle pw_size = SPA_RECTANGLE((uint32_t)target_width, (uint32_t)target_height);
+    struct spa_fraction pw_framerate = SPA_FRACTION((uint32_t)target_fps, 1);
+
     // Flexible Format Negotiation! Offer multiple common formats and allow the compositor to choose.
+    // The macro SPA_POD_CHOICE_ENUM_Id requires the total number of items including the default preferred item.
     params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
-        &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
-        SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), SPA_FORMAT_videoFormat,
-        SPA_POD_CHOICE_ENUM_Id(5, SPA_VIDEO_FORMAT_RGBx, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_RGBA,
-                               SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_RGB));
+        &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_VIDEO_format,
+        SPA_POD_CHOICE_ENUM_Id(6,
+                               SPA_VIDEO_FORMAT_BGRA, // Preferred Default
+                               SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_RGBA,
+                               SPA_VIDEO_FORMAT_RGBx, SPA_VIDEO_FORMAT_RGB),
+        SPA_FORMAT_VIDEO_size, SPA_POD_Rectangle(&pw_size), SPA_FORMAT_VIDEO_framerate, SPA_POD_Fraction(&pw_framerate),
+        SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video), SPA_FORMAT_mediaSubtype,
+        SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw));
 
     int res = pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, PW_ID_ANY,
                                 (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 1);
@@ -502,7 +512,7 @@ void VideoEncoder::cleanup_encoder()
     codec_ctx = nullptr;
 }
 
-void VideoEncoder::process_raw_frame(void* bgra_data, int stride, int w, int h)
+void VideoEncoder::process_raw_frame(void* bgra_data, int stride, int /*pw_w*/, int pw_h)
 {
     std::lock_guard<std::mutex> lock(sws_mutex);
     if (!sws_ctx)
@@ -511,7 +521,7 @@ void VideoEncoder::process_raw_frame(void* bgra_data, int stride, int w, int h)
     const uint8_t* in_data[1] = {(uint8_t*)bgra_data};
     int in_linesize[1] = {stride};
 
-    sws_scale(sws_ctx, in_data, in_linesize, 0, h, frame->data, frame->linesize);
+    sws_scale(sws_ctx, in_data, in_linesize, 0, pw_h, frame->data, frame->linesize);
 
     frame->pts = get_monotonic_usec();
     frame->pict_type = request_keyframe.exchange(false) ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_NONE;
