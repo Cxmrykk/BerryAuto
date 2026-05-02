@@ -13,6 +13,7 @@ extern "C"
 #include <libswscale/swscale.h>
 #include <pipewire/pipewire.h>
 #include <spa/param/video/format-utils.h>
+#include <spa/utils/result.h>
 }
 
 using NalCallback = std::function<void(const std::vector<uint8_t>&, uint64_t)>;

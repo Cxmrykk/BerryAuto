@@ -25,6 +25,9 @@ static void on_process(void* userdata)
 // NEW: Track exactly what the PipeWire stream is doing
 static void on_state_changed(void* userdata, enum pw_stream_state old, enum pw_stream_state state, const char* error)
 {
+    (void)userdata; // Silence compiler warning
+    (void)old;      // Silence compiler warning
+
     if (error)
     {
         LOG_E("[PipeWire] Stream Error: " << error);
@@ -254,6 +257,7 @@ void VideoEncoder::capture_loop()
         return;
     }
 
+    // This will now sit and process frames if the stream State goes to "Streaming"
     pw_main_loop_run(pw_loop);
 
     cleanup_pipewire();
