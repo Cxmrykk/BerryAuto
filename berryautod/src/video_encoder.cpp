@@ -231,6 +231,18 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
             case SPA_VIDEO_FORMAT_BGR:
                 enc->pw_fmt = AV_PIX_FMT_BGR24;
                 break;
+            case SPA_VIDEO_FORMAT_NV12:
+                enc->pw_fmt = AV_PIX_FMT_NV12;
+                break;
+            case SPA_VIDEO_FORMAT_I420:
+                enc->pw_fmt = AV_PIX_FMT_YUV420P;
+                break;
+            case SPA_VIDEO_FORMAT_YUY2:
+                enc->pw_fmt = AV_PIX_FMT_YUYV422;
+                break;
+            case SPA_VIDEO_FORMAT_UYVY:
+                enc->pw_fmt = AV_PIX_FMT_UYVY422;
+                break;
             default:
                 LOG_E("[PipeWire] Unrecognized pixel format! Defaulting to BGRA.");
                 enc->pw_fmt = AV_PIX_FMT_BGRA;
@@ -386,7 +398,8 @@ bool VideoEncoder::init_pipewire(uint32_t node_id)
 
     pw_stream_add_listener(pw_stream, &stream_listener, &stream_events, this);
 
-    uint8_t buffer[1024];
+    // CRITICAL: PipeWire Pods require strict 8-byte alignment, otherwise data corruption occurs
+    alignas(8) uint8_t buffer[2048];
     struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
     const struct spa_pod* params[1];
 
@@ -412,15 +425,17 @@ bool VideoEncoder::init_pipewire(uint32_t node_id)
     max_frac.denom = 1;
 
     // Highly Permissive Format Negotiation!
-    // Adding Size and Framerate with a wide Choice Range. Most Wayland compositors
-    // will outright reject streams that do not provide size or framerate bounds.
+    // Includes wlroots native hardware formats (NV12/I420/YUY2) to prevent "no more input formats" rejections.
     params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
         &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
         SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), SPA_FORMAT_VIDEO_format,
-        SPA_POD_CHOICE_ENUM_Id(7,
+        SPA_POD_CHOICE_ENUM_Id(17,
                                SPA_VIDEO_FORMAT_BGRx, // Preferred Default
                                SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_RGBx,
-                               SPA_VIDEO_FORMAT_RGBA, SPA_VIDEO_FORMAT_xBGR, SPA_VIDEO_FORMAT_xRGB),
+                               SPA_VIDEO_FORMAT_RGBA, SPA_VIDEO_FORMAT_xBGR, SPA_VIDEO_FORMAT_ABGR,
+                               SPA_VIDEO_FORMAT_xRGB, SPA_VIDEO_FORMAT_ARGB, SPA_VIDEO_FORMAT_RGB, SPA_VIDEO_FORMAT_BGR,
+                               SPA_VIDEO_FORMAT_NV12, SPA_VIDEO_FORMAT_I420, SPA_VIDEO_FORMAT_YUY2,
+                               SPA_VIDEO_FORMAT_UYVY, SPA_VIDEO_FORMAT_YVYU, SPA_VIDEO_FORMAT_VYUY),
         SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(&def_rect, &min_rect, &max_rect),
         SPA_FORMAT_VIDEO_framerate, SPA_POD_CHOICE_RANGE_Fraction(&def_frac, &min_frac, &max_frac));
 
@@ -544,14 +559,23 @@ void VideoEncoder::cleanup_encoder()
     codec_ctx = nullptr;
 }
 
-void VideoEncoder::process_raw_frame(void* bgra_data, int stride, int pw_w, int pw_h)
+void VideoEncoder::process_raw_frame(void* raw_data, int stride, int pw_w, int pw_h)
 {
     std::lock_guard<std::mutex> lock(sws_mutex);
     if (!sws_ctx)
         return; // Drop frames until PipeWire negotiates the format
 
-    const uint8_t* in_data[1] = {(uint8_t*)bgra_data};
-    int in_linesize[1] = {stride};
+    const uint8_t* in_data[4] = {nullptr};
+    int in_linesize[4] = {0};
+
+    // Let FFmpeg automatically calculate plane pointers from the continuous memory block
+    av_image_fill_arrays((uint8_t**)in_data, in_linesize, (const uint8_t*)raw_data, pw_fmt, pw_w, pw_h, 1);
+
+    // Some Wayland compositors pad the primary stride further than FFmpeg expects.
+    if (stride > in_linesize[0])
+    {
+        in_linesize[0] = stride;
+    }
 
     sws_scale(sws_ctx, in_data, in_linesize, 0, pw_h, frame->data, frame->linesize);
 
