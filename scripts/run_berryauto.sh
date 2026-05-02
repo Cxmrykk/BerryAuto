@@ -18,6 +18,7 @@ USER_HOME=$(getent passwd "$CURRENT_USER" | cut -d: -f6)
 export DISPLAY=:0
 export XAUTHORITY="$USER_HOME/.Xauthority"
 export XDG_RUNTIME_DIR="/run/user/$USER_UID"
+export XDG_SESSION_TYPE="wayland"
 
 # Detect Wayland Socket
 if [ -z "$WAYLAND_DISPLAY" ]; then
@@ -28,11 +29,15 @@ if [ -z "$WAYLAND_DISPLAY" ]; then
     fi
 fi
 
+# Detect D-Bus Socket (Required for XDG Desktop Portal & PipeWire)
+if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
+    export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+fi
+
 xhost +SI:localuser:root > /dev/null 2>&1 || true
 
 # Disable screen blanking
 if [ -n "$WAYLAND_DISPLAY" ]; then
-    # Prevent Wayland screen blanking if applicable (compositor dependent)
     xset s reset > /dev/null 2>&1 || true
     xset s off > /dev/null 2>&1 || true
     xset -dpms > /dev/null 2>&1 || true
@@ -47,7 +52,7 @@ sudo /usr/local/bin/setup_opengal_gadget.sh
 # Force the USB serial to match the AOA serial
 echo "HU-AAAAAA001" | sudo tee /sys/kernel/config/usb_gadget/opengal/strings/0x409/serialnumber > /dev/null
 
-echo "[RUNNER] Environment: WAYLAND_DISPLAY=$WAYLAND_DISPLAY XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR"
+echo "[RUNNER] Environment: WAYLAND_DISPLAY=$WAYLAND_DISPLAY XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR DBUS=$DBUS_SESSION_BUS_ADDRESS"
 sudo -E ./berryautod/build/opengal_emitter &
 EMITTER_PID=$!
 
