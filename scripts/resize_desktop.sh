@@ -42,14 +42,26 @@ elif command -v xrandr >/dev/null 2>&1 && run_x11 xrandr >/dev/null 2>&1; then
     # Capture the raw output of xrandr to safely parse
     XRANDR_OUT=$(run_x11 xrandr)
     
-    # Find the connected screen (e.g. HDMI-1), or fallback to a headless 'default' screen
-    OUTPUT=$(echo "$XRANDR_OUT" | grep -w "connected" | head -n 1 | awk '{print $1}')
+    # 1. Look for a physically connected display
+    OUTPUT=$(echo "$XRANDR_OUT" | grep " connected" | head -n 1 | awk '{print $1}')
+    
+    # 2. Headless Fallback: Look for the 'primary' display (even if disconnected)
+    if [ -z "$OUTPUT" ]; then
+        OUTPUT=$(echo "$XRANDR_OUT" | grep "primary" | head -n 1 | awk '{print $1}')
+    fi
+    
+    # 3. Headless Fallback: Look for a 'default' display frame buffer
     if [ -z "$OUTPUT" ]; then
         OUTPUT=$(echo "$XRANDR_OUT" | grep "default" | head -n 1 | awk '{print $1}')
     fi
     
+    # 4. Absolute Fallback: Just grab the first HDMI/DP interface listed
     if [ -z "$OUTPUT" ]; then
-        echo "[RESIZE] ERROR: Failed to detect X11 output. Raw xrandr output:"
+        OUTPUT=$(echo "$XRANDR_OUT" | grep -E "^(HDMI|DP|VGA|DVI|Virtual|XWAYLAND)" | head -n 1 | awk '{print $1}')
+    fi
+    
+    if [ -z "$OUTPUT" ]; then
+        echo "[RESIZE] ERROR: Failed to detect ANY X11 output. Raw xrandr output:"
         echo "$XRANDR_OUT"
         exit 1
     fi
@@ -78,7 +90,7 @@ elif command -v xrandr >/dev/null 2>&1 && run_x11 xrandr >/dev/null 2>&1; then
 
     # Apply the resolution
     run_x11 xrandr --output "$OUTPUT" --mode "$MODE_NAME"
-    echo "[RESIZE] X11 Desktop successfully adjusted!"
+    echo "[RESIZE] X11 Desktop successfully adjusted to ${W}x${H}!"
 
 else
     echo "[RESIZE] ERROR: Desktop environment not accessible for user $REAL_USER!"
