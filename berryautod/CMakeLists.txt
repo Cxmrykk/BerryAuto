@@ -9,8 +9,6 @@ pkg_check_modules(OPENSSL REQUIRED openssl)
 pkg_check_modules(PROTOBUF REQUIRED protobuf)
 pkg_check_modules(FFMPEG REQUIRED libavcodec libavutil libswscale)
 pkg_check_modules(PIPEWIRE REQUIRED libpipewire-0.3)
-# CRITICAL FIX: Explicitly find SPA headers
-pkg_check_modules(SPA REQUIRED libspa-0.2)
 pkg_check_modules(X11 REQUIRED x11 xext)
 pkg_check_modules(GLIB REQUIRED glib-2.0 gio-2.0 gio-unix-2.0)
 
@@ -48,7 +46,6 @@ include_directories(
     ${PROTOBUF_INCLUDE_DIRS} 
     ${FFMPEG_INCLUDE_DIRS} 
     ${PIPEWIRE_INCLUDE_DIRS}
-    ${SPA_INCLUDE_DIRS}
     ${X11_INCLUDE_DIRS}
     ${GLIB_INCLUDE_DIRS}
     src 
@@ -64,7 +61,6 @@ target_link_libraries(opengal_emitter
     ${PROTOBUF_LIBRARIES} 
     ${FFMPEG_LIBRARIES}
     ${PIPEWIRE_LIBRARIES}
-    ${SPA_LIBRARIES}
     ${X11_LIBRARIES}
     ${GLIB_LIBRARIES}
     pthread
