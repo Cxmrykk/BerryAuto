@@ -150,8 +150,8 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
         return;
     }
 
-    // 3. Relaxed USB Backpressure Failsafe (Increased to 30 for 60 FPS overhead)
-    if (get_tx_queue_size() >= 30)
+    // 3. Relaxed USB Backpressure Failsafe for 2K/4K @ 60 FPS overhead
+    if (get_tx_queue_size() >= 60)
     {
         LOG_E("[WARNING] USB Queue Congested! Flushing pipeline and forcing a Keyframe.");
         flush_usb_tx_queue();

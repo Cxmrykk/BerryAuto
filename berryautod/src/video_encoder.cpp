@@ -207,18 +207,24 @@ bool VideoEncoder::init_encoder()
         codec_ctx->height = target_height;
         codec_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
 
-        // Dynamic 60 FPS pacing
+        // Force High-Definition color metadata to fix washed out colors on Head Units
+        codec_ctx->colorspace = AVCOL_SPC_BT709;
+        codec_ctx->color_range = AVCOL_RANGE_MPEG;
+        codec_ctx->color_primaries = AVCOL_PRI_BT709;
+        codec_ctx->color_trc = AVCOL_TRC_BT709;
+
+        // Dynamic FPS pacing
         codec_ctx->time_base = {1, 1000000};
         codec_ctx->framerate = {target_fps, 1};
         codec_ctx->gop_size = target_fps * 2; // Keyframe every 2 seconds
         codec_ctx->max_b_frames = 0;          // AA requires no B frames for lowest latency
 
-        // Upgrade from Baseline to Main profile for CABAC compression benefits
-        codec_ctx->profile = FF_PROFILE_H264_MAIN;
+        // Upgrade from Main to High profile for superior color gradient handling
+        codec_ctx->profile = FF_PROFILE_H264_HIGH;
 
-        // Increased Bitrate - USB 2.0 can easily handle 16+ Mbps. Let the encoder breathe!
-        int target_bitrate = static_cast<int>(target_width * target_height * target_fps * 0.12);
-        target_bitrate = std::clamp(target_bitrate, 4000000, 16000000);
+        // Increased Bitrate - Scale elegantly up to 4K limits. Cap at 40 Mbps.
+        int target_bitrate = static_cast<int>(target_width * target_height * target_fps * 0.15);
+        target_bitrate = std::clamp(target_bitrate, 4000000, 40000000);
 
         codec_ctx->bit_rate = target_bitrate;
         codec_ctx->rc_min_rate = target_bitrate;
@@ -230,8 +236,8 @@ bool VideoEncoder::init_encoder()
 
         if (std::string(codec->name) == "h264_v4l2m2m")
         {
-            // The v4l2m2m hardware wrapper requires the string variant instead of the macro
-            av_opt_set(codec_ctx->priv_data, "profile", "main", 0);
+            // The v4l2m2m hardware wrapper requires the string variant
+            av_opt_set(codec_ctx->priv_data, "profile", "high", 0);
         }
         else if (std::string(codec->name) == "libx264" || std::string(codec->name) == "libx265")
         {
@@ -255,8 +261,9 @@ bool VideoEncoder::init_encoder()
     av_frame_get_buffer(frame, 32);
     pkt = av_packet_alloc();
 
+    // SWS_BILINEAR fixes blocky chroma smearing over SWS_FAST_BILINEAR.
     sws_ctx = sws_getContext(target_width, target_height, AV_PIX_FMT_BGRA, target_width, target_height,
-                             AV_PIX_FMT_YUV420P, SWS_FAST_BILINEAR, NULL, NULL, NULL);
+                             AV_PIX_FMT_YUV420P, SWS_BILINEAR, NULL, NULL, NULL);
     return true;
 }
 
