@@ -2,12 +2,6 @@
 #include "aap_sender.hpp"
 #include "globals.hpp"
 #include "video_encoder.hpp"
-#include <algorithm>
-#include <chrono>
-#include <thread>
-#include <unistd.h>
-
-static bool is_recovering = false;
 
 void send_video_frame_internal(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
 {
@@ -15,7 +9,7 @@ void send_video_frame_internal(const std::vector<uint8_t>& nal_data, uint64_t ti
     pt.push_back(0x00);
     pt.push_back(0x00); // MEDIA_MESSAGE_DATA (Type 0)
 
-    // 64-bit Timestamp (Big Endian) required for all non-Protobuf Media Data
+    // 64-bit Timestamp (Big Endian)
     for (int i = 7; i >= 0; --i)
         pt.push_back((timestamp >> (i * 8)) & 0xFF);
 
@@ -27,7 +21,6 @@ void send_video_frame_internal(const std::vector<uint8_t>& nal_data, uint64_t ti
     }
     else
     {
-        // Must increment to keep proper sync with the car's ACKs
         video_unacked_count++;
     }
 }
@@ -35,45 +28,20 @@ void send_video_frame_internal(const std::vector<uint8_t>& nal_data, uint64_t ti
 void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
 {
     if (!(is_tls_connected || ssl_bypassed) || !video_channel_ready || !is_video_streaming.load())
-    {
-        is_recovering = false;
         return;
-    }
 
-    if (is_recovering)
+    // FIX: Flow Control relies strictly on the USB queue size.
+    // If the pipeline fills beyond 15 frames (0.5s of latency), it means the car's
+    // hardware decoder buffer is saturated. Clear our queue and force an IDR refresh.
+    if (get_tx_queue_size() >= 15)
     {
-        // Wait until BOTH the USB pipeline has drained AND the car's decoder has caught up with ACKs
-        if (get_tx_queue_size() > 0 || (max_video_unacked > 0 && video_unacked_count.load() >= max_video_unacked))
-            return;
-
-        if (video_streamer)
-            video_streamer->force_keyframe(); // Ensures the next frame has fresh inline SPS/PPS
-
-        is_recovering = false;
-        LOG_I("[RECOVERY] USB Pipeline is clear and decoder caught up. Requesting Keyframe to resume stream.");
-        return;
-    }
-
-    // Protocol flow control: Prevent overwhelming the car's hardware decoder
-    if (max_video_unacked > 0 && video_unacked_count.load() >= max_video_unacked)
-    {
-        LOG_E("[WARNING] Car decoder lagging! Max unacked reached (" + std::to_string(video_unacked_count.load()) +
-              "). Dropping frame.");
-        is_recovering = true;
-        return;
-    }
-
-    // 30 frames in the queue = exactly 1 second of lag. Dump it to catch up.
-    if (get_tx_queue_size() >= 30)
-    {
-        LOG_E("[WARNING] USB Queue Congested! Dropping frames to catch up.");
+        LOG_E("[WARNING] USB Queue Congested! Flushing pipeline and forcing a Keyframe.");
         flush_usb_tx_queue();
-        is_recovering = true;
-        return;
+        if (video_streamer)
+            video_streamer->force_keyframe();
+        return; // Drop this frame, let the stream catch up.
     }
 
-    // Pass the raw, pristine H.264 frame straight from the hardware encoder directly to the car.
-    // The hardware encoder outputs valid Annex-B framing natively.
     send_video_frame_internal(nal_data, timestamp);
 }
 

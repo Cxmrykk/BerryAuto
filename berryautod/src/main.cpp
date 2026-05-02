@@ -65,9 +65,17 @@ void stop_video_stream()
     is_video_streaming = false;
     if (video_streamer != nullptr)
     {
-        video_streamer->stop();
-        delete video_streamer;
+        VideoEncoder* enc = video_streamer;
         video_streamer = nullptr;
+        // FIX: Destroy the encoder in a detached thread to prevent
+        // a thread-join deadlock against the aap_mutex!
+        std::thread(
+            [enc]()
+            {
+                enc->stop();
+                delete enc;
+            })
+            .detach();
     }
 }
 

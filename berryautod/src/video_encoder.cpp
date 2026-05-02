@@ -209,7 +209,7 @@ bool VideoEncoder::init_encoder()
         codec_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
 
         // Strict 30 FPS pacing constraints
-        codec_ctx->time_base = {1, 30};
+        codec_ctx->time_base = {1, 1000000};
         codec_ctx->framerate = {30, 1};
         codec_ctx->gop_size = 30;
         codec_ctx->max_b_frames = 0;
@@ -281,7 +281,7 @@ void VideoEncoder::process_raw_frame(void* bgra_data, int stride, int /*pw_w*/, 
 
     sws_scale(sws_ctx, in_data, in_linesize, 0, pw_h, frame->data, frame->linesize);
 
-    frame->pts = frame_pts++;
+    frame->pts = get_monotonic_usec();
     frame->pict_type = request_keyframe.exchange(false) ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_NONE;
 
     int ret = avcodec_send_frame(codec_ctx, frame);
