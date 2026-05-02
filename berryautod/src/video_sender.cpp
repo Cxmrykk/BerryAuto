@@ -71,6 +71,55 @@ void extract_and_cache_sps_pps(const std::vector<uint8_t>& frame)
     }
 }
 
+// NEW: Strip out SPS/PPS headers before sending frames to the car to prevent decoder crashes
+std::vector<uint8_t> filter_sps_pps(const std::vector<uint8_t>& frame)
+{
+    std::vector<uint8_t> filtered;
+    size_t i = 0;
+    while (i < frame.size())
+    {
+        size_t start_code_len = 0;
+        if (i + 2 < frame.size() && frame[i] == 0 && frame[i + 1] == 0 && frame[i + 2] == 1)
+            start_code_len = 3;
+        else if (i + 3 < frame.size() && frame[i] == 0 && frame[i + 1] == 0 && frame[i + 2] == 0 && frame[i + 3] == 1)
+            start_code_len = 4;
+
+        if (start_code_len > 0 && i + start_code_len < frame.size())
+        {
+            uint8_t nal_type = frame[i + start_code_len] & 0x1F;
+            bool is_config = (nal_type == 7 || nal_type == 8); // SPS (7) or PPS (8)
+
+            size_t next_nal = frame.size();
+            for (size_t j = i + start_code_len; j < frame.size(); j++)
+            {
+                if (j + 2 < frame.size() && frame[j] == 0 && frame[j + 1] == 0 && frame[j + 2] == 1)
+                {
+                    next_nal = j;
+                    break;
+                }
+                if (j + 3 < frame.size() && frame[j] == 0 && frame[j + 1] == 0 && frame[j + 2] == 0 &&
+                    frame[j + 3] == 1)
+                {
+                    next_nal = j;
+                    break;
+                }
+            }
+
+            if (!is_config)
+            {
+                filtered.insert(filtered.end(), frame.begin() + i, frame.begin() + next_nal);
+            }
+            i = next_nal;
+        }
+        else
+        {
+            filtered.push_back(frame[i]);
+            i++;
+        }
+    }
+    return filtered;
+}
+
 void inject_cached_video_config()
 {
     std::vector<uint8_t> config_copy;
@@ -127,6 +176,11 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
             inject_cached_video_config();
     }
 
+    // CRITICAL: Strip out the SPS/PPS headers before sending the data to the car
+    std::vector<uint8_t> clean_nal_data = filter_sps_pps(nal_data);
+    if (clean_nal_data.empty())
+        return; // If the packet was *only* config data, drop it safely.
+
     // --- DRAIN & RECOVER STATE MACHINE ---
     if (is_recovering)
     {
@@ -147,7 +201,7 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
     if (get_tx_queue_size() >= 60)
     {
         LOG_E("[WARNING] USB Queue Congested! Entering Recovery Mode.");
-        flush_usb_tx_queue(); // CRITICAL FIX: Dump stale frames to instantly unstick the queue!
+        flush_usb_tx_queue();
         video_unacked_count = 0;
         is_recovering = true;
         return;
@@ -168,13 +222,13 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
     if (wait_cycles >= 500)
     {
         LOG_E("[WARNING] Video ACK timeout. Entering Recovery Mode.");
-        flush_usb_tx_queue(); // CRITICAL FIX: Prevent forever-wait loop!
+        flush_usb_tx_queue();
         video_unacked_count = 0;
         is_recovering = true;
         return;
     }
 
-    send_video_frame_internal(nal_data, timestamp);
+    send_video_frame_internal(clean_nal_data, timestamp);
 }
 
 void on_video_nal_ready(const std::vector<uint8_t>& nal_data, uint64_t timestamp)

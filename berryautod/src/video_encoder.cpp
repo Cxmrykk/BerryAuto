@@ -207,8 +207,6 @@ bool VideoEncoder::init_encoder()
         // Android Auto mandates Baseline profile
         codec_ctx->profile = FF_PROFILE_H264_BASELINE;
 
-        // Force a strictly conservative Bitrate (~1 Mbps) to prevent initial I-Frame bursting
-        // from overflowing the car's low-memory USB endpoints.
         int target_bitrate = 1500000;
 
         codec_ctx->bit_rate = target_bitrate;
@@ -283,9 +281,8 @@ void VideoEncoder::process_raw_frame(void* bgra_data, int stride, int /*pw_w*/, 
         if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF || ret < 0)
             break;
 
-        // CRITICAL FIX: Restore absolute clock timestamps! The Head Unit relies on these
-        // to sync the video buffer. Sending artificial 0-based PTS values will crash it.
-        auto now = std::chrono::system_clock::now().time_since_epoch();
+        // CRITICAL FIX: Monotonic clock to prevent timestamp jitters/drifts causing decoder panics
+        auto now = std::chrono::steady_clock::now().time_since_epoch();
         uint64_t absolute_ts = std::chrono::duration_cast<std::chrono::microseconds>(now).count();
 
         std::vector<uint8_t> nal_data(pkt->data, pkt->data + pkt->size);
@@ -323,8 +320,6 @@ void VideoEncoder::capture_loop()
 
                 auto now = std::chrono::steady_clock::now();
 
-                // CRITICAL FIX: Burst Preventer.
-                // If the Pi falls behind, do NOT instantly fire accumulated frames.
                 if (next_frame_time < now)
                 {
                     next_frame_time = now + frame_duration;
