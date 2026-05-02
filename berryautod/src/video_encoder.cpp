@@ -5,6 +5,14 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <time.h>
+
+static uint64_t get_monotonic_usec()
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
+}
 
 static void on_process(void* userdata)
 {
@@ -177,44 +185,65 @@ void VideoEncoder::cleanup_pipewire()
 // --- FFMPEG ENGINE ---
 bool VideoEncoder::init_encoder()
 {
-    // MUST use Software Encoding. The Pi Hardware encoder generates massive I-Frames
-    // that crash car decoders instantly.
-    codec = avcodec_find_encoder_by_name("libx264");
-    if (!codec)
+    // Restore Pi Hardware Encoder. Software libx264 caused instant USB crashes.
+    std::vector<std::string> encoder_names;
+    if (global_video_codec_type == 7)
+        encoder_names = {"hevc_v4l2m2m", "libx265", "hevc"};
+    else
+        encoder_names = {"h264_v4l2m2m", "h264_omx", "libx264", "h264"};
+
+    for (const auto& name : encoder_names)
     {
-        LOG_E("libx264 not found! Software encoding is required for stability.");
-        return false;
+        codec = avcodec_find_encoder_by_name(name.c_str());
+        if (!codec)
+        {
+            if (name == encoder_names.back())
+                codec = avcodec_find_encoder(global_video_codec_type == 7 ? AV_CODEC_ID_HEVC : AV_CODEC_ID_H264);
+            if (!codec)
+                continue;
+        }
+
+        codec_ctx = avcodec_alloc_context3(codec);
+        codec_ctx->width = target_width;
+        codec_ctx->height = target_height;
+        codec_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
+
+        // Strict 30 FPS pacing constraints
+        codec_ctx->time_base = {1, 30};
+        codec_ctx->framerate = {30, 1};
+        codec_ctx->gop_size = 30;
+        codec_ctx->max_b_frames = 0;
+        codec_ctx->profile = FF_PROFILE_H264_BASELINE;
+
+        // Sensible bitrate. High enough for quality, low enough to not choke USB 2.0 endpoints.
+        int target_bitrate = static_cast<int>(target_width * target_height * 30 * 0.10);
+        target_bitrate = std::clamp(target_bitrate, 2000000, 6000000);
+
+        codec_ctx->bit_rate = target_bitrate;
+        codec_ctx->rc_min_rate = target_bitrate;
+        codec_ctx->rc_max_rate = target_bitrate;
+        codec_ctx->rc_buffer_size = target_bitrate / 2;
+
+        codec_ctx->thread_count = std::max(1u, std::thread::hardware_concurrency());
+        codec_ctx->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
+
+        if (std::string(codec->name) == "h264_v4l2m2m")
+        {
+            av_opt_set(codec_ctx->priv_data, "profile", "baseline", 0);
+        }
+        else if (std::string(codec->name) == "libx264" || std::string(codec->name) == "libx265")
+        {
+            av_opt_set(codec_ctx->priv_data, "preset", "ultrafast", 0);
+            av_opt_set(codec_ctx->priv_data, "tune", "zerolatency", 0);
+        }
+
+        if (avcodec_open2(codec_ctx, codec, NULL) >= 0)
+            break;
+        avcodec_free_context(&codec_ctx);
+        codec = nullptr;
     }
 
-    codec_ctx = avcodec_alloc_context3(codec);
-    codec_ctx->width = target_width;
-    codec_ctx->height = target_height;
-    codec_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
-
-    // Stable 30 FPS
-    codec_ctx->time_base = {1, 30};
-    codec_ctx->framerate = {30, 1};
-    codec_ctx->gop_size = 30;
-    codec_ctx->max_b_frames = 0;
-
-    // Baseline profile mandated by Android Auto
-    codec_ctx->profile = FF_PROFILE_H264_BASELINE;
-
-    // Strict 1.5 Mbps bitrate to guarantee frame sizes stay small
-    int target_bitrate = 1500000;
-    codec_ctx->bit_rate = target_bitrate;
-    codec_ctx->rc_min_rate = target_bitrate;
-    codec_ctx->rc_max_rate = target_bitrate;
-    codec_ctx->rc_buffer_size = target_bitrate / 2;
-
-    codec_ctx->thread_count = std::max(1u, std::thread::hardware_concurrency());
-    codec_ctx->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
-
-    av_opt_set(codec_ctx->priv_data, "preset", "ultrafast", 0);
-    av_opt_set(codec_ctx->priv_data, "tune", "zerolatency", 0);
-    av_opt_set(codec_ctx->priv_data, "nal-hrd", "cbr", 0);
-
-    if (avcodec_open2(codec_ctx, codec, NULL) < 0)
+    if (!codec_ctx)
         return false;
 
     frame = av_frame_alloc();
@@ -262,12 +291,11 @@ void VideoEncoder::process_raw_frame(void* bgra_data, int stride, int /*pw_w*/, 
         if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF || ret < 0)
             break;
 
-        // CRITICAL FIX: The car expects PTS to start at 0 and increment steadily.
-        // 33,333 microseconds = Exactly 30 FPS.
-        uint64_t exact_ts = frame->pts * 33333;
+        // Use absolute system monotonic clock. This matches Android Auto spec perfectly.
+        uint64_t absolute_ts = get_monotonic_usec();
 
         std::vector<uint8_t> nal_data(pkt->data, pkt->data + pkt->size);
-        nal_callback(nal_data, exact_ts);
+        nal_callback(nal_data, absolute_ts);
         av_packet_unref(pkt);
     }
 }
@@ -291,23 +319,25 @@ void VideoEncoder::capture_loop()
         LOG_I("[Capture] X11 detected. Initializing XShm engine...");
         if (init_x11())
         {
-            auto frame_duration = std::chrono::microseconds(1000000 / 30);
-            auto next_frame_time = std::chrono::steady_clock::now() + frame_duration;
+            // STRICT 30 FPS PACING
+            uint64_t frame_interval_us = 1000000 / 30;
+            uint64_t next_frame_time = get_monotonic_usec() + frame_interval_us;
 
             while (running.load())
             {
                 XShmGetImage(dpy, root_window, img, 0, 0, AllPlanes);
                 process_raw_frame((uint8_t*)img->data, img->bytes_per_line, img->width, img->height);
 
-                auto now = std::chrono::steady_clock::now();
-                if (next_frame_time < now)
+                uint64_t now = get_monotonic_usec();
+                if (now < next_frame_time)
                 {
-                    next_frame_time = now + frame_duration;
+                    usleep(next_frame_time - now);
+                    next_frame_time += frame_interval_us;
                 }
                 else
                 {
-                    std::this_thread::sleep_until(next_frame_time);
-                    next_frame_time += frame_duration;
+                    // We lagged slightly, advance next frame to prevent rapid burst catch-ups
+                    next_frame_time = now + frame_interval_us;
                 }
             }
             cleanup_x11();
