@@ -36,6 +36,7 @@ extern int os_desktop_height;
 
 extern int global_video_config_index;
 extern int global_video_codec_type;
+extern int global_video_fps; // NEW: Dynamic FPS support
 extern int global_video_width;
 extern int global_video_height;
 extern int global_video_margin_w;

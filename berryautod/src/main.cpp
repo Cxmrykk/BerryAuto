@@ -48,6 +48,7 @@ int os_desktop_height = 480;
 
 int global_video_config_index = 0;
 int global_video_codec_type = 3;
+int global_video_fps = 60; // NEW: Initialize to 60 FPS
 int global_video_width = 800;
 int global_video_height = 480;
 int global_video_margin_w = 0;
@@ -183,8 +184,6 @@ void ep0_thread(int ep0)
                         LOG_I("[AOA] Received START (53). Acknowledged. Waiting 500ms to flush, then morphing...");
                         usleep(500000);
 
-                        // FIX: Forcefully break out of the blocking bulk read()
-                        // This instantly triggers the shell script's accessory morph!
                         should_exit = true;
                         exit(42);
                     }

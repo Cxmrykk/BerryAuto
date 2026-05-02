@@ -193,11 +193,11 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                             video_unacked_count = 0;
                             if (video_streamer == nullptr)
                             {
-                                video_streamer =
-                                    new VideoEncoder(global_video_width, global_video_height, on_video_nal_ready);
+                                video_streamer = new VideoEncoder(global_video_width, global_video_height,
+                                                                  global_video_fps, on_video_nal_ready);
                                 video_streamer->start();
                                 std::cout << "[VIDEO] Live Encoding Started (" << global_video_width << "x"
-                                          << global_video_height << ")." << std::endl;
+                                          << global_video_height << " @ " << global_video_fps << " FPS)." << std::endl;
                             }
                             video_streamer->force_keyframe();
                         }

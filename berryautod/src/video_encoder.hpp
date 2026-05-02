@@ -30,7 +30,7 @@ using NalCallback = std::function<void(const std::vector<uint8_t>&, uint64_t)>;
 class VideoEncoder
 {
 public:
-    VideoEncoder(int width, int height, NalCallback callback);
+    VideoEncoder(int width, int height, int fps, NalCallback callback);
     ~VideoEncoder();
 
     void start();
@@ -67,7 +67,7 @@ public:
     struct pw_stream* pw_stream = nullptr;
 
 private:
-    int target_width, target_height;
+    int target_width, target_height, target_fps;
     NalCallback nal_callback;
     std::atomic<bool> running{false};
     std::thread worker_thread;

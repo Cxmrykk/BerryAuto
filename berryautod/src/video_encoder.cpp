@@ -53,8 +53,8 @@ static const struct pw_stream_events stream_events = []()
     return ev;
 }();
 
-VideoEncoder::VideoEncoder(int width, int height, NalCallback callback)
-    : target_width(width), target_height(height), nal_callback(callback)
+VideoEncoder::VideoEncoder(int width, int height, int fps, NalCallback callback)
+    : target_width(width), target_height(height), target_fps(fps), nal_callback(callback)
 {
     pw_init(NULL, NULL);
 }
@@ -154,7 +154,7 @@ bool VideoEncoder::init_pipewire()
     memset(&info, 0, sizeof(info));
     info.format = SPA_VIDEO_FORMAT_BGRx;
     info.size = SPA_RECTANGLE((uint32_t)target_width, (uint32_t)target_height);
-    info.framerate = SPA_FRACTION(30, 1);
+    info.framerate = SPA_FRACTION(target_fps, 1);
 
     params[0] = spa_format_video_raw_build(&b, SPA_PARAM_EnumFormat, &info);
 
@@ -185,7 +185,6 @@ void VideoEncoder::cleanup_pipewire()
 // --- FFMPEG ENGINE ---
 bool VideoEncoder::init_encoder()
 {
-    // Restore Pi Hardware Encoder. Software libx264 caused instant USB crashes.
     std::vector<std::string> encoder_names;
     if (global_video_codec_type == 7)
         encoder_names = {"hevc_v4l2m2m", "libx265", "hevc"};
@@ -208,16 +207,18 @@ bool VideoEncoder::init_encoder()
         codec_ctx->height = target_height;
         codec_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
 
-        // Strict 30 FPS pacing constraints
+        // Dynamic 60 FPS pacing
         codec_ctx->time_base = {1, 1000000};
-        codec_ctx->framerate = {30, 1};
-        codec_ctx->gop_size = 30;
-        codec_ctx->max_b_frames = 0;
-        codec_ctx->profile = FF_PROFILE_H264_BASELINE;
+        codec_ctx->framerate = {target_fps, 1};
+        codec_ctx->gop_size = target_fps * 2; // Keyframe every 2 seconds
+        codec_ctx->max_b_frames = 0;          // AA requires no B frames for lowest latency
 
-        // Sensible bitrate. High enough for quality, low enough to not choke USB 2.0 endpoints.
-        int target_bitrate = static_cast<int>(target_width * target_height * 30 * 0.10);
-        target_bitrate = std::clamp(target_bitrate, 2000000, 6000000);
+        // Upgrade from Baseline to Main profile for CABAC compression benefits
+        codec_ctx->profile = FF_PROFILE_H264_MAIN;
+
+        // Increased Bitrate - USB 2.0 can easily handle 16+ Mbps. Let the encoder breathe!
+        int target_bitrate = static_cast<int>(target_width * target_height * target_fps * 0.12);
+        target_bitrate = std::clamp(target_bitrate, 4000000, 16000000);
 
         codec_ctx->bit_rate = target_bitrate;
         codec_ctx->rc_min_rate = target_bitrate;
@@ -229,7 +230,8 @@ bool VideoEncoder::init_encoder()
 
         if (std::string(codec->name) == "h264_v4l2m2m")
         {
-            av_opt_set(codec_ctx->priv_data, "profile", "baseline", 0);
+            // The v4l2m2m hardware wrapper requires the string variant instead of the macro
+            av_opt_set(codec_ctx->priv_data, "profile", "main", 0);
         }
         else if (std::string(codec->name) == "libx264" || std::string(codec->name) == "libx265")
         {
@@ -319,8 +321,7 @@ void VideoEncoder::capture_loop()
         LOG_I("[Capture] X11 detected. Initializing XShm engine...");
         if (init_x11())
         {
-            // STRICT 30 FPS PACING
-            uint64_t frame_interval_us = 1000000 / 30;
+            uint64_t frame_interval_us = 1000000 / target_fps;
             uint64_t next_frame_time = get_monotonic_usec() + frame_interval_us;
 
             while (running.load())

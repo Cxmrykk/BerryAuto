@@ -44,7 +44,6 @@ void handle_channel_open_response()
         {
             input_channel_ready = true;
 
-            // NEW: Initialize the virtual mouse immediately so the OS has time to register it!
             std::cout << ">>> Initializing Virtual Pointer Device... <<<" << std::endl;
             init_uinput();
 
@@ -182,6 +181,10 @@ void process_service_discovery_response(uint8_t* payload_data, int payload_len)
                         const auto& video_config = svc.media_sink_service().video_configs(best_idx);
                         int res_type = video_config.has_codec_resolution() ? video_config.codec_resolution() : 1;
 
+                        // EXTRACT FRAMERATE
+                        int fps_type = video_config.has_frame_rate() ? video_config.frame_rate() : 1;
+                        global_video_fps = (fps_type == 2) ? 30 : 60; // Type 1 = 60, Type 2 = 30
+
                         switch (res_type)
                         {
                             case 1:
@@ -242,8 +245,8 @@ void process_service_discovery_response(uint8_t* payload_data, int payload_len)
                         global_video_codec_type = codec;
 
                         std::cout << "[INFO] Headunit negotiated VIDEO (Channel " << svc_id << ") at "
-                                  << global_video_width << "x" << global_video_height << " (Codec " << codec
-                                  << ", Index " << best_idx << ")" << std::endl;
+                                  << global_video_width << "x" << global_video_height << " @ " << global_video_fps
+                                  << " FPS (Codec " << codec << ", Index " << best_idx << ")" << std::endl;
                     }
                     else
                     {

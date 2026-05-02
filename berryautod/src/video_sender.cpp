@@ -150,8 +150,8 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
         return;
     }
 
-    // 3. Last Resort USB Backpressure Failsafe
-    if (get_tx_queue_size() >= 10)
+    // 3. Relaxed USB Backpressure Failsafe (Increased to 30 for 60 FPS overhead)
+    if (get_tx_queue_size() >= 30)
     {
         LOG_E("[WARNING] USB Queue Congested! Flushing pipeline and forcing a Keyframe.");
         flush_usb_tx_queue();
