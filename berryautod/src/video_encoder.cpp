@@ -17,18 +17,30 @@ static void on_process(void* userdata)
     if (buf->datas[0].data)
     {
         int stride = buf->datas[0].chunk->stride;
-        // The compositor negotiated to matching target dimensions
         enc->process_pipewire_frame(buf->datas[0].data, stride, enc->get_desktop_width(), enc->get_desktop_height());
     }
     pw_stream_queue_buffer(enc->pw_stream, b);
 }
 
-// C++ safe initialization (avoids designated initializer warnings)
+// NEW: Track exactly what the PipeWire stream is doing
+static void on_state_changed(void* userdata, enum pw_stream_state old, enum pw_stream_state state, const char* error)
+{
+    if (error)
+    {
+        LOG_E("[PipeWire] Stream Error: " << error);
+    }
+    else
+    {
+        LOG_I("[PipeWire] Stream State changed to: " << pw_stream_state_as_string(state));
+    }
+}
+
 static const struct pw_stream_events stream_events = []()
 {
     struct pw_stream_events ev{};
     ev.version = PW_VERSION_STREAM_EVENTS;
     ev.process = on_process;
+    ev.state_changed = on_state_changed;
     return ev;
 }();
 
@@ -77,11 +89,15 @@ bool VideoEncoder::init_pipewire()
     pw_ctx = pw_context_new(pw_main_loop_get_loop(pw_loop), NULL, 0);
     pw_core = pw_context_connect(pw_ctx, NULL, 0);
     if (!pw_core)
+    {
+        LOG_E("[PipeWire] Failed to connect to core. Is the PipeWire daemon running?");
         return false;
+    }
 
+    // Relaxed requirements to force auto-linking to the X11 screen module
     pw_stream = pw_stream_new(pw_core, "OpenGAL Capture",
                               pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture",
-                                                PW_KEY_MEDIA_ROLE, "Screen", NULL));
+                                                PW_KEY_NODE_NAME, "OpenGAL_Stream", NULL));
 
     pw_stream_add_listener(pw_stream, &stream_listener, &stream_events, this);
 
@@ -89,7 +105,6 @@ bool VideoEncoder::init_pipewire()
     struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
     const struct spa_pod* params[1];
 
-    // C++ Safe Struct Instantiation (fixes the "taking address of rvalue" compiler error)
     struct spa_video_info_raw info;
     memset(&info, 0, sizeof(info));
     info.format = SPA_VIDEO_FORMAT_BGRx;
@@ -98,8 +113,14 @@ bool VideoEncoder::init_pipewire()
 
     params[0] = spa_format_video_raw_build(&b, SPA_PARAM_EnumFormat, &info);
 
-    pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, PW_ID_ANY,
-                      (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 1);
+    int res = pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, PW_ID_ANY,
+                                (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 1);
+
+    if (res < 0)
+    {
+        LOG_E("[PipeWire] pw_stream_connect failed: " << spa_strerror(res));
+        return false;
+    }
 
     return true;
 }
@@ -164,7 +185,10 @@ bool VideoEncoder::init_encoder()
     }
 
     if (!codec_ctx)
+    {
+        LOG_E("[FFmpeg] Failed to allocate encoder context.");
         return false;
+    }
 
     frame = av_frame_alloc();
     frame->format = codec_ctx->pix_fmt;
