@@ -4,8 +4,10 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <gio/gio.h>
 #include <iostream>
 #include <time.h>
+#include <unistd.h>
 
 static uint64_t get_monotonic_usec()
 {
@@ -13,6 +15,163 @@ static uint64_t get_monotonic_usec()
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
 }
+
+// -------------------------------------------------------------------------
+// D-Bus XDG Desktop Portal Negotiator
+// -------------------------------------------------------------------------
+static uint32_t negotiated_node_id = 0;
+static GMainLoop* dbus_loop = nullptr;
+
+static void on_signal_response(GDBusConnection* conn, const gchar* sender, const gchar* path, const gchar* iface,
+                               const gchar* signal, GVariant* params, gpointer user_data)
+{
+    (void)conn;
+    (void)sender;
+    (void)path;
+    (void)iface;
+    (void)signal;
+    int step = GPOINTER_TO_INT(user_data);
+    uint32_t response = 0;
+    GVariant* results = nullptr;
+
+    g_variant_get(params, "(u@a{sv})", &response, &results);
+
+    if (response != 0)
+    {
+        LOG_E("[Portal] Request failed or cancelled (response=" << response
+                                                                << "). Ensure chooser_type=none is set in config!");
+        if (results)
+            g_variant_unref(results);
+        g_main_loop_quit(dbus_loop);
+        return;
+    }
+
+    if (step == 3)
+    {
+        GVariant* streams = g_variant_lookup_value(results, "streams", G_VARIANT_TYPE("a(ua{sv})"));
+        if (streams)
+        {
+            GVariantIter iter;
+            g_variant_iter_init(&iter, streams);
+            uint32_t node_id;
+            GVariant* stream_props;
+            if (g_variant_iter_next(&iter, "(u@a{sv})", &node_id, &stream_props))
+            {
+                negotiated_node_id = node_id;
+                g_variant_unref(stream_props);
+            }
+            g_variant_unref(streams);
+        }
+    }
+
+    if (results)
+        g_variant_unref(results);
+    g_main_loop_quit(dbus_loop);
+}
+
+static bool negotiate_wayland_screencast(uint32_t& out_node_id)
+{
+    GError* error = nullptr;
+    GDBusConnection* conn = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, &error);
+    if (!conn)
+    {
+        LOG_E("[Portal] Failed to connect to D-Bus Session: " << error->message);
+        g_error_free(error);
+        return false;
+    }
+
+    // Determine deterministic session and request paths based on our unique D-Bus name
+    std::string sender = g_dbus_connection_get_unique_name(conn);
+    sender.erase(std::remove(sender.begin(), sender.end(), ':'), sender.end());
+    std::replace(sender.begin(), sender.end(), '.', '_');
+
+    std::string session_path = "/org/freedesktop/portal/desktop/session/" + sender + "/berryauto";
+    std::string request_path = "/org/freedesktop/portal/desktop/request/" + sender;
+
+    dbus_loop = g_main_loop_new(nullptr, FALSE);
+
+    // STEP 1: CreateSession
+    guint sub1 =
+        g_dbus_connection_signal_subscribe(conn, "org.freedesktop.portal.Desktop", "org.freedesktop.portal.Request",
+                                           "Response", (request_path + "/req1").c_str(), nullptr,
+                                           G_DBUS_SIGNAL_FLAGS_NONE, on_signal_response, GINT_TO_POINTER(1), nullptr);
+
+    GVariantBuilder b1;
+    g_variant_builder_init(&b1, G_VARIANT_TYPE_VARDICT);
+    g_variant_builder_add(&b1, "{sv}", "session_handle_token", g_variant_new_string("berryauto"));
+    g_variant_builder_add(&b1, "{sv}", "handle_token", g_variant_new_string("req1"));
+
+    GVariant* res1 = g_dbus_connection_call_sync(
+        conn, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop", "org.freedesktop.portal.ScreenCast",
+        "CreateSession", g_variant_new("(a{sv})", &b1), nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, &error);
+    if (error)
+    {
+        LOG_E("[Portal] CreateSession failed: " << error->message);
+        return false;
+    }
+    g_variant_unref(res1);
+    g_main_loop_run(dbus_loop);
+    g_dbus_connection_signal_unsubscribe(conn, sub1);
+
+    // STEP 2: SelectSources
+    guint sub2 =
+        g_dbus_connection_signal_subscribe(conn, "org.freedesktop.portal.Desktop", "org.freedesktop.portal.Request",
+                                           "Response", (request_path + "/req2").c_str(), nullptr,
+                                           G_DBUS_SIGNAL_FLAGS_NONE, on_signal_response, GINT_TO_POINTER(2), nullptr);
+
+    GVariantBuilder b2;
+    g_variant_builder_init(&b2, G_VARIANT_TYPE_VARDICT);
+    g_variant_builder_add(&b2, "{sv}", "multiple", g_variant_new_boolean(FALSE));
+    g_variant_builder_add(&b2, "{sv}", "types", g_variant_new_uint32(1)); // 1 = monitor
+    g_variant_builder_add(&b2, "{sv}", "handle_token", g_variant_new_string("req2"));
+
+    GVariant* res2 = g_dbus_connection_call_sync(conn, "org.freedesktop.portal.Desktop",
+                                                 "/org/freedesktop/portal/desktop", "org.freedesktop.portal.ScreenCast",
+                                                 "SelectSources", g_variant_new("(oa{sv})", session_path.c_str(), &b2),
+                                                 nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, &error);
+    if (error)
+    {
+        LOG_E("[Portal] SelectSources failed: " << error->message);
+        return false;
+    }
+    g_variant_unref(res2);
+    g_main_loop_run(dbus_loop);
+    g_dbus_connection_signal_unsubscribe(conn, sub2);
+
+    // STEP 3: Start
+    guint sub3 =
+        g_dbus_connection_signal_subscribe(conn, "org.freedesktop.portal.Desktop", "org.freedesktop.portal.Request",
+                                           "Response", (request_path + "/req3").c_str(), nullptr,
+                                           G_DBUS_SIGNAL_FLAGS_NONE, on_signal_response, GINT_TO_POINTER(3), nullptr);
+
+    GVariantBuilder b3;
+    g_variant_builder_init(&b3, G_VARIANT_TYPE_VARDICT);
+    g_variant_builder_add(&b3, "{sv}", "handle_token", g_variant_new_string("req3"));
+
+    GVariant* res3 = g_dbus_connection_call_sync(conn, "org.freedesktop.portal.Desktop",
+                                                 "/org/freedesktop/portal/desktop", "org.freedesktop.portal.ScreenCast",
+                                                 "Start", g_variant_new("(osa{sv})", session_path.c_str(), "", &b3),
+                                                 nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, &error);
+    if (error)
+    {
+        LOG_E("[Portal] Start failed: " << error->message);
+        return false;
+    }
+    g_variant_unref(res3);
+    g_main_loop_run(dbus_loop);
+    g_dbus_connection_signal_unsubscribe(conn, sub3);
+
+    g_main_loop_unref(dbus_loop);
+    g_object_unref(conn);
+
+    if (negotiated_node_id > 0)
+    {
+        out_node_id = negotiated_node_id;
+        return true;
+    }
+    return false;
+}
+// -------------------------------------------------------------------------
 
 static void on_process(void* userdata)
 {
@@ -129,7 +288,7 @@ void VideoEncoder::cleanup_x11()
 }
 
 // --- WAYLAND/PIPEWIRE ENGINE ---
-bool VideoEncoder::init_pipewire()
+bool VideoEncoder::init_pipewire(uint32_t node_id)
 {
     pw_loop = pw_main_loop_new(NULL);
     if (!pw_loop)
@@ -139,22 +298,18 @@ bool VideoEncoder::init_pipewire()
     }
 
     pw_ctx = pw_context_new(pw_main_loop_get_loop(pw_loop), NULL, 0);
-    if (!pw_ctx)
-    {
-        LOG_E("[PipeWire] Failed to create context");
-        return false;
-    }
-
     pw_core = pw_context_connect(pw_ctx, NULL, 0);
     if (!pw_core)
     {
-        LOG_E("[PipeWire] Failed to connect to core. Check if PipeWire is running and XDG_RUNTIME_DIR is valid.");
+        LOG_E("[PipeWire] Failed to connect to core");
         return false;
     }
 
-    pw_stream = pw_stream_new(pw_core, "OpenGAL Capture",
-                              pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture",
-                                                PW_KEY_MEDIA_ROLE, "Screen", PW_KEY_NODE_NAME, "OpenGAL_Stream", NULL));
+    // TARGET THE SPECIFIC NODE ID NEGOTIATED VIA D-BUS
+    pw_stream =
+        pw_stream_new(pw_core, "OpenGAL Capture",
+                      pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture", PW_KEY_MEDIA_ROLE,
+                                        "Screen", PW_KEY_TARGET_OBJECT, std::to_string(node_id).c_str(), NULL));
 
     pw_stream_add_listener(pw_stream, &stream_listener, &stream_events, this);
 
@@ -178,8 +333,6 @@ bool VideoEncoder::init_pipewire()
         LOG_E("[PipeWire] Failed to connect stream: " << spa_strerror(res));
         return false;
     }
-
-    LOG_I("[PipeWire] Stream connected successfully");
     return true;
 }
 
@@ -248,9 +401,7 @@ bool VideoEncoder::init_encoder()
         codec_ctx->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
 
         if (std::string(codec->name) == "h264_v4l2m2m")
-        {
             av_opt_set(codec_ctx->priv_data, "profile", "high", 0);
-        }
         else if (std::string(codec->name) == "libx264" || std::string(codec->name) == "libx265")
         {
             av_opt_set(codec_ctx->priv_data, "preset", "ultrafast", 0);
@@ -325,15 +476,21 @@ void VideoEncoder::capture_loop()
 
     if (getenv("WAYLAND_DISPLAY"))
     {
-        LOG_I("[Capture] Wayland detected. Initializing PipeWire engine...");
-        if (init_pipewire())
+        LOG_I("[Capture] Wayland detected. Negotiating D-Bus ScreenCast Session...");
+        uint32_t node_id = 0;
+
+        if (negotiate_wayland_screencast(node_id))
         {
-            pw_main_loop_run(pw_loop);
-            cleanup_pipewire();
+            LOG_I("[Capture] ScreenCast Negotiated successfully! Target Node ID: " << node_id);
+            if (init_pipewire(node_id))
+            {
+                pw_main_loop_run(pw_loop);
+                cleanup_pipewire();
+            }
         }
         else
         {
-            LOG_E("[Capture] Failed to initialize PipeWire engine.");
+            LOG_E("[Capture] Wayland ScreenCast negotiation failed. Did you configure xdg-desktop-portal-wlr?");
         }
     }
     else

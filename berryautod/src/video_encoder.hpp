@@ -45,22 +45,6 @@ public:
     {
         return target_height;
     }
-    int get_scaled_w() const
-    {
-        return target_width;
-    }
-    int get_scaled_h() const
-    {
-        return target_height;
-    }
-    int get_offset_x() const
-    {
-        return 0;
-    }
-    int get_offset_y() const
-    {
-        return 0;
-    }
 
     void process_raw_frame(void* data, int stride, int width, int height);
 
@@ -86,7 +70,7 @@ private:
     struct pw_context* pw_ctx = nullptr;
     struct pw_core* pw_core = nullptr;
     struct spa_hook stream_listener;
-    bool init_pipewire();
+    bool init_pipewire(uint32_t node_id);
     void cleanup_pipewire();
 
     // --- FFmpeg ---
@@ -95,7 +79,6 @@ private:
     AVFrame* frame = nullptr;
     AVPacket* pkt = nullptr;
     SwsContext* sws_ctx = nullptr;
-    uint64_t frame_pts = 0;
     bool init_encoder();
     void cleanup_encoder();
 
