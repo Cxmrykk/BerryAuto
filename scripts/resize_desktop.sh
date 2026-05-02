@@ -65,11 +65,6 @@ elif command -v xrandr >/dev/null 2>&1 && run_x11 xrandr >/dev/null 2>&1; then
     fi
 
     run_x11 xrandr --output "$OUTPUT" --mode "$MODE_NAME"
-
-    # Force PipeWire to create an X11 screen capture node
-    echo "[RESIZE] Hooking X11 display into PipeWire..."
-    run_x11 pw-cli load-module libpipewire-module-x11-x11 || echo "[RESIZE] Warning: Could not load PipeWire X11 module."
-    
     echo "[RESIZE] X11 Desktop successfully adjusted to $MODE_NAME!"
 
 else

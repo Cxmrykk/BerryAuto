@@ -7,6 +7,9 @@
 
 extern "C"
 {
+#include <X11/Xlib.h>
+#include <X11/Xutil.h>
+#include <X11/extensions/XShm.h>
 #include <libavcodec/avcodec.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/opt.h>
@@ -14,7 +17,13 @@ extern "C"
 #include <pipewire/pipewire.h>
 #include <spa/param/video/format-utils.h>
 #include <spa/utils/result.h>
+#include <sys/ipc.h>
+#include <sys/shm.h>
 }
+
+#undef Status
+#undef None
+#undef Bool
 
 using NalCallback = std::function<void(const std::vector<uint8_t>&, uint64_t)>;
 
@@ -53,9 +62,8 @@ public:
         return 0;
     }
 
-    void process_pipewire_frame(void* data, int stride, int width, int height);
+    void process_raw_frame(void* data, int stride, int width, int height);
 
-    // Make PipeWire stream public so the static C callback can access it
     struct pw_stream* pw_stream = nullptr;
 
 private:
@@ -65,23 +73,31 @@ private:
     std::thread worker_thread;
     std::atomic<bool> request_keyframe{false};
 
-    // PipeWire contexts
+    // --- X11 Fallback ---
+    Display* dpy = nullptr;
+    Window root_window;
+    XImage* img = nullptr;
+    XShmSegmentInfo shminfo;
+    bool init_x11();
+    void cleanup_x11();
+
+    // --- PipeWire ---
     struct pw_main_loop* pw_loop = nullptr;
     struct pw_context* pw_ctx = nullptr;
     struct pw_core* pw_core = nullptr;
     struct spa_hook stream_listener;
+    bool init_pipewire();
+    void cleanup_pipewire();
 
-    // FFmpeg
+    // --- FFmpeg ---
     const AVCodec* codec = nullptr;
     AVCodecContext* codec_ctx = nullptr;
     AVFrame* frame = nullptr;
     AVPacket* pkt = nullptr;
     SwsContext* sws_ctx = nullptr;
     uint64_t frame_pts = 0;
-
-    bool init_pipewire();
-    void cleanup_pipewire();
     bool init_encoder();
     void cleanup_encoder();
+
     void capture_loop();
 };

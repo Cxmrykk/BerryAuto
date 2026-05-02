@@ -17,17 +17,15 @@ static void on_process(void* userdata)
     if (buf->datas[0].data)
     {
         int stride = buf->datas[0].chunk->stride;
-        enc->process_pipewire_frame(buf->datas[0].data, stride, enc->get_desktop_width(), enc->get_desktop_height());
+        enc->process_raw_frame(buf->datas[0].data, stride, enc->get_desktop_width(), enc->get_desktop_height());
     }
     pw_stream_queue_buffer(enc->pw_stream, b);
 }
 
-// NEW: Track exactly what the PipeWire stream is doing
 static void on_state_changed(void* userdata, enum pw_stream_state old, enum pw_stream_state state, const char* error)
 {
-    (void)userdata; // Silence compiler warning
-    (void)old;      // Silence compiler warning
-
+    (void)userdata;
+    (void)old;
     if (error)
     {
         LOG_E("[PipeWire] Stream Error: " << error);
@@ -83,6 +81,46 @@ void VideoEncoder::force_keyframe()
     request_keyframe = true;
 }
 
+// --- X11 ENGINE ---
+bool VideoEncoder::init_x11()
+{
+    const char* disp_env = getenv("DISPLAY");
+    if (!disp_env)
+        setenv("DISPLAY", ":0", 1);
+
+    dpy = XOpenDisplay(NULL);
+    if (!dpy)
+        return false;
+
+    root_window = DefaultRootWindow(dpy);
+    img = XShmCreateImage(dpy, DefaultVisual(dpy, DefaultScreen(dpy)), DefaultDepth(dpy, DefaultScreen(dpy)), ZPixmap,
+                          NULL, &shminfo, target_width, target_height);
+    shminfo.shmid = shmget(IPC_PRIVATE, img->bytes_per_line * img->height, IPC_CREAT | 0777);
+    shminfo.shmaddr = img->data = (char*)shmat(shminfo.shmid, 0, 0);
+    shminfo.readOnly = False;
+    XShmAttach(dpy, &shminfo);
+    return true;
+}
+
+void VideoEncoder::cleanup_x11()
+{
+    if (img)
+    {
+        XShmDetach(dpy, &shminfo);
+        XSync(dpy, False);
+        XDestroyImage(img);
+        shmdt(shminfo.shmaddr);
+        shmctl(shminfo.shmid, IPC_RMID, 0);
+        img = nullptr;
+    }
+    if (dpy)
+    {
+        XCloseDisplay(dpy);
+        dpy = nullptr;
+    }
+}
+
+// --- WAYLAND/PIPEWIRE ENGINE ---
 bool VideoEncoder::init_pipewire()
 {
     pw_loop = pw_main_loop_new(NULL);
@@ -92,12 +130,8 @@ bool VideoEncoder::init_pipewire()
     pw_ctx = pw_context_new(pw_main_loop_get_loop(pw_loop), NULL, 0);
     pw_core = pw_context_connect(pw_ctx, NULL, 0);
     if (!pw_core)
-    {
-        LOG_E("[PipeWire] Failed to connect to core. Is the PipeWire daemon running?");
         return false;
-    }
 
-    // Relaxed requirements to force auto-linking to the X11 screen module
     pw_stream = pw_stream_new(pw_core, "OpenGAL Capture",
                               pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture",
                                                 PW_KEY_MEDIA_ROLE, "Screen", PW_KEY_NODE_NAME, "OpenGAL_Stream", NULL));
@@ -120,11 +154,7 @@ bool VideoEncoder::init_pipewire()
                                 (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 1);
 
     if (res < 0)
-    {
-        LOG_E("[PipeWire] pw_stream_connect failed: " << spa_strerror(res));
         return false;
-    }
-
     return true;
 }
 
@@ -144,6 +174,7 @@ void VideoEncoder::cleanup_pipewire()
     pw_loop = nullptr;
 }
 
+// --- FFMPEG ENGINE ---
 bool VideoEncoder::init_encoder()
 {
     std::vector<std::string> encoder_names;
@@ -188,10 +219,7 @@ bool VideoEncoder::init_encoder()
     }
 
     if (!codec_ctx)
-    {
-        LOG_E("[FFmpeg] Failed to allocate encoder context.");
         return false;
-    }
 
     frame = av_frame_alloc();
     frame->format = codec_ctx->pix_fmt;
@@ -202,7 +230,6 @@ bool VideoEncoder::init_encoder()
 
     sws_ctx = sws_getContext(target_width, target_height, AV_PIX_FMT_BGRA, target_width, target_height,
                              AV_PIX_FMT_YUV420P, SWS_FAST_BILINEAR, NULL, NULL, NULL);
-
     return true;
 }
 
@@ -222,7 +249,7 @@ void VideoEncoder::cleanup_encoder()
     codec_ctx = nullptr;
 }
 
-void VideoEncoder::process_pipewire_frame(void* bgra_data, int stride, int /*pw_w*/, int pw_h)
+void VideoEncoder::process_raw_frame(void* bgra_data, int stride, int /*pw_w*/, int pw_h)
 {
     const uint8_t* in_data[1] = {(uint8_t*)bgra_data};
     int in_linesize[1] = {stride};
@@ -250,16 +277,38 @@ void VideoEncoder::process_pipewire_frame(void* bgra_data, int stride, int /*pw_
 
 void VideoEncoder::capture_loop()
 {
-    if (!init_encoder() || !init_pipewire())
-    {
-        cleanup_encoder();
-        cleanup_pipewire();
+    if (!init_encoder())
         return;
+
+    if (getenv("WAYLAND_DISPLAY"))
+    {
+        LOG_I("[Capture] Wayland detected. Initializing PipeWire engine...");
+        if (init_pipewire())
+        {
+            pw_main_loop_run(pw_loop);
+            cleanup_pipewire();
+        }
+    }
+    else
+    {
+        LOG_I("[Capture] X11 detected. Initializing XShm engine...");
+        if (init_x11())
+        {
+            auto frame_duration = std::chrono::microseconds(1000000 / 60);
+            while (running.load())
+            {
+                auto start_time = std::chrono::steady_clock::now();
+                XShmGetImage(dpy, root_window, img, 0, 0, AllPlanes);
+                process_raw_frame((uint8_t*)img->data, img->bytes_per_line, img->width, img->height);
+
+                auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() -
+                                                                                     start_time);
+                if (elapsed < frame_duration)
+                    std::this_thread::sleep_for(frame_duration - elapsed);
+            }
+            cleanup_x11();
+        }
     }
 
-    // This will now sit and process frames if the stream State goes to "Streaming"
-    pw_main_loop_run(pw_loop);
-
-    cleanup_pipewire();
     cleanup_encoder();
 }

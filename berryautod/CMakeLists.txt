@@ -9,6 +9,7 @@ pkg_check_modules(OPENSSL REQUIRED openssl)
 pkg_check_modules(PROTOBUF REQUIRED protobuf)
 pkg_check_modules(FFMPEG REQUIRED libavcodec libavutil libswscale)
 pkg_check_modules(PIPEWIRE REQUIRED libpipewire-0.3)
+pkg_check_modules(X11 REQUIRED x11 xext)
 
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS 
     "${CMAKE_SOURCE_DIR}/certs/android_auto.crt" 
@@ -44,6 +45,7 @@ include_directories(
     ${PROTOBUF_INCLUDE_DIRS} 
     ${FFMPEG_INCLUDE_DIRS} 
     ${PIPEWIRE_INCLUDE_DIRS}
+    ${X11_INCLUDE_DIRS}
     src 
     ${GENERATED_DIR}
 )
@@ -57,5 +59,6 @@ target_link_libraries(opengal_emitter
     ${PROTOBUF_LIBRARIES} 
     ${FFMPEG_LIBRARIES}
     ${PIPEWIRE_LIBRARIES}
+    ${X11_LIBRARIES}
     pthread
 )
