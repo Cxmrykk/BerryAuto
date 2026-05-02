@@ -1,7 +1,7 @@
 #!/bin/bash
 cleanup() {
     echo "[RUNNER] Shutting down..."
-    pkill -SIGINT opengal_emitter
+    sudo pkill -9 opengal_emitter
     sleep 1
     if [ -d "/sys/kernel/config/usb_gadget/opengal" ]; then
         echo "" | sudo tee "/sys/kernel/config/usb_gadget/opengal/UDC" > /dev/null 2>&1
@@ -9,6 +9,9 @@ cleanup() {
     exit
 }
 trap cleanup SIGINT
+
+# Kill any old ghost root processes from previous runs!
+sudo pkill -9 opengal_emitter 2>/dev/null || true
 
 # Identify real user behind sudo
 CURRENT_USER=${SUDO_USER:-$USER}
@@ -19,6 +22,11 @@ export DISPLAY=:0
 export XAUTHORITY="$USER_HOME/.Xauthority"
 export XDG_RUNTIME_DIR="/run/user/$USER_UID"
 export XDG_SESSION_TYPE="wayland"
+
+# CRITICAL: Portal needs to know which backend to use
+if [ -z "$XDG_CURRENT_DESKTOP" ]; then
+    export XDG_CURRENT_DESKTOP="Wayfire"
+fi
 
 # Detect Wayland Socket
 if [ -z "$WAYLAND_DISPLAY" ]; then
@@ -52,7 +60,7 @@ sudo /usr/local/bin/setup_opengal_gadget.sh
 # Force the USB serial to match the AOA serial
 echo "HU-AAAAAA001" | sudo tee /sys/kernel/config/usb_gadget/opengal/strings/0x409/serialnumber > /dev/null
 
-echo "[RUNNER] Environment: WAYLAND_DISPLAY=$WAYLAND_DISPLAY XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR DBUS=$DBUS_SESSION_BUS_ADDRESS"
+echo "[RUNNER] Environment: WAYLAND_DISPLAY=$WAYLAND_DISPLAY XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR DBUS=$DBUS_SESSION_BUS_ADDRESS DESKTOP=$XDG_CURRENT_DESKTOP"
 # Run daemon as the standard user! (No sudo)
 ./berryautod/build/opengal_emitter &
 EMITTER_PID=$!
