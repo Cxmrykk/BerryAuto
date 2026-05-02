@@ -18,7 +18,7 @@ run_wayland() {
 }
 
 run_x11() {
-    sudo -u "$REAL_USER" env DISPLAY=":0" XAUTHORITY="$USER_HOME/.Xauthority" "$@"
+    sudo -u "$REAL_USER" env XDG_RUNTIME_DIR="/run/user/$USER_UID" DISPLAY=":0" XAUTHORITY="$USER_HOME/.Xauthority" "$@"
 }
 
 get_modeline() {
@@ -30,6 +30,13 @@ get_modeline() {
         *) echo "" ;;
     esac
 }
+
+# Ensure PipeWire is running
+if ! run_x11 pgrep -x pipewire > /dev/null; then
+    echo "[RESIZE] PipeWire is down! Attempting to start it..."
+    run_x11 pipewire &
+    sleep 2
+fi
 
 if command -v wlr-randr >/dev/null 2>&1 && run_wayland wlr-randr >/dev/null 2>&1; then
     echo "[RESIZE] Detected Wayland Environment..."
@@ -47,20 +54,20 @@ elif command -v xrandr >/dev/null 2>&1 && run_x11 xrandr >/dev/null 2>&1; then
     if [ -z "$OUTPUT" ]; then OUTPUT=$(echo "$XRANDR_OUT" | grep "default" | head -n 1 | awk '{print $1}'); fi
     if [ -z "$OUTPUT" ]; then OUTPUT=$(echo "$XRANDR_OUT" | grep -E "^(HDMI|DP|VGA|DVI|Virtual|XWAYLAND)" | head -n 1 | awk '{print $1}'); fi
     
-    if ! echo "$XRANDR_OUT" | grep -q -w "${W}x${H}"; then
+    # Exact Resolution Name
+    MODE_NAME="${W}x${H}"
+    
+    if ! echo "$XRANDR_OUT" | grep -q -w "$MODE_NAME"; then
         MODE_INFO=$(get_modeline "$W" "$H")
-        MODE_NAME=$(echo "$MODE_INFO" | awk '{print $1}' | tr -d '"')
         MODE_PARAMS=$(echo "$MODE_INFO" | cut -d' ' -f2-)
         run_x11 xrandr --newmode "$MODE_NAME" $MODE_PARAMS
         run_x11 xrandr --addmode "$OUTPUT" "$MODE_NAME"
-    else
-        MODE_NAME=$(echo "$XRANDR_OUT" | grep -w "${W}x${H}" | head -n 1 | awk '{print $1}')
     fi
 
     run_x11 xrandr --output "$OUTPUT" --mode "$MODE_NAME"
-    echo "[RESIZE] X11 Desktop successfully adjusted to ${W}x${H}!"
+    echo "[RESIZE] X11 Desktop successfully adjusted to $MODE_NAME!"
     
-    # NEW: Force PipeWire to create an X11 screen capture node
+    # Force PipeWire to create an X11 screen capture node
     echo "[RESIZE] Hooking X11 display into PipeWire..."
     run_x11 pw-cli load-module libpipewire-module-x11-x11 || echo "[RESIZE] Warning: Could not load PipeWire X11 module."
 
