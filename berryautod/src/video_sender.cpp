@@ -80,20 +80,15 @@ void inject_cached_video_config()
     send_media_payload(video_channel_id, pt);
 }
 
-void send_video_frame_internal(const std::vector<uint8_t>& nal_data)
+void send_video_frame_internal(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
 {
     std::vector<uint8_t> pt;
     pt.push_back(0x00);
     pt.push_back(0x00); // MEDIA_MESSAGE_DATA (Type 0)
 
-    // Guarantee strictly monotonic presentation timestamps.
-    // This perfectly bypasses any hardware encoder timebase scaling bugs.
-    uint64_t current_ts =
-        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch())
-            .count();
-
+    // AAP Timestamps must be 64-bit Big-Endian and perfectly match the encoded stream
     for (int i = 7; i >= 0; --i)
-        pt.push_back((current_ts >> (i * 8)) & 0xFF);
+        pt.push_back((timestamp >> (i * 8)) & 0xFF);
 
     pt.insert(pt.end(), nal_data.begin(), nal_data.end());
 
@@ -109,8 +104,6 @@ void send_video_frame_internal(const std::vector<uint8_t>& nal_data)
 
 void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
 {
-    (void)timestamp; // Ignored. Handled perfectly inside send_video_frame_internal.
-
     static bool was_streaming = false;
     bool currently_streaming = is_video_streaming.load() && video_channel_ready && (is_tls_connected || ssl_bypassed);
 
@@ -168,7 +161,7 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
     }
 
     // 4. Send Frame
-    send_video_frame_internal(nal_data);
+    send_video_frame_internal(nal_data, timestamp);
 }
 
 void on_video_nal_ready(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
