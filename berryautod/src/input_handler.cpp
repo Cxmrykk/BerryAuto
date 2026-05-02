@@ -82,20 +82,26 @@ void handle_touch_event(const com::andrerinas::headunitrevived::aap::protocol::p
 
     if (action == 0 || action == 5) // Down
     {
+        // STEP 1: Warp the cursor exactly to the finger location FIRST
         emit_uinput(EV_ABS, ABS_X, mapped_x);
         emit_uinput(EV_ABS, ABS_Y, mapped_y);
+        emit_uinput(EV_SYN, SYN_REPORT, 0);
+
+        // STEP 2: Issue the physical click at the newly updated location
         emit_uinput(EV_KEY, BTN_LEFT, 1);
         emit_uinput(EV_KEY, BTN_TOUCH, 1);
         emit_uinput(EV_SYN, SYN_REPORT, 0);
     }
     else if (action == 1 || action == 6) // Up
     {
+        // Release the click
         emit_uinput(EV_KEY, BTN_LEFT, 0);
         emit_uinput(EV_KEY, BTN_TOUCH, 0);
         emit_uinput(EV_SYN, SYN_REPORT, 0);
     }
-    else if (action == 2) // Move
+    else if (action == 2) // Move (Drag)
     {
+        // Update the cursor location while the button is held
         emit_uinput(EV_ABS, ABS_X, mapped_x);
         emit_uinput(EV_ABS, ABS_Y, mapped_y);
         emit_uinput(EV_SYN, SYN_REPORT, 0);
