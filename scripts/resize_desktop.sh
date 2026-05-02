@@ -31,7 +31,6 @@ get_modeline() {
     esac
 }
 
-# Ensure PipeWire is running
 if ! run_x11 pgrep -x pipewire > /dev/null; then
     echo "[RESIZE] PipeWire is down! Attempting to start it..."
     run_x11 pipewire &
@@ -43,6 +42,7 @@ if command -v wlr-randr >/dev/null 2>&1 && run_wayland wlr-randr >/dev/null 2>&1
     OUTPUT=$(run_wayland wlr-randr | grep "^[^ ]" | head -n 1 | awk '{print $1}')
     if [ -n "$OUTPUT" ]; then
         run_wayland wlr-randr --output "$OUTPUT" --custom-mode "${W}x${H}"
+        echo "[RESIZE] Wayland Desktop successfully adjusted!"
     fi
 
 elif command -v xrandr >/dev/null 2>&1 && run_x11 xrandr >/dev/null 2>&1; then
@@ -54,8 +54,8 @@ elif command -v xrandr >/dev/null 2>&1 && run_x11 xrandr >/dev/null 2>&1; then
     if [ -z "$OUTPUT" ]; then OUTPUT=$(echo "$XRANDR_OUT" | grep "default" | head -n 1 | awk '{print $1}'); fi
     if [ -z "$OUTPUT" ]; then OUTPUT=$(echo "$XRANDR_OUT" | grep -E "^(HDMI|DP|VGA|DVI|Virtual|XWAYLAND)" | head -n 1 | awk '{print $1}'); fi
     
-    # Exact Resolution Name
-    MODE_NAME="${W}x${H}"
+    # Use a highly specific mode name to prevent regex collisions
+    MODE_NAME="${W}x${H}_AA"
     
     if ! echo "$XRANDR_OUT" | grep -q -w "$MODE_NAME"; then
         MODE_INFO=$(get_modeline "$W" "$H")
@@ -66,10 +66,6 @@ elif command -v xrandr >/dev/null 2>&1 && run_x11 xrandr >/dev/null 2>&1; then
 
     run_x11 xrandr --output "$OUTPUT" --mode "$MODE_NAME"
     echo "[RESIZE] X11 Desktop successfully adjusted to $MODE_NAME!"
-    
-    # Force PipeWire to create an X11 screen capture node
-    echo "[RESIZE] Hooking X11 display into PipeWire..."
-    run_x11 pw-cli load-module libpipewire-module-x11-x11 || echo "[RESIZE] Warning: Could not load PipeWire X11 module."
 
 else
     echo "[RESIZE] ERROR: Desktop environment not accessible!"

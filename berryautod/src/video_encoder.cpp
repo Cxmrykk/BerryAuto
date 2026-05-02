@@ -100,7 +100,7 @@ bool VideoEncoder::init_pipewire()
     // Relaxed requirements to force auto-linking to the X11 screen module
     pw_stream = pw_stream_new(pw_core, "OpenGAL Capture",
                               pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture",
-                                                PW_KEY_NODE_NAME, "OpenGAL_Stream", NULL));
+                                                PW_KEY_MEDIA_ROLE, "Screen", PW_KEY_NODE_NAME, "OpenGAL_Stream", NULL));
 
     pw_stream_add_listener(pw_stream, &stream_listener, &stream_events, this);
 
