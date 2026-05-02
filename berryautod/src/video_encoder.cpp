@@ -200,11 +200,21 @@ bool VideoEncoder::init_encoder()
         codec_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
         codec_ctx->time_base = {1, 60};
         codec_ctx->framerate = {60, 1};
-        codec_ctx->gop_size = 60;
+        codec_ctx->gop_size = 30; // Double the keyframes for faster artifact recovery
         codec_ctx->max_b_frames = 0;
+
+        // CRITICAL FIX: Android Auto strictly demands Baseline Profile.
+        // High Profile causes hardware decoder crashes on Head Units during high motion!
+        codec_ctx->profile = FF_PROFILE_H264_BASELINE;
+
+        // CRITICAL FIX: Clamp Bitrate aggressively. Spikes cause Head Unit buffer overflows.
+        int calc_bitrate = static_cast<int>(target_width * target_height * 60 * 0.08);
+        codec_ctx->bit_rate = std::clamp(calc_bitrate, 2000000, 6000000);
+        codec_ctx->rc_max_rate = codec_ctx->bit_rate;
+        codec_ctx->rc_buffer_size = codec_ctx->bit_rate / 2;
+
         codec_ctx->thread_count = std::max(1u, std::thread::hardware_concurrency());
         codec_ctx->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
-        codec_ctx->bit_rate = std::clamp(static_cast<int>(target_width * target_height * 60 * 0.12), 6000000, 16000000);
 
         if (std::string(codec->name) == "libx264" || std::string(codec->name) == "libx265")
         {

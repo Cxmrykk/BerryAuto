@@ -11,7 +11,6 @@ std::mutex config_mutex;
 std::vector<uint8_t> cached_config_nal;
 bool has_cached_config = false;
 
-// THE STATE MACHINE: Prevents "Decoding Error" spam on the Head Unit
 static bool is_recovering = false;
 
 void extract_and_cache_sps_pps(const std::vector<uint8_t>& frame)
@@ -107,6 +106,8 @@ void send_video_frame_internal(const std::vector<uint8_t>& nal_data, uint64_t ti
     else
     {
         LOG_E("[WARNING] Frame rejected by TX Queue. Entering Recovery Mode.");
+        flush_usb_tx_queue();
+        video_unacked_count = 0;
         is_recovering = true;
     }
 }
@@ -129,10 +130,9 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
     // --- DRAIN & RECOVER STATE MACHINE ---
     if (is_recovering)
     {
-        // Wait for the TX queue to hit 0 AND for the car to catch up on ACKs
-        if (get_tx_queue_size() > 0 || video_unacked_count.load() >= max_video_unacked)
+        if (get_tx_queue_size() > 0)
         {
-            return; // Silently drop frame, wait for pipeline to drain completely
+            return; // Wait for pipeline to drain completely
         }
 
         // Pipeline is completely clear! Request a fresh Keyframe to resume perfectly.
@@ -143,10 +143,12 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
         return;
     }
 
-    // Relaxed queue tolerance to 60 packets (1 full second at 60 FPS) to prevent false-positives
+    // Relaxed queue tolerance to 60 packets
     if (get_tx_queue_size() >= 60)
     {
         LOG_E("[WARNING] USB Queue Congested! Entering Recovery Mode.");
+        flush_usb_tx_queue(); // CRITICAL FIX: Dump stale frames to instantly unstick the queue!
+        video_unacked_count = 0;
         is_recovering = true;
         return;
     }
@@ -166,8 +168,9 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
     if (wait_cycles >= 500)
     {
         LOG_E("[WARNING] Video ACK timeout. Entering Recovery Mode.");
-        is_recovering = true;
+        flush_usb_tx_queue(); // CRITICAL FIX: Prevent forever-wait loop!
         video_unacked_count = 0;
+        is_recovering = true;
         return;
     }
 
