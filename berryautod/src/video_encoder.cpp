@@ -9,11 +9,6 @@
 #include <time.h>
 #include <unistd.h>
 
-// Required for metadata negotiation
-#include <spa/debug/types.h>
-#include <spa/param/meta.h>
-#include <spa/param/video/format-utils.h>
-
 static uint64_t get_monotonic_usec()
 {
     struct timespec ts;
@@ -85,6 +80,7 @@ static bool negotiate_wayland_screencast(uint32_t& out_node_id)
         return false;
     }
 
+    // Determine deterministic session and request paths based on our unique D-Bus name
     std::string sender = g_dbus_connection_get_unique_name(conn);
     sender.erase(std::remove(sender.begin(), sender.end(), ':'), sender.end());
     std::replace(sender.begin(), sender.end(), '.', '_');
@@ -94,6 +90,7 @@ static bool negotiate_wayland_screencast(uint32_t& out_node_id)
 
     dbus_loop = g_main_loop_new(nullptr, FALSE);
 
+    // STEP 1: CreateSession
     guint sub1 =
         g_dbus_connection_signal_subscribe(conn, "org.freedesktop.portal.Desktop", "org.freedesktop.portal.Request",
                                            "Response", (request_path + "/req1").c_str(), nullptr,
@@ -116,6 +113,7 @@ static bool negotiate_wayland_screencast(uint32_t& out_node_id)
     g_main_loop_run(dbus_loop);
     g_dbus_connection_signal_unsubscribe(conn, sub1);
 
+    // STEP 2: SelectSources
     guint sub2 =
         g_dbus_connection_signal_subscribe(conn, "org.freedesktop.portal.Desktop", "org.freedesktop.portal.Request",
                                            "Response", (request_path + "/req2").c_str(), nullptr,
@@ -124,7 +122,7 @@ static bool negotiate_wayland_screencast(uint32_t& out_node_id)
     GVariantBuilder b2;
     g_variant_builder_init(&b2, G_VARIANT_TYPE_VARDICT);
     g_variant_builder_add(&b2, "{sv}", "multiple", g_variant_new_boolean(FALSE));
-    g_variant_builder_add(&b2, "{sv}", "types", g_variant_new_uint32(1));
+    g_variant_builder_add(&b2, "{sv}", "types", g_variant_new_uint32(1)); // 1 = monitor
     g_variant_builder_add(&b2, "{sv}", "handle_token", g_variant_new_string("req2"));
 
     GVariant* res2 = g_dbus_connection_call_sync(conn, "org.freedesktop.portal.Desktop",
@@ -140,6 +138,7 @@ static bool negotiate_wayland_screencast(uint32_t& out_node_id)
     g_main_loop_run(dbus_loop);
     g_dbus_connection_signal_unsubscribe(conn, sub2);
 
+    // STEP 3: Start
     guint sub3 =
         g_dbus_connection_signal_subscribe(conn, "org.freedesktop.portal.Desktop", "org.freedesktop.portal.Request",
                                            "Response", (request_path + "/req3").c_str(), nullptr,
@@ -172,6 +171,7 @@ static bool negotiate_wayland_screencast(uint32_t& out_node_id)
     }
     return false;
 }
+// -------------------------------------------------------------------------
 
 static void on_process(void* userdata)
 {
@@ -186,6 +186,10 @@ static void on_process(void* userdata)
         int stride = buf->datas[0].chunk->stride;
         enc->process_raw_frame(buf->datas[0].data, stride, enc->pw_w, enc->pw_h);
     }
+    else
+    {
+        LOG_E("[PipeWire] Buffer data is null! DMA-BUF negotiation failure.");
+    }
     pw_stream_queue_buffer(enc->pw_stream, b);
 }
 
@@ -198,7 +202,8 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
     struct spa_video_info_raw info;
     if (spa_format_video_raw_parse(param, &info) >= 0)
     {
-        LOG_I("[PipeWire] Format negotiated! Size: " << info.size.width << "x" << info.size.height);
+        LOG_I("[PipeWire] Format negotiated successfully! Size: " << info.size.width << "x" << info.size.height
+                                                                  << ", SPA Format ID: " << info.format);
         enc->pw_w = info.size.width;
         enc->pw_h = info.size.height;
 
@@ -212,6 +217,14 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
             case SPA_VIDEO_FORMAT_BGRA:
                 enc->pw_fmt = AV_PIX_FMT_BGRA;
                 break;
+            case SPA_VIDEO_FORMAT_xBGR:
+            case SPA_VIDEO_FORMAT_ABGR:
+                enc->pw_fmt = AV_PIX_FMT_ABGR;
+                break;
+            case SPA_VIDEO_FORMAT_xRGB:
+            case SPA_VIDEO_FORMAT_ARGB:
+                enc->pw_fmt = AV_PIX_FMT_ARGB;
+                break;
             case SPA_VIDEO_FORMAT_RGB:
                 enc->pw_fmt = AV_PIX_FMT_RGB24;
                 break;
@@ -219,6 +232,7 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
                 enc->pw_fmt = AV_PIX_FMT_BGR24;
                 break;
             default:
+                LOG_E("[PipeWire] Unrecognized pixel format! Defaulting to BGRA.");
                 enc->pw_fmt = AV_PIX_FMT_BGRA;
                 break;
         }
@@ -231,9 +245,13 @@ static void on_state_changed(void* userdata, enum pw_stream_state old, enum pw_s
     (void)userdata;
     (void)old;
     if (error)
+    {
         LOG_E("[PipeWire] Stream Error: " << error);
+    }
     else
-        LOG_I("[PipeWire] Stream State: " << pw_stream_state_as_string(state));
+    {
+        LOG_I("[PipeWire] Stream State changed to: " << pw_stream_state_as_string(state));
+    }
 }
 
 static const struct pw_stream_events stream_events = []()
@@ -286,28 +304,41 @@ void VideoEncoder::update_sws()
 {
     std::lock_guard<std::mutex> lock(sws_mutex);
     if (sws_ctx)
+    {
         sws_freeContext(sws_ctx);
+        sws_ctx = nullptr;
+    }
     if (pw_w == 0 || pw_h == 0)
         return;
     sws_ctx = sws_getContext(pw_w, pw_h, pw_fmt, target_width, target_height, AV_PIX_FMT_YUV420P, SWS_BILINEAR, NULL,
                              NULL, NULL);
 }
 
+// --- X11 ENGINE ---
 bool VideoEncoder::init_x11()
 {
+    const char* disp_env = getenv("DISPLAY");
+    if (!disp_env)
+        setenv("DISPLAY", ":0", 1);
+
     dpy = XOpenDisplay(NULL);
     if (!dpy)
         return false;
+
     root_window = DefaultRootWindow(dpy);
     img = XShmCreateImage(dpy, DefaultVisual(dpy, DefaultScreen(dpy)), DefaultDepth(dpy, DefaultScreen(dpy)), ZPixmap,
                           NULL, &shminfo, target_width, target_height);
     shminfo.shmid = shmget(IPC_PRIVATE, img->bytes_per_line * img->height, IPC_CREAT | 0777);
     shminfo.shmaddr = img->data = (char*)shmat(shminfo.shmid, 0, 0);
+    shminfo.readOnly = False;
     XShmAttach(dpy, &shminfo);
+
+    // Configure SWS for X11 format
     pw_w = target_width;
     pw_h = target_height;
     pw_fmt = AV_PIX_FMT_BGRA;
     update_sws();
+
     return true;
 }
 
@@ -316,22 +347,38 @@ void VideoEncoder::cleanup_x11()
     if (img)
     {
         XShmDetach(dpy, &shminfo);
+        XSync(dpy, False);
         XDestroyImage(img);
         shmdt(shminfo.shmaddr);
         shmctl(shminfo.shmid, IPC_RMID, 0);
+        img = nullptr;
     }
     if (dpy)
+    {
         XCloseDisplay(dpy);
+        dpy = nullptr;
+    }
 }
 
+// --- WAYLAND/PIPEWIRE ENGINE ---
 bool VideoEncoder::init_pipewire(uint32_t node_id)
 {
     pw_loop = pw_main_loop_new(NULL);
+    if (!pw_loop)
+    {
+        LOG_E("[PipeWire] Failed to create main loop");
+        return false;
+    }
+
     pw_ctx = pw_context_new(pw_main_loop_get_loop(pw_loop), NULL, 0);
     pw_core = pw_context_connect(pw_ctx, NULL, 0);
     if (!pw_core)
+    {
+        LOG_E("[PipeWire] Failed to connect to core");
         return false;
+    }
 
+    // TARGET THE SPECIFIC NODE ID NEGOTIATED VIA D-BUS
     pw_stream =
         pw_stream_new(pw_core, "OpenGAL Capture",
                       pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture", PW_KEY_MEDIA_ROLE,
@@ -339,29 +386,54 @@ bool VideoEncoder::init_pipewire(uint32_t node_id)
 
     pw_stream_add_listener(pw_stream, &stream_listener, &stream_events, this);
 
-    uint8_t buffer[2048];
+    uint8_t buffer[1024];
     struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
-    const struct spa_pod* params[2];
+    const struct spa_pod* params[1];
 
-    // 1. Format Choice with Size Range (Strict Requirement for some Portals)
+    // C++ compatible way to pass compound structs to PipeWire macros
+    struct spa_rectangle def_rect;
+    def_rect.width = target_width;
+    def_rect.height = target_height;
+    struct spa_rectangle min_rect;
+    min_rect.width = 1;
+    min_rect.height = 1;
+    struct spa_rectangle max_rect;
+    max_rect.width = 8192;
+    max_rect.height = 8192;
+
+    struct spa_fraction def_frac;
+    def_frac.num = target_fps;
+    def_frac.denom = 1;
+    struct spa_fraction min_frac;
+    min_frac.num = 0;
+    min_frac.denom = 1;
+    struct spa_fraction max_frac;
+    max_frac.num = 1000;
+    max_frac.denom = 1;
+
+    // Highly Permissive Format Negotiation!
+    // Adding Size and Framerate with a wide Choice Range. Most Wayland compositors
+    // will outright reject streams that do not provide size or framerate bounds.
     params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
         &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
         SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), SPA_FORMAT_VIDEO_format,
-        SPA_POD_CHOICE_ENUM_Id(5, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_RGBx,
-                               SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_RGBA),
-        SPA_FORMAT_VIDEO_size,
-        SPA_POD_CHOICE_RANGE_Rectangle(&SPA_RECTANGLE(target_width, target_height), &SPA_RECTANGLE(320, 240),
-                                       &SPA_RECTANGLE(3840, 2160)));
+        SPA_POD_CHOICE_ENUM_Id(7,
+                               SPA_VIDEO_FORMAT_BGRx, // Preferred Default
+                               SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_RGBx,
+                               SPA_VIDEO_FORMAT_RGBA, SPA_VIDEO_FORMAT_xBGR, SPA_VIDEO_FORMAT_xRGB),
+        SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(&def_rect, &min_rect, &max_rect),
+        SPA_FORMAT_VIDEO_framerate, SPA_POD_CHOICE_RANGE_Fraction(&def_frac, &min_frac, &max_frac));
 
-    // 2. Negotiate Metadata Header (CRITICAL FIX)
-    params[1] = (const struct spa_pod*)spa_pod_builder_add_object(
-        &b, SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta, SPA_PARAM_META_type, SPA_POD_Id(SPA_META_Header),
-        SPA_PARAM_META_size, SPA_POD_Int(sizeof(struct spa_meta_header)));
+    // Map Buffers flag enforces SHM memory pointers (buf->datas[0].data) instead of raw DMA fds.
+    int res = pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, PW_ID_ANY,
+                                (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 1);
 
-    int res = pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, node_id,
-                                (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 2);
-
-    return (res >= 0);
+    if (res < 0)
+    {
+        LOG_E("[PipeWire] Failed to connect stream: " << spa_strerror(res));
+        return false;
+    }
+    return true;
 }
 
 void VideoEncoder::cleanup_pipewire()
@@ -374,52 +446,84 @@ void VideoEncoder::cleanup_pipewire()
         pw_context_destroy(pw_ctx);
     if (pw_loop)
         pw_main_loop_destroy(pw_loop);
+    pw_stream = nullptr;
+    pw_core = nullptr;
+    pw_ctx = nullptr;
+    pw_loop = nullptr;
 }
 
+// --- FFMPEG ENGINE ---
 bool VideoEncoder::init_encoder()
 {
-    av_log_set_level(AV_LOG_ERROR);
     std::vector<std::string> encoder_names;
     if (global_video_codec_type == 7)
-        encoder_names = {"hevc_v4l2m2m", "libx265"};
+        encoder_names = {"hevc_v4l2m2m", "libx265", "hevc"};
     else
-        encoder_names = {"h264_v4l2m2m", "h264_omx", "libx264"};
+        encoder_names = {"h264_v4l2m2m", "h264_omx", "libx264", "h264"};
 
     for (const auto& name : encoder_names)
     {
         codec = avcodec_find_encoder_by_name(name.c_str());
         if (!codec)
-            continue;
+        {
+            if (name == encoder_names.back())
+                codec = avcodec_find_encoder(global_video_codec_type == 7 ? AV_CODEC_ID_HEVC : AV_CODEC_ID_H264);
+            if (!codec)
+                continue;
+        }
+
         codec_ctx = avcodec_alloc_context3(codec);
         codec_ctx->width = target_width;
         codec_ctx->height = target_height;
         codec_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
+
+        codec_ctx->colorspace = AVCOL_SPC_BT709;
+        codec_ctx->color_range = AVCOL_RANGE_MPEG;
+        codec_ctx->color_primaries = AVCOL_PRI_BT709;
+        codec_ctx->color_trc = AVCOL_TRC_BT709;
+
         codec_ctx->time_base = {1, 1000000};
         codec_ctx->framerate = {target_fps, 1};
         codec_ctx->gop_size = target_fps * 2;
         codec_ctx->max_b_frames = 0;
-        int target_bitrate = std::clamp((int)(target_width * target_height * target_fps * 0.15), 4000000, 40000000);
+
+        codec_ctx->profile = FF_PROFILE_H264_HIGH;
+
+        int target_bitrate = static_cast<int>(target_width * target_height * target_fps * 0.15);
+        target_bitrate = std::clamp(target_bitrate, 4000000, 40000000);
+
         codec_ctx->bit_rate = target_bitrate;
-        if (name.find("v4l2") != std::string::npos)
+        codec_ctx->rc_min_rate = target_bitrate;
+        codec_ctx->rc_max_rate = target_bitrate;
+        codec_ctx->rc_buffer_size = target_bitrate / 2;
+
+        codec_ctx->thread_count = std::max(1u, std::thread::hardware_concurrency());
+        codec_ctx->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
+
+        if (std::string(codec->name) == "h264_v4l2m2m")
             av_opt_set(codec_ctx->priv_data, "profile", "high", 0);
-        else
+        else if (std::string(codec->name) == "libx264" || std::string(codec->name) == "libx265")
         {
             av_opt_set(codec_ctx->priv_data, "preset", "ultrafast", 0);
             av_opt_set(codec_ctx->priv_data, "tune", "zerolatency", 0);
         }
+
         if (avcodec_open2(codec_ctx, codec, NULL) >= 0)
             break;
         avcodec_free_context(&codec_ctx);
         codec = nullptr;
     }
+
     if (!codec_ctx)
         return false;
+
     frame = av_frame_alloc();
     frame->format = codec_ctx->pix_fmt;
     frame->width = codec_ctx->width;
     frame->height = codec_ctx->height;
     av_frame_get_buffer(frame, 32);
     pkt = av_packet_alloc();
+
     return true;
 }
 
@@ -433,27 +537,38 @@ void VideoEncoder::cleanup_encoder()
     if (pkt)
         av_packet_free(&pkt);
     if (codec_ctx)
-        av_codec_free_context(&codec_ctx);
+        avcodec_free_context(&codec_ctx);
+    sws_ctx = nullptr;
+    frame = nullptr;
+    pkt = nullptr;
+    codec_ctx = nullptr;
 }
 
 void VideoEncoder::process_raw_frame(void* bgra_data, int stride, int pw_w, int pw_h)
 {
     std::lock_guard<std::mutex> lock(sws_mutex);
     if (!sws_ctx)
-        return;
+        return; // Drop frames until PipeWire negotiates the format
+
     const uint8_t* in_data[1] = {(uint8_t*)bgra_data};
     int in_linesize[1] = {stride};
+
     sws_scale(sws_ctx, in_data, in_linesize, 0, pw_h, frame->data, frame->linesize);
+
     frame->pts = get_monotonic_usec();
     frame->pict_type = request_keyframe.exchange(false) ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_NONE;
-    if (avcodec_send_frame(codec_ctx, frame) >= 0)
+
+    int ret = avcodec_send_frame(codec_ctx, frame);
+    while (ret >= 0)
     {
-        while (avcodec_receive_packet(codec_ctx, pkt) >= 0)
-        {
-            std::vector<uint8_t> nal_data(pkt->data, pkt->data + pkt->size);
-            nal_callback(nal_data, pkt->pts);
-            av_packet_unref(pkt);
-        }
+        ret = avcodec_receive_packet(codec_ctx, pkt);
+        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF || ret < 0)
+            break;
+
+        uint64_t absolute_ts = pkt->pts;
+        std::vector<uint8_t> nal_data(pkt->data, pkt->data + pkt->size);
+        nal_callback(nal_data, absolute_ts);
+        av_packet_unref(pkt);
     }
 }
 
@@ -461,31 +576,53 @@ void VideoEncoder::capture_loop()
 {
     if (!init_encoder())
         return;
+
     if (getenv("WAYLAND_DISPLAY"))
     {
+        LOG_I("[Capture] Wayland detected. Negotiating D-Bus ScreenCast Session...");
         uint32_t node_id = 0;
+
         if (negotiate_wayland_screencast(node_id))
         {
+            LOG_I("[Capture] ScreenCast Negotiated successfully! Target Node ID: " << node_id);
             if (init_pipewire(node_id))
             {
                 pw_main_loop_run(pw_loop);
                 cleanup_pipewire();
             }
         }
+        else
+        {
+            LOG_E("[Capture] Wayland ScreenCast negotiation failed. Did you configure xdg-desktop-portal-wlr?");
+        }
     }
     else
     {
+        LOG_I("[Capture] X11 detected. Initializing XShm engine...");
         if (init_x11())
         {
-            uint64_t interval = 1000000 / target_fps;
+            uint64_t frame_interval_us = 1000000 / target_fps;
+            uint64_t next_frame_time = get_monotonic_usec() + frame_interval_us;
+
             while (running.load())
             {
                 XShmGetImage(dpy, root_window, img, 0, 0, AllPlanes);
                 process_raw_frame((uint8_t*)img->data, img->bytes_per_line, img->width, img->height);
-                usleep(interval);
+
+                uint64_t now = get_monotonic_usec();
+                if (now < next_frame_time)
+                {
+                    usleep(next_frame_time - now);
+                    next_frame_time += frame_interval_us;
+                }
+                else
+                {
+                    next_frame_time = now + frame_interval_us;
+                }
             }
             cleanup_x11();
         }
     }
+
     cleanup_encoder();
 }
