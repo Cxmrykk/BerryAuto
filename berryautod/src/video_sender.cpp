@@ -53,14 +53,10 @@ void extract_and_cache_sps_pps(const std::vector<uint8_t>& frame)
                 i = next_nal;
             }
             else
-            {
                 break;
-            }
         }
         else
-        {
             i++;
-        }
     }
 
     if (!config_data.empty())
@@ -71,8 +67,6 @@ void extract_and_cache_sps_pps(const std::vector<uint8_t>& frame)
     }
 }
 
-// Android Auto requires SPS/PPS config headers to be sent ONCE during setup.
-// If they are left in the video stream, the car's decoder crashes.
 std::vector<uint8_t> filter_sps_pps(const std::vector<uint8_t>& frame)
 {
     std::vector<uint8_t> filtered;
@@ -88,7 +82,7 @@ std::vector<uint8_t> filter_sps_pps(const std::vector<uint8_t>& frame)
         if (start_code_len > 0 && i + start_code_len < frame.size())
         {
             uint8_t nal_type = frame[i + start_code_len] & 0x1F;
-            bool is_config = (nal_type == 7 || nal_type == 8); // SPS (7) or PPS (8)
+            bool is_config = (nal_type == 7 || nal_type == 8);
 
             size_t next_nal = frame.size();
             for (size_t j = i + start_code_len; j < frame.size(); j++)
@@ -107,9 +101,7 @@ std::vector<uint8_t> filter_sps_pps(const std::vector<uint8_t>& frame)
             }
 
             if (!is_config)
-            {
                 filtered.insert(filtered.end(), frame.begin() + i, frame.begin() + next_nal);
-            }
             i = next_nal;
         }
         else
@@ -130,7 +122,6 @@ void inject_cached_video_config()
             return;
         config_copy = cached_config_nal;
     }
-
     std::vector<uint8_t> pt;
     pt.push_back(0x00);
     pt.push_back(0x01);
@@ -144,9 +135,7 @@ void send_video_frame_internal(const std::vector<uint8_t>& nal_data, uint64_t ti
     pt.push_back(0x00);
     pt.push_back(0x00);
     for (int i = 7; i >= 0; --i)
-    {
         pt.push_back((timestamp >> (i * 8)) & 0xFF);
-    }
     pt.insert(pt.end(), nal_data.begin(), nal_data.end());
 
     if (send_media_payload(video_channel_id, pt))
@@ -179,15 +168,12 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
 
     std::vector<uint8_t> clean_nal_data = filter_sps_pps(nal_data);
     if (clean_nal_data.empty())
-        return; // Packet was purely config
+        return;
 
-    // --- DRAIN & RECOVER STATE MACHINE ---
     if (is_recovering)
     {
         if (get_tx_queue_size() > 0)
-        {
-            return; // Wait for USB pipeline to drain completely
-        }
+            return;
         if (video_streamer)
             video_streamer->force_keyframe();
         is_recovering = false;
@@ -195,16 +181,18 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
         return;
     }
 
-    // Rely entirely on USB Queue backpressure, completely ignoring max_unacked deadlocks
+    // CRITICAL FIX: We DO NOT wait for ACKs anymore!
+    // We only trigger recovery if the USB transmission pipeline actually clogs.
     if (get_tx_queue_size() >= 60)
     {
-        LOG_E("[WARNING] USB Queue Congested! Head unit is falling behind. Dropping frames.");
+        LOG_E("[WARNING] USB Queue Congested! Head unit decoder crashed or hung. Entering Recovery.");
         flush_usb_tx_queue();
         video_unacked_count = 0;
         is_recovering = true;
         return;
     }
 
+    // Fire frame immediately. Let the car process it at its own pace.
     send_video_frame_internal(clean_nal_data, timestamp);
 }
 

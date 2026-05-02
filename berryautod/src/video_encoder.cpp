@@ -146,7 +146,7 @@ bool VideoEncoder::init_pipewire()
     memset(&info, 0, sizeof(info));
     info.format = SPA_VIDEO_FORMAT_BGRx;
     info.size = SPA_RECTANGLE((uint32_t)target_width, (uint32_t)target_height);
-    info.framerate = SPA_FRACTION(60, 1);
+    info.framerate = SPA_FRACTION(30, 1);
 
     params[0] = spa_format_video_raw_build(&b, SPA_PARAM_EnumFormat, &info);
 
@@ -177,63 +177,44 @@ void VideoEncoder::cleanup_pipewire()
 // --- FFMPEG ENGINE ---
 bool VideoEncoder::init_encoder()
 {
-    std::vector<std::string> encoder_names;
-    if (global_video_codec_type == 7)
-        encoder_names = {"hevc_v4l2m2m", "libx265", "hevc"};
-    else
-        encoder_names = {"h264_v4l2m2m", "h264_omx", "libx264", "h264"};
-
-    for (const auto& name : encoder_names)
+    // MUST use Software Encoding. The Pi Hardware encoder generates massive I-Frames
+    // that crash car decoders instantly.
+    codec = avcodec_find_encoder_by_name("libx264");
+    if (!codec)
     {
-        codec = avcodec_find_encoder_by_name(name.c_str());
-        if (!codec)
-        {
-            if (name == encoder_names.back())
-                codec = avcodec_find_encoder(global_video_codec_type == 7 ? AV_CODEC_ID_HEVC : AV_CODEC_ID_H264);
-            if (!codec)
-                continue;
-        }
-
-        codec_ctx = avcodec_alloc_context3(codec);
-        codec_ctx->width = target_width;
-        codec_ctx->height = target_height;
-        codec_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
-
-        codec_ctx->time_base = {1, 60};
-        codec_ctx->framerate = {60, 1};
-        codec_ctx->gop_size = 60;
-        codec_ctx->max_b_frames = 0;
-
-        codec_ctx->profile = FF_PROFILE_H264_BASELINE;
-
-        int target_bitrate = static_cast<int>(target_width * target_height * 60 * 0.12);
-        target_bitrate = std::clamp(target_bitrate, 2000000, 8000000);
-
-        codec_ctx->bit_rate = target_bitrate;
-        codec_ctx->rc_min_rate = target_bitrate;
-        codec_ctx->rc_max_rate = target_bitrate;
-        codec_ctx->rc_buffer_size = target_bitrate / 2;
-
-        codec_ctx->thread_count = std::max(1u, std::thread::hardware_concurrency());
-        codec_ctx->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
-
-        if (std::string(codec->name) == "libx264" || std::string(codec->name) == "libx265")
-        {
-            av_opt_set(codec_ctx->priv_data, "preset", "ultrafast", 0);
-            av_opt_set(codec_ctx->priv_data, "tune", "zerolatency", 0);
-        }
-        else if (std::string(codec->name) == "h264_v4l2m2m")
-        {
-            av_opt_set(codec_ctx->priv_data, "profile", "baseline", 0);
-        }
-
-        if (avcodec_open2(codec_ctx, codec, NULL) >= 0)
-            break;
-        avcodec_free_context(&codec_ctx);
-        codec = nullptr;
+        LOG_E("libx264 not found! Software encoding is required for stability.");
+        return false;
     }
 
-    if (!codec_ctx)
+    codec_ctx = avcodec_alloc_context3(codec);
+    codec_ctx->width = target_width;
+    codec_ctx->height = target_height;
+    codec_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
+
+    // Stable 30 FPS
+    codec_ctx->time_base = {1, 30};
+    codec_ctx->framerate = {30, 1};
+    codec_ctx->gop_size = 30;
+    codec_ctx->max_b_frames = 0;
+
+    // Baseline profile mandated by Android Auto
+    codec_ctx->profile = FF_PROFILE_H264_BASELINE;
+
+    // Strict 1.5 Mbps bitrate to guarantee frame sizes stay small
+    int target_bitrate = 1500000;
+    codec_ctx->bit_rate = target_bitrate;
+    codec_ctx->rc_min_rate = target_bitrate;
+    codec_ctx->rc_max_rate = target_bitrate;
+    codec_ctx->rc_buffer_size = target_bitrate / 2;
+
+    codec_ctx->thread_count = std::max(1u, std::thread::hardware_concurrency());
+    codec_ctx->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
+
+    av_opt_set(codec_ctx->priv_data, "preset", "ultrafast", 0);
+    av_opt_set(codec_ctx->priv_data, "tune", "zerolatency", 0);
+    av_opt_set(codec_ctx->priv_data, "nal-hrd", "cbr", 0);
+
+    if (avcodec_open2(codec_ctx, codec, NULL) < 0)
         return false;
 
     frame = av_frame_alloc();
@@ -281,12 +262,12 @@ void VideoEncoder::process_raw_frame(void* bgra_data, int stride, int /*pw_w*/, 
         if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF || ret < 0)
             break;
 
-        // Perfectly timed monotonic absolute timestamp. Required by Android Auto.
-        auto now = std::chrono::steady_clock::now().time_since_epoch();
-        uint64_t absolute_ts = std::chrono::duration_cast<std::chrono::microseconds>(now).count();
+        // CRITICAL FIX: The car expects PTS to start at 0 and increment steadily.
+        // 33,333 microseconds = Exactly 30 FPS.
+        uint64_t exact_ts = frame->pts * 33333;
 
         std::vector<uint8_t> nal_data(pkt->data, pkt->data + pkt->size);
-        nal_callback(nal_data, absolute_ts);
+        nal_callback(nal_data, exact_ts);
         av_packet_unref(pkt);
     }
 }
@@ -310,7 +291,7 @@ void VideoEncoder::capture_loop()
         LOG_I("[Capture] X11 detected. Initializing XShm engine...");
         if (init_x11())
         {
-            auto frame_duration = std::chrono::microseconds(1000000 / 60);
+            auto frame_duration = std::chrono::microseconds(1000000 / 30);
             auto next_frame_time = std::chrono::steady_clock::now() + frame_duration;
 
             while (running.load())
