@@ -436,8 +436,8 @@ bool VideoEncoder::init_pipewire(uint32_t node_id)
                                SPA_VIDEO_FORMAT_xRGB, SPA_VIDEO_FORMAT_ARGB, SPA_VIDEO_FORMAT_RGB, SPA_VIDEO_FORMAT_BGR,
                                SPA_VIDEO_FORMAT_NV12, SPA_VIDEO_FORMAT_I420, SPA_VIDEO_FORMAT_YUY2,
                                SPA_VIDEO_FORMAT_UYVY, SPA_VIDEO_FORMAT_YVYU, SPA_VIDEO_FORMAT_VYUY),
-        SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(&def_rect, &min_rect, &max_rect),
-        SPA_FORMAT_VIDEO_framerate, SPA_POD_CHOICE_RANGE_Fraction(&def_frac, &min_frac, &max_frac));
+        SPA_FORMAT_VIDEO_size, SPA_POD_Rectangle(&def_rect), SPA_FORMAT_VIDEO_framerate,
+        SPA_POD_CHOICE_RANGE_Fraction(&def_frac, &min_frac, &max_frac));
 
     // Map Buffers flag enforces SHM memory pointers (buf->datas[0].data) instead of raw DMA fds.
     int res = pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, PW_ID_ANY,
