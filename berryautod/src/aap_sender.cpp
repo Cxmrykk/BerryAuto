@@ -24,7 +24,7 @@ void tx_worker()
     {
         std::vector<std::vector<uint8_t>> batch;
         {
-            std::uniquelock<std::mutex> lock(queue_mutex);
+            std::unique_lock<std::mutex> lock(queue_mutex);
             queue_cv.wait(lock, [] { return !tx_queue.empty(); });
 
             batch = tx_queue.front();
