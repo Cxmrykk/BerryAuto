@@ -1,6 +1,13 @@
 #!/bin/bash
 modprobe libcomposite
 
+REAL_USER=${SUDO_USER:-$USER}
+USER_UID=$(id -u "$REAL_USER")
+USER_GID=$(id -g "$REAL_USER")
+
+# Ensure user can access the hardware video encoder
+usermod -aG video "$REAL_USER" 2>/dev/null || true
+
 GADGET_DIR="/sys/kernel/config/usb_gadget/opengal"
 
 if [ -d "$GADGET_DIR" ]; then
@@ -39,4 +46,9 @@ mkdir -p functions/ffs.opengal
 ln -s functions/ffs.opengal configs/c.1/
 
 mkdir -p /dev/ffs-opengal
-mount -t functionfs opengal /dev/ffs-opengal
+# Mount FunctionFS with user permissions so the daemon doesn't need root!
+mount -t functionfs opengal /dev/ffs-opengal -o uid=$USER_UID,gid=$USER_GID
+
+# Give user access to the virtual input device for touch injection
+chown $USER_UID:$USER_GID /dev/uinput 2>/dev/null || true
+chmod 660 /dev/uinput 2>/dev/null || true

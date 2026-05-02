@@ -6,7 +6,6 @@
 #include <cstring>
 #include <gio/gio.h>
 #include <iostream>
-#include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -306,7 +305,6 @@ bool VideoEncoder::init_pipewire(uint32_t node_id)
         return false;
     }
 
-    // TARGET THE SPECIFIC NODE ID NEGOTIATED VIA D-BUS
     pw_stream =
         pw_stream_new(pw_core, "OpenGAL Capture",
                       pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture", PW_KEY_MEDIA_ROLE,
@@ -480,14 +478,6 @@ void VideoEncoder::capture_loop()
         LOG_I("[Capture] Wayland detected. Negotiating D-Bus ScreenCast Session...");
         uint32_t node_id = 0;
 
-        uid_t user_uid = 1000;
-        if (getenv("SUDO_UID"))
-            user_uid = std::stoi(getenv("SUDO_UID"));
-
-        LOG_I("[Capture] Dropping thread EUID to " << user_uid << " to bypass D-Bus root-blocking...");
-        // This affects ONLY this specific C++ thread, leaving the rest of the application as root.
-        syscall(SYS_setresuid, -1, user_uid, -1);
-
         if (negotiate_wayland_screencast(node_id))
         {
             LOG_I("[Capture] ScreenCast Negotiated successfully! Target Node ID: " << node_id);
@@ -501,9 +491,6 @@ void VideoEncoder::capture_loop()
         {
             LOG_E("[Capture] Wayland ScreenCast negotiation failed. Did you configure xdg-desktop-portal-wlr?");
         }
-
-        // Restore root privileges for cleanup
-        syscall(SYS_setresuid, -1, 0, -1);
     }
     else
     {

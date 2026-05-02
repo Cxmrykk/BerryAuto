@@ -1,7 +1,7 @@
 #!/bin/bash
 cleanup() {
     echo "[RUNNER] Shutting down..."
-    sudo pkill -SIGINT opengal_emitter
+    pkill -SIGINT opengal_emitter
     sleep 1
     if [ -d "/sys/kernel/config/usb_gadget/opengal" ]; then
         echo "" | sudo tee "/sys/kernel/config/usb_gadget/opengal/UDC" > /dev/null 2>&1
@@ -53,7 +53,8 @@ sudo /usr/local/bin/setup_opengal_gadget.sh
 echo "HU-AAAAAA001" | sudo tee /sys/kernel/config/usb_gadget/opengal/strings/0x409/serialnumber > /dev/null
 
 echo "[RUNNER] Environment: WAYLAND_DISPLAY=$WAYLAND_DISPLAY XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR DBUS=$DBUS_SESSION_BUS_ADDRESS"
-sudo -E ./berryautod/build/opengal_emitter &
+# Run daemon as the standard user! (No sudo)
+./berryautod/build/opengal_emitter &
 EMITTER_PID=$!
 
 sleep 2
@@ -85,7 +86,8 @@ if [ $EXIT_CODE -eq 42 ]; then
     echo "Android Auto" | sudo tee /sys/kernel/config/usb_gadget/opengal/strings/0x409/product > /dev/null
     
     echo "[RUNNER] Restarting Daemon for AAP Stream..."
-    sudo -E ./berryautod/build/opengal_emitter &
+    # Run daemon as the standard user! (No sudo)
+    ./berryautod/build/opengal_emitter &
     PID2=$!
     
     sleep 2 
