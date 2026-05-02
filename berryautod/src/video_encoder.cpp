@@ -9,7 +9,7 @@
 #include <time.h>
 #include <unistd.h>
 
-// Required for metadata negotiation
+// SPA Headers (Required for PipeWire negotiation)
 #include <spa/debug/types.h>
 #include <spa/param/meta.h>
 #include <spa/param/video/format-utils.h>
@@ -43,8 +43,7 @@ static void on_signal_response(GDBusConnection* conn, const gchar* sender, const
 
     if (response != 0)
     {
-        LOG_E("[Portal] Request failed or cancelled (response=" << response
-                                                                << "). Ensure chooser_type=none is set in config!");
+        LOG_E("[Portal] Request failed (response=" << response << ")");
         if (results)
             g_variant_unref(results);
         g_main_loop_quit(dbus_loop);
@@ -79,11 +78,7 @@ static bool negotiate_wayland_screencast(uint32_t& out_node_id)
     GError* error = nullptr;
     GDBusConnection* conn = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, &error);
     if (!conn)
-    {
-        LOG_E("[Portal] Failed to connect to D-Bus Session: " << error->message);
-        g_error_free(error);
         return false;
-    }
 
     std::string sender = g_dbus_connection_get_unique_name(conn);
     sender.erase(std::remove(sender.begin(), sender.end(), ':'), sender.end());
@@ -94,77 +89,54 @@ static bool negotiate_wayland_screencast(uint32_t& out_node_id)
 
     dbus_loop = g_main_loop_new(nullptr, FALSE);
 
+    // Step 1: CreateSession
     guint sub1 =
         g_dbus_connection_signal_subscribe(conn, "org.freedesktop.portal.Desktop", "org.freedesktop.portal.Request",
                                            "Response", (request_path + "/req1").c_str(), nullptr,
                                            G_DBUS_SIGNAL_FLAGS_NONE, on_signal_response, GINT_TO_POINTER(1), nullptr);
-
     GVariantBuilder b1;
     g_variant_builder_init(&b1, G_VARIANT_TYPE_VARDICT);
     g_variant_builder_add(&b1, "{sv}", "session_handle_token", g_variant_new_string("berryauto"));
     g_variant_builder_add(&b1, "{sv}", "handle_token", g_variant_new_string("req1"));
-
-    GVariant* res1 = g_dbus_connection_call_sync(
-        conn, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop", "org.freedesktop.portal.ScreenCast",
-        "CreateSession", g_variant_new("(a{sv})", &b1), nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, &error);
-    if (error)
-    {
-        LOG_E("[Portal] CreateSession failed: " << error->message);
-        return false;
-    }
-    g_variant_unref(res1);
+    g_dbus_connection_call_sync(conn, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
+                                "org.freedesktop.portal.ScreenCast", "CreateSession", g_variant_new("(a{sv})", &b1),
+                                nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr);
     g_main_loop_run(dbus_loop);
     g_dbus_connection_signal_unsubscribe(conn, sub1);
 
+    // Step 2: SelectSources
     guint sub2 =
         g_dbus_connection_signal_subscribe(conn, "org.freedesktop.portal.Desktop", "org.freedesktop.portal.Request",
                                            "Response", (request_path + "/req2").c_str(), nullptr,
                                            G_DBUS_SIGNAL_FLAGS_NONE, on_signal_response, GINT_TO_POINTER(2), nullptr);
-
     GVariantBuilder b2;
     g_variant_builder_init(&b2, G_VARIANT_TYPE_VARDICT);
-    g_variant_builder_add(&b2, "{sv}", "multiple", g_variant_new_boolean(FALSE));
     g_variant_builder_add(&b2, "{sv}", "types", g_variant_new_uint32(1));
     g_variant_builder_add(&b2, "{sv}", "handle_token", g_variant_new_string("req2"));
-
-    GVariant* res2 = g_dbus_connection_call_sync(conn, "org.freedesktop.portal.Desktop",
-                                                 "/org/freedesktop/portal/desktop", "org.freedesktop.portal.ScreenCast",
-                                                 "SelectSources", g_variant_new("(oa{sv})", session_path.c_str(), &b2),
-                                                 nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, &error);
-    if (error)
-    {
-        LOG_E("[Portal] SelectSources failed: " << error->message);
-        return false;
-    }
-    g_variant_unref(res2);
+    g_dbus_connection_call_sync(conn, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
+                                "org.freedesktop.portal.ScreenCast", "SelectSources",
+                                g_variant_new("(oa{sv})", session_path.c_str(), &b2), nullptr, G_DBUS_CALL_FLAGS_NONE,
+                                -1, nullptr, nullptr);
     g_main_loop_run(dbus_loop);
     g_dbus_connection_signal_unsubscribe(conn, sub2);
 
+    // Step 3: Start
     guint sub3 =
         g_dbus_connection_signal_subscribe(conn, "org.freedesktop.portal.Desktop", "org.freedesktop.portal.Request",
                                            "Response", (request_path + "/req3").c_str(), nullptr,
                                            G_DBUS_SIGNAL_FLAGS_NONE, on_signal_response, GINT_TO_POINTER(3), nullptr);
-
     GVariantBuilder b3;
     g_variant_builder_init(&b3, G_VARIANT_TYPE_VARDICT);
     g_variant_builder_add(&b3, "{sv}", "handle_token", g_variant_new_string("req3"));
-
-    GVariant* res3 = g_dbus_connection_call_sync(conn, "org.freedesktop.portal.Desktop",
-                                                 "/org/freedesktop/portal/desktop", "org.freedesktop.portal.ScreenCast",
-                                                 "Start", g_variant_new("(osa{sv})", session_path.c_str(), "", &b3),
-                                                 nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, &error);
-    if (error)
-    {
-        LOG_E("[Portal] Start failed: " << error->message);
-        return false;
-    }
-    g_variant_unref(res3);
+    g_dbus_connection_call_sync(conn, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
+                                "org.freedesktop.portal.ScreenCast", "Start",
+                                g_variant_new("(osa{sv})", session_path.c_str(), "", &b3), nullptr,
+                                G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr);
     g_main_loop_run(dbus_loop);
     g_dbus_connection_signal_unsubscribe(conn, sub3);
 
     g_main_loop_unref(dbus_loop);
     g_object_unref(conn);
-
     if (negotiated_node_id > 0)
     {
         out_node_id = negotiated_node_id;
@@ -183,8 +155,7 @@ static void on_process(void* userdata)
     struct spa_buffer* buf = b->buffer;
     if (buf->datas[0].data)
     {
-        int stride = buf->datas[0].chunk->stride;
-        enc->process_raw_frame(buf->datas[0].data, stride, enc->pw_w, enc->pw_h);
+        enc->process_raw_frame(buf->datas[0].data, buf->datas[0].chunk->stride, enc->pw_w, enc->pw_h);
     }
     pw_stream_queue_buffer(enc->pw_stream, b);
 }
@@ -198,10 +169,9 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
     struct spa_video_info_raw info;
     if (spa_format_video_raw_parse(param, &info) >= 0)
     {
-        LOG_I("[PipeWire] Format negotiated! Size: " << info.size.width << "x" << info.size.height);
+        LOG_I("[PipeWire] Format negotiated: " << info.size.width << "x" << info.size.height);
         enc->pw_w = info.size.width;
         enc->pw_h = info.size.height;
-
         switch (info.format)
         {
             case SPA_VIDEO_FORMAT_RGBx:
@@ -236,15 +206,12 @@ static void on_state_changed(void* userdata, enum pw_stream_state old, enum pw_s
         LOG_I("[PipeWire] Stream State: " << pw_stream_state_as_string(state));
 }
 
-static const struct pw_stream_events stream_events = []()
-{
-    struct pw_stream_events ev{};
-    ev.version = PW_VERSION_STREAM_EVENTS;
-    ev.process = on_process;
-    ev.state_changed = on_state_changed;
-    ev.param_changed = on_param_changed;
-    return ev;
-}();
+static const struct pw_stream_events stream_events = {
+    PW_VERSION_STREAM_EVENTS,
+    .state_changed = on_state_changed,
+    .param_changed = on_param_changed,
+    .process = on_process,
+};
 
 VideoEncoder::VideoEncoder(int width, int height, int fps, NalCallback callback)
     : target_width(width), target_height(height), target_fps(fps), nal_callback(callback)
@@ -260,21 +227,19 @@ VideoEncoder::~VideoEncoder()
 
 void VideoEncoder::start()
 {
-    if (running.load())
-        return;
-    running = true;
-    worker_thread = std::thread(&VideoEncoder::capture_loop, this);
+    if (!running.exchange(true))
+        worker_thread = std::thread(&VideoEncoder::capture_loop, this);
 }
 
 void VideoEncoder::stop()
 {
-    if (!running.load())
-        return;
-    running = false;
-    if (pw_loop)
-        pw_main_loop_quit(pw_loop);
-    if (worker_thread.joinable())
-        worker_thread.join();
+    if (running.exchange(false))
+    {
+        if (pw_loop)
+            pw_main_loop_quit(pw_loop);
+        if (worker_thread.joinable())
+            worker_thread.join();
+    }
 }
 
 void VideoEncoder::force_keyframe()
@@ -287,41 +252,8 @@ void VideoEncoder::update_sws()
     std::lock_guard<std::mutex> lock(sws_mutex);
     if (sws_ctx)
         sws_freeContext(sws_ctx);
-    if (pw_w == 0 || pw_h == 0)
-        return;
     sws_ctx = sws_getContext(pw_w, pw_h, pw_fmt, target_width, target_height, AV_PIX_FMT_YUV420P, SWS_BILINEAR, NULL,
                              NULL, NULL);
-}
-
-bool VideoEncoder::init_x11()
-{
-    dpy = XOpenDisplay(NULL);
-    if (!dpy)
-        return false;
-    root_window = DefaultRootWindow(dpy);
-    img = XShmCreateImage(dpy, DefaultVisual(dpy, DefaultScreen(dpy)), DefaultDepth(dpy, DefaultScreen(dpy)), ZPixmap,
-                          NULL, &shminfo, target_width, target_height);
-    shminfo.shmid = shmget(IPC_PRIVATE, img->bytes_per_line * img->height, IPC_CREAT | 0777);
-    shminfo.shmaddr = img->data = (char*)shmat(shminfo.shmid, 0, 0);
-    XShmAttach(dpy, &shminfo);
-    pw_w = target_width;
-    pw_h = target_height;
-    pw_fmt = AV_PIX_FMT_BGRA;
-    update_sws();
-    return true;
-}
-
-void VideoEncoder::cleanup_x11()
-{
-    if (img)
-    {
-        XShmDetach(dpy, &shminfo);
-        XDestroyImage(img);
-        shmdt(shminfo.shmaddr);
-        shmctl(shminfo.shmid, IPC_RMID, 0);
-    }
-    if (dpy)
-        XCloseDisplay(dpy);
 }
 
 bool VideoEncoder::init_pipewire(uint32_t node_id)
@@ -343,7 +275,7 @@ bool VideoEncoder::init_pipewire(uint32_t node_id)
     struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
     const struct spa_pod* params[2];
 
-    // 1. Format Choice with Size Range (Strict Requirement for some Portals)
+    // 1. Format Requirement with Bounding Rectangle
     params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
         &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
         SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), SPA_FORMAT_VIDEO_format,
@@ -353,7 +285,7 @@ bool VideoEncoder::init_pipewire(uint32_t node_id)
         SPA_POD_CHOICE_RANGE_Rectangle(&SPA_RECTANGLE(target_width, target_height), &SPA_RECTANGLE(320, 240),
                                        &SPA_RECTANGLE(3840, 2160)));
 
-    // 2. Negotiate Metadata Header (CRITICAL FIX)
+    // 2. Metadata Requirement (Crucial for avoiding format mismatch)
     params[1] = (const struct spa_pod*)spa_pod_builder_add_object(
         &b, SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta, SPA_PARAM_META_type, SPA_POD_Id(SPA_META_Header),
         SPA_PARAM_META_size, SPA_POD_Int(sizeof(struct spa_meta_header)));
@@ -378,14 +310,11 @@ void VideoEncoder::cleanup_pipewire()
 
 bool VideoEncoder::init_encoder()
 {
-    av_log_set_level(AV_LOG_ERROR);
-    std::vector<std::string> encoder_names;
-    if (global_video_codec_type == 7)
-        encoder_names = {"hevc_v4l2m2m", "libx265"};
-    else
-        encoder_names = {"h264_v4l2m2m", "h264_omx", "libx264"};
+    std::vector<std::string> names = (global_video_codec_type == 7)
+                                         ? std::vector<std::string>{"hevc_v4l2m2m", "libx265"}
+                                         : std::vector<std::string>{"h264_v4l2m2m", "libx264"};
 
-    for (const auto& name : encoder_names)
+    for (const auto& name : names)
     {
         codec = avcodec_find_encoder_by_name(name.c_str());
         if (!codec)
@@ -397,16 +326,8 @@ bool VideoEncoder::init_encoder()
         codec_ctx->time_base = {1, 1000000};
         codec_ctx->framerate = {target_fps, 1};
         codec_ctx->gop_size = target_fps * 2;
-        codec_ctx->max_b_frames = 0;
-        int target_bitrate = std::clamp((int)(target_width * target_height * target_fps * 0.15), 4000000, 40000000);
-        codec_ctx->bit_rate = target_bitrate;
         if (name.find("v4l2") != std::string::npos)
             av_opt_set(codec_ctx->priv_data, "profile", "high", 0);
-        else
-        {
-            av_opt_set(codec_ctx->priv_data, "preset", "ultrafast", 0);
-            av_opt_set(codec_ctx->priv_data, "tune", "zerolatency", 0);
-        }
         if (avcodec_open2(codec_ctx, codec, NULL) >= 0)
             break;
         avcodec_free_context(&codec_ctx);
@@ -433,17 +354,17 @@ void VideoEncoder::cleanup_encoder()
     if (pkt)
         av_packet_free(&pkt);
     if (codec_ctx)
-        av_codec_free_context(&codec_ctx);
+        avcodec_free_context(&codec_ctx);
 }
 
-void VideoEncoder::process_raw_frame(void* bgra_data, int stride, int pw_w, int pw_h)
+void VideoEncoder::process_raw_frame(void* bgra_data, int stride, int w, int h)
 {
     std::lock_guard<std::mutex> lock(sws_mutex);
     if (!sws_ctx)
         return;
     const uint8_t* in_data[1] = {(uint8_t*)bgra_data};
     int in_linesize[1] = {stride};
-    sws_scale(sws_ctx, in_data, in_linesize, 0, pw_h, frame->data, frame->linesize);
+    sws_scale(sws_ctx, in_data, in_linesize, 0, h, frame->data, frame->linesize);
     frame->pts = get_monotonic_usec();
     frame->pict_type = request_keyframe.exchange(false) ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_NONE;
     if (avcodec_send_frame(codec_ctx, frame) >= 0)
@@ -461,30 +382,13 @@ void VideoEncoder::capture_loop()
 {
     if (!init_encoder())
         return;
-    if (getenv("WAYLAND_DISPLAY"))
+    uint32_t node_id = 0;
+    if (negotiate_wayland_screencast(node_id))
     {
-        uint32_t node_id = 0;
-        if (negotiate_wayland_screencast(node_id))
+        if (init_pipewire(node_id))
         {
-            if (init_pipewire(node_id))
-            {
-                pw_main_loop_run(pw_loop);
-                cleanup_pipewire();
-            }
-        }
-    }
-    else
-    {
-        if (init_x11())
-        {
-            uint64_t interval = 1000000 / target_fps;
-            while (running.load())
-            {
-                XShmGetImage(dpy, root_window, img, 0, 0, AllPlanes);
-                process_raw_frame((uint8_t*)img->data, img->bytes_per_line, img->width, img->height);
-                usleep(interval);
-            }
-            cleanup_x11();
+            pw_main_loop_run(pw_loop);
+            cleanup_pipewire();
         }
     }
     cleanup_encoder();
