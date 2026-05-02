@@ -21,14 +21,8 @@ USER_HOME=$(getent passwd "$CURRENT_USER" | cut -d: -f6)
 export DISPLAY=:0
 export XAUTHORITY="$USER_HOME/.Xauthority"
 export XDG_RUNTIME_DIR="/run/user/$USER_UID"
-export XDG_SESSION_TYPE="wayland"
 
-# CRITICAL: Portal needs to know which backend to use
-if [ -z "$XDG_CURRENT_DESKTOP" ]; then
-    export XDG_CURRENT_DESKTOP="Wayfire"
-fi
-
-# Detect Wayland Socket
+# CRITICAL: Detect Wayland Socket if not set
 if [ -z "$WAYLAND_DISPLAY" ]; then
     if [ -S "$XDG_RUNTIME_DIR/wayland-1" ]; then
         export WAYLAND_DISPLAY="wayland-1"
@@ -37,32 +31,26 @@ if [ -z "$WAYLAND_DISPLAY" ]; then
     fi
 fi
 
-# Detect D-Bus Socket (Required for XDG Desktop Portal & PipeWire)
+# CRITICAL: Fix D-Bus address for Portal access
 if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
     export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
 fi
 
-xhost +SI:localuser:root > /dev/null 2>&1 || true
-
-# Disable screen blanking
-if [ -n "$WAYLAND_DISPLAY" ]; then
-    xset s reset > /dev/null 2>&1 || true
-    xset s off > /dev/null 2>&1 || true
-    xset -dpms > /dev/null 2>&1 || true
-else
-    xset s reset > /dev/null 2>&1 || true
-    xset s off > /dev/null 2>&1 || true
-    xset -dpms > /dev/null 2>&1 || true
+# Portal backend hint
+if [ -z "$XDG_CURRENT_DESKTOP" ]; then
+    export XDG_CURRENT_DESKTOP="Wayfire"
 fi
 
-sudo /usr/local/bin/setup_opengal_gadget.sh
+xhost +SI:localuser:root > /dev/null 2>&1 || true
 
-# Force the USB serial to match the AOA serial
+# Setup gadget strings
+sudo /usr/local/bin/setup_opengal_gadget.sh
 echo "HU-AAAAAA001" | sudo tee /sys/kernel/config/usb_gadget/opengal/strings/0x409/serialnumber > /dev/null
 
-echo "[RUNNER] Environment: WAYLAND_DISPLAY=$WAYLAND_DISPLAY XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR DBUS=$DBUS_SESSION_BUS_ADDRESS DESKTOP=$XDG_CURRENT_DESKTOP"
-# Run daemon as the standard user! (No sudo)
-./berryautod/build/opengal_emitter &
+echo "[RUNNER] Environment: WAYLAND=$WAYLAND_DISPLAY DBUS=$DBUS_SESSION_BUS_ADDRESS DESKTOP=$XDG_CURRENT_DESKTOP"
+
+# PIPEWIRE_DEBUG=3 provides detailed negotiation logs if it fails again
+PIPEWIRE_DEBUG=3 ./berryautod/build/opengal_emitter &
 EMITTER_PID=$!
 
 sleep 2
@@ -79,31 +67,19 @@ EXIT_CODE=$?
 
 if [ $EXIT_CODE -eq 42 ]; then
     echo "[BOUNCE] AOA Start received! Morphing to Accessory Mode..."
-    
     sudo sh -c "echo '' > /sys/kernel/config/usb_gadget/opengal/UDC" 2>/dev/null || true
     sleep 1 
     
     echo 0x2D00 | sudo tee /sys/kernel/config/usb_gadget/opengal/idProduct > /dev/null
-    
     echo 0 | sudo tee /sys/kernel/config/usb_gadget/opengal/bDeviceClass > /dev/null
-    echo 0 | sudo tee /sys/kernel/config/usb_gadget/opengal/bDeviceSubClass > /dev/null
-    echo 0 | sudo tee /sys/kernel/config/usb_gadget/opengal/bDeviceProtocol > /dev/null
-    
-    # CRUCIAL FIX: Must match the strings requested by the Head Unit
     echo "Android" | sudo tee /sys/kernel/config/usb_gadget/opengal/strings/0x409/manufacturer > /dev/null
     echo "Android Auto" | sudo tee /sys/kernel/config/usb_gadget/opengal/strings/0x409/product > /dev/null
     
-    echo "[RUNNER] Restarting Daemon for AAP Stream..."
-    # Run daemon as the standard user! (No sudo)
-    ./berryautod/build/opengal_emitter &
+    echo "[RUNNER] Restarting for AAP Stream..."
+    PIPEWIRE_DEBUG=3 ./berryautod/build/opengal_emitter &
     PID2=$!
     
     sleep 2 
-    
     echo "$UDC_NAME" | sudo tee /sys/kernel/config/usb_gadget/opengal/UDC > /dev/null
-    echo "[BOUNCE] Accessory Mode Active!"
-    
     wait $PID2
-else
-    echo "[RUNNER] Daemon exited with code $EXIT_CODE. Stopping."
 fi
