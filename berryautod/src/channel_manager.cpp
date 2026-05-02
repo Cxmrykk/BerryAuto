@@ -3,6 +3,7 @@
 #include "control.pb.h"
 #include "globals.hpp"
 #include "input.pb.h"
+#include "input_handler.hpp" // NEW: Added input handler include
 #include "media.pb.h"
 #include "sensors.pb.h"
 #include <cstdlib>
@@ -42,6 +43,11 @@ void handle_channel_open_response()
         else if (ctype == ChannelType::INPUT)
         {
             input_channel_ready = true;
+
+            // NEW: Initialize the virtual mouse immediately so the OS has time to register it!
+            std::cout << ">>> Initializing Virtual Pointer Device... <<<" << std::endl;
+            init_uinput();
+
             std::cout << ">>> Sending Touch Binding Request... <<<" << std::endl;
             KeyBindingRequest bind;
             send_message(opened_channel, InputMsgType::BINDINGREQUEST, bind);
@@ -112,7 +118,6 @@ void process_service_discovery_response(uint8_t* payload_data, int payload_len)
                         int best_idx = 0;
                         int best_score = -1;
 
-                        // Dynamically score configs based on exact OS resolution matching and Pi Hardware (H.264)
                         for (int k = 0; k < svc.media_sink_service().video_configs_size(); k++)
                         {
                             const auto& vc = svc.media_sink_service().video_configs(k);
@@ -155,18 +160,16 @@ void process_service_discovery_response(uint8_t* payload_data, int payload_len)
                             std::cout << "  - Index " << k << ": Resolution=" << res_str << ", Codec=" << codec
                                       << std::endl;
 
-                            // Massively prefer H.264 natively since Pi lacks HEVC encode hardware
                             int score = (codec == MediaCodecType::MEDIA_CODEC_VIDEO_H264_BP) ? 10000
                                         : (codec == MediaCodecType::MEDIA_CODEC_VIDEO_H265)  ? 1000
                                                                                              : 0;
 
-                            // We can now dynamically resize! So pick the highest quality UI supported.
                             if (res_type == 3)
-                                score += 500; // 1080p
+                                score += 500;
                             else if (res_type == 2)
-                                score += 400; // 720p
+                                score += 400;
                             else if (res_type == 1)
-                                score += 100; // 480p
+                                score += 100;
 
                             if (score > best_score)
                             {
@@ -226,12 +229,10 @@ void process_service_discovery_response(uint8_t* payload_data, int payload_len)
                         os_desktop_width = global_video_width;
                         os_desktop_height = global_video_height;
 
-                        // Execute Shell Bridge to dynamically adapt Wayland/X11 to the Head Unit
                         std::string cmd = "/usr/local/bin/resize_desktop.sh " + std::to_string(global_video_width) +
                                           " " + std::to_string(global_video_height);
                         system(cmd.c_str());
 
-                        // Assuming a perfect 1:1 resize, margins are eliminated!
                         global_video_margin_w = 0;
                         global_video_margin_h = 0;
 

@@ -21,21 +21,17 @@ void init_uinput()
         return;
     }
 
-    // Configure as an Absolute Pointer (Universally accepted by libinput as a mouse/tablet)
+    // Configure as a generic Absolute Pointer (Perfectly recognized by libinput/X11/Wayland)
     ioctl(uinput_fd, UI_SET_EVBIT, EV_KEY);
-    ioctl(uinput_fd, UI_SET_KEYBIT, BTN_LEFT);  // Acts as a universal Left-Click
-    ioctl(uinput_fd, UI_SET_KEYBIT, BTN_TOUCH); // Flags it as a touch-capable device
+    ioctl(uinput_fd, UI_SET_KEYBIT, BTN_LEFT);
 
     ioctl(uinput_fd, UI_SET_EVBIT, EV_ABS);
     ioctl(uinput_fd, UI_SET_ABSBIT, ABS_X);
     ioctl(uinput_fd, UI_SET_ABSBIT, ABS_Y);
 
-    // Tell libinput this is a direct screen-mapping device
-    ioctl(uinput_fd, UI_SET_PROPBIT, INPUT_PROP_DIRECT);
-
     struct uinput_user_dev uidev;
     memset(&uidev, 0, sizeof(uidev));
-    snprintf(uidev.name, UINPUT_MAX_NAME_SIZE, "BerryAuto Virtual Touch");
+    snprintf(uidev.name, UINPUT_MAX_NAME_SIZE, "BerryAuto Virtual Pointer");
     uidev.id.bustype = BUS_USB;
     uidev.id.vendor = 0x1234;
     uidev.id.product = 0x5678;
@@ -53,6 +49,8 @@ void init_uinput()
 
 void emit_uinput(int type, int code, int val)
 {
+    if (uinput_fd < 0)
+        return;
     struct input_event ie;
     memset(&ie, 0, sizeof(ie));
     ie.type = type;
@@ -61,9 +59,21 @@ void emit_uinput(int type, int code, int val)
     write(uinput_fd, &ie, sizeof(ie));
 }
 
+void reset_input_state()
+{
+    if (uinput_fd >= 0)
+    {
+        // Forcefully release the left click if the connection is dropped mid-touch
+        emit_uinput(EV_KEY, BTN_LEFT, 0);
+        emit_uinput(EV_SYN, SYN_REPORT, 0);
+    }
+}
+
 void handle_touch_event(const com::andrerinas::headunitrevived::aap::protocol::proto::InputReport& report)
 {
     std::lock_guard<std::recursive_mutex> lock(aap_mutex);
+
+    // Fallback just in case, but this should already be initialized by the Channel Manager
     init_uinput();
 
     if (uinput_fd < 0 || !report.has_touch_event() || report.touch_event().pointer_data_size() == 0)
@@ -89,14 +99,12 @@ void handle_touch_event(const com::andrerinas::headunitrevived::aap::protocol::p
 
         // STEP 2: Issue the physical click at the newly updated location
         emit_uinput(EV_KEY, BTN_LEFT, 1);
-        emit_uinput(EV_KEY, BTN_TOUCH, 1);
         emit_uinput(EV_SYN, SYN_REPORT, 0);
     }
     else if (action == 1 || action == 6) // Up
     {
         // Release the click
         emit_uinput(EV_KEY, BTN_LEFT, 0);
-        emit_uinput(EV_KEY, BTN_TOUCH, 0);
         emit_uinput(EV_SYN, SYN_REPORT, 0);
     }
     else if (action == 2) // Move (Drag)
@@ -112,6 +120,7 @@ void cleanup_input()
 {
     if (uinput_fd >= 0)
     {
+        reset_input_state();
         ioctl(uinput_fd, UI_DEV_DESTROY);
         close(uinput_fd);
         uinput_fd = -1;
