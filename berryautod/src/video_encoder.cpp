@@ -199,23 +199,22 @@ bool VideoEncoder::init_encoder()
         codec_ctx->height = target_height;
         codec_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
 
-        // STRICT 60 FPS PACING
         codec_ctx->time_base = {1, 60};
         codec_ctx->framerate = {60, 1};
         codec_ctx->gop_size = 60;
         codec_ctx->max_b_frames = 0;
 
-        // CRITICAL: Strictly enforce Baseline for Android Auto hardware compatibility
+        // Android Auto mandates Baseline profile
         codec_ctx->profile = FF_PROFILE_H264_BASELINE;
 
-        // CRITICAL: Strict Constant Bitrate (CBR) to prevent Head Unit buffer overflows
-        int target_bitrate = static_cast<int>(target_width * target_height * 60 * 0.08);
-        target_bitrate = std::clamp(target_bitrate, 2000000, 6000000);
+        // Force a strictly conservative Bitrate (~1 Mbps) to prevent initial I-Frame bursting
+        // from overflowing the car's low-memory USB endpoints.
+        int target_bitrate = 1500000;
 
         codec_ctx->bit_rate = target_bitrate;
         codec_ctx->rc_min_rate = target_bitrate;
         codec_ctx->rc_max_rate = target_bitrate;
-        codec_ctx->rc_buffer_size = target_bitrate; // 1-second VBV buffer constraint
+        codec_ctx->rc_buffer_size = target_bitrate / 2;
 
         codec_ctx->thread_count = std::max(1u, std::thread::hardware_concurrency());
         codec_ctx->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
@@ -224,7 +223,10 @@ bool VideoEncoder::init_encoder()
         {
             av_opt_set(codec_ctx->priv_data, "preset", "ultrafast", 0);
             av_opt_set(codec_ctx->priv_data, "tune", "zerolatency", 0);
-            av_opt_set(codec_ctx->priv_data, "nal-hrd", "cbr", 0); // Strict CBR padding
+        }
+        else if (std::string(codec->name) == "h264_v4l2m2m")
+        {
+            av_opt_set(codec_ctx->priv_data, "profile", "baseline", 0);
         }
 
         if (avcodec_open2(codec_ctx, codec, NULL) >= 0)
@@ -271,7 +273,6 @@ void VideoEncoder::process_raw_frame(void* bgra_data, int stride, int /*pw_w*/, 
 
     sws_scale(sws_ctx, in_data, in_linesize, 0, pw_h, frame->data, frame->linesize);
 
-    // CRITICAL: Strictly align FFmpeg Presentation Time Stamp (PTS) to sequential frames
     frame->pts = frame_pts++;
     frame->pict_type = request_keyframe.exchange(false) ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_NONE;
 
@@ -282,12 +283,13 @@ void VideoEncoder::process_raw_frame(void* bgra_data, int stride, int /*pw_w*/, 
         if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF || ret < 0)
             break;
 
-        // CRITICAL: Generate a perfectly spaced microseconds timestamp based on the strict PTS
-        // 1,000,000 us / 60 fps = 16,666 us per frame.
-        uint64_t exact_ts = frame->pts * 16666;
+        // CRITICAL FIX: Restore absolute clock timestamps! The Head Unit relies on these
+        // to sync the video buffer. Sending artificial 0-based PTS values will crash it.
+        auto now = std::chrono::system_clock::now().time_since_epoch();
+        uint64_t absolute_ts = std::chrono::duration_cast<std::chrono::microseconds>(now).count();
 
         std::vector<uint8_t> nal_data(pkt->data, pkt->data + pkt->size);
-        nal_callback(nal_data, exact_ts);
+        nal_callback(nal_data, absolute_ts);
         av_packet_unref(pkt);
     }
 }
@@ -311,17 +313,27 @@ void VideoEncoder::capture_loop()
         LOG_I("[Capture] X11 detected. Initializing XShm engine...");
         if (init_x11())
         {
-            // STRICT CLOCK PACING (Guarantee exactly 60.00 frames per second)
             auto frame_duration = std::chrono::microseconds(1000000 / 60);
-            auto next_frame_time = std::chrono::steady_clock::now();
+            auto next_frame_time = std::chrono::steady_clock::now() + frame_duration;
 
             while (running.load())
             {
                 XShmGetImage(dpy, root_window, img, 0, 0, AllPlanes);
                 process_raw_frame((uint8_t*)img->data, img->bytes_per_line, img->width, img->height);
 
-                next_frame_time += frame_duration;
-                std::this_thread::sleep_until(next_frame_time);
+                auto now = std::chrono::steady_clock::now();
+
+                // CRITICAL FIX: Burst Preventer.
+                // If the Pi falls behind, do NOT instantly fire accumulated frames.
+                if (next_frame_time < now)
+                {
+                    next_frame_time = now + frame_duration;
+                }
+                else
+                {
+                    std::this_thread::sleep_until(next_frame_time);
+                    next_frame_time += frame_duration;
+                }
             }
             cleanup_x11();
         }
