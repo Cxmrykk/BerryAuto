@@ -13,8 +13,15 @@ USER_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
 
 echo "[RESIZE] Adapting Pi Desktop to ${W}x${H} for user '$REAL_USER'..."
 
+DETECTED_WAYLAND_DISPLAY=""
+if [ -S "/run/user/$USER_UID/wayland-1" ]; then
+    DETECTED_WAYLAND_DISPLAY="wayland-1"
+elif [ -S "/run/user/$USER_UID/wayland-0" ]; then
+    DETECTED_WAYLAND_DISPLAY="wayland-0"
+fi
+
 run_wayland() {
-    sudo -u "$REAL_USER" env XDG_RUNTIME_DIR="/run/user/$USER_UID" WAYLAND_DISPLAY="wayland-1" "$@"
+    sudo -u "$REAL_USER" env XDG_RUNTIME_DIR="/run/user/$USER_UID" WAYLAND_DISPLAY="$DETECTED_WAYLAND_DISPLAY" "$@"
 }
 
 run_x11() {
@@ -37,15 +44,21 @@ if ! run_x11 pgrep -x pipewire > /dev/null; then
     sleep 2
 fi
 
-if command -v wlr-randr >/dev/null 2>&1 && run_wayland wlr-randr >/dev/null 2>&1; then
-    echo "[RESIZE] Detected Wayland Environment..."
-    OUTPUT=$(run_wayland wlr-randr | grep "^[^ ]" | head -n 1 | awk '{print $1}')
-    if [ -n "$OUTPUT" ]; then
-        run_wayland wlr-randr --output "$OUTPUT" --custom-mode "${W}x${H}"
-        echo "[RESIZE] Wayland Desktop successfully adjusted!"
+if [ -n "$DETECTED_WAYLAND_DISPLAY" ]; then
+    if ! command -v wlr-randr >/dev/null 2>&1; then
+        echo "[RESIZE] WARNING: Wayland detected but wlr-randr is missing! Please run: sudo apt install wlr-randr"
+    elif run_wayland wlr-randr >/dev/null 2>&1; then
+        echo "[RESIZE] Detected Wayland Environment..."
+        OUTPUT=$(run_wayland wlr-randr | grep "^[^ ]" | head -n 1 | awk '{print $1}')
+        if [ -n "$OUTPUT" ]; then
+            run_wayland wlr-randr --output "$OUTPUT" --custom-mode "${W}x${H}"
+            echo "[RESIZE] Wayland Desktop successfully adjusted!"
+            exit 0
+        fi
     fi
+fi
 
-elif command -v xrandr >/dev/null 2>&1 && run_x11 xrandr >/dev/null 2>&1; then
+if command -v xrandr >/dev/null 2>&1 && run_x11 xrandr >/dev/null 2>&1; then
     echo "[RESIZE] Detected X11 Environment..."
     XRANDR_OUT=$(run_x11 xrandr)
     

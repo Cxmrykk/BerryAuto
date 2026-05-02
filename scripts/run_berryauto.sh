@@ -10,23 +10,44 @@ cleanup() {
 }
 trap cleanup SIGINT
 
+# Identify real user behind sudo
 CURRENT_USER=${SUDO_USER:-$USER}
+USER_UID=$(id -u "$CURRENT_USER")
 USER_HOME=$(getent passwd "$CURRENT_USER" | cut -d: -f6)
 
 export DISPLAY=:0
 export XAUTHORITY="$USER_HOME/.Xauthority"
+export XDG_RUNTIME_DIR="/run/user/$USER_UID"
+
+# Detect Wayland Socket
+if [ -z "$WAYLAND_DISPLAY" ]; then
+    if [ -S "$XDG_RUNTIME_DIR/wayland-1" ]; then
+        export WAYLAND_DISPLAY="wayland-1"
+    elif [ -S "$XDG_RUNTIME_DIR/wayland-0" ]; then
+        export WAYLAND_DISPLAY="wayland-0"
+    fi
+fi
 
 xhost +SI:localuser:root > /dev/null 2>&1 || true
 
-xset s reset > /dev/null 2>&1 || true
-xset s off > /dev/null 2>&1 || true
-xset -dpms > /dev/null 2>&1 || true
+# Disable screen blanking
+if [ -n "$WAYLAND_DISPLAY" ]; then
+    # Prevent Wayland screen blanking if applicable (compositor dependent)
+    xset s reset > /dev/null 2>&1 || true
+    xset s off > /dev/null 2>&1 || true
+    xset -dpms > /dev/null 2>&1 || true
+else
+    xset s reset > /dev/null 2>&1 || true
+    xset s off > /dev/null 2>&1 || true
+    xset -dpms > /dev/null 2>&1 || true
+fi
 
 sudo /usr/local/bin/setup_opengal_gadget.sh
 
 # Force the USB serial to match the AOA serial
 echo "HU-AAAAAA001" | sudo tee /sys/kernel/config/usb_gadget/opengal/strings/0x409/serialnumber > /dev/null
 
+echo "[RUNNER] Environment: WAYLAND_DISPLAY=$WAYLAND_DISPLAY XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR"
 sudo -E ./berryautod/build/opengal_emitter &
 EMITTER_PID=$!
 
