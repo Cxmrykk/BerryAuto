@@ -80,7 +80,6 @@ static bool negotiate_wayland_screencast(uint32_t& out_node_id)
         return false;
     }
 
-    // Determine deterministic session and request paths based on our unique D-Bus name
     std::string sender = g_dbus_connection_get_unique_name(conn);
     sender.erase(std::remove(sender.begin(), sender.end(), ':'), sender.end());
     std::replace(sender.begin(), sender.end(), '.', '_');
@@ -184,9 +183,48 @@ static void on_process(void* userdata)
     if (buf->datas[0].data)
     {
         int stride = buf->datas[0].chunk->stride;
-        enc->process_raw_frame(buf->datas[0].data, stride, enc->get_desktop_width(), enc->get_desktop_height());
+        enc->process_raw_frame(buf->datas[0].data, stride, enc->pw_w, enc->pw_h);
     }
     pw_stream_queue_buffer(enc->pw_stream, b);
+}
+
+static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* param)
+{
+    VideoEncoder* enc = static_cast<VideoEncoder*>(userdata);
+    if (param == NULL || id != SPA_PARAM_Format)
+        return;
+
+    struct spa_video_info_raw info;
+    if (spa_format_video_raw_parse(param, &info) >= 0)
+    {
+        LOG_I("[PipeWire] Format negotiated successfully! Size: " << info.size.width << "x" << info.size.height
+                                                                  << ", SPA Format ID: " << info.format);
+        enc->pw_w = info.size.width;
+        enc->pw_h = info.size.height;
+
+        switch (info.format)
+        {
+            case SPA_VIDEO_FORMAT_RGBx:
+            case SPA_VIDEO_FORMAT_RGBA:
+                enc->pw_fmt = AV_PIX_FMT_RGBA;
+                break;
+            case SPA_VIDEO_FORMAT_BGRx:
+            case SPA_VIDEO_FORMAT_BGRA:
+                enc->pw_fmt = AV_PIX_FMT_BGRA;
+                break;
+            case SPA_VIDEO_FORMAT_RGB:
+                enc->pw_fmt = AV_PIX_FMT_RGB24;
+                break;
+            case SPA_VIDEO_FORMAT_BGR:
+                enc->pw_fmt = AV_PIX_FMT_BGR24;
+                break;
+            default:
+                LOG_E("[PipeWire] Unrecognized pixel format! Defaulting to BGRA.");
+                enc->pw_fmt = AV_PIX_FMT_BGRA;
+                break;
+        }
+        enc->update_sws();
+    }
 }
 
 static void on_state_changed(void* userdata, enum pw_stream_state old, enum pw_stream_state state, const char* error)
@@ -209,6 +247,7 @@ static const struct pw_stream_events stream_events = []()
     ev.version = PW_VERSION_STREAM_EVENTS;
     ev.process = on_process;
     ev.state_changed = on_state_changed;
+    ev.param_changed = on_param_changed;
     return ev;
 }();
 
@@ -248,6 +287,20 @@ void VideoEncoder::force_keyframe()
     request_keyframe = true;
 }
 
+void VideoEncoder::update_sws()
+{
+    std::lock_guard<std::mutex> lock(sws_mutex);
+    if (sws_ctx)
+    {
+        sws_freeContext(sws_ctx);
+        sws_ctx = nullptr;
+    }
+    if (pw_w == 0 || pw_h == 0)
+        return;
+    sws_ctx = sws_getContext(pw_w, pw_h, pw_fmt, target_width, target_height, AV_PIX_FMT_YUV420P, SWS_BILINEAR, NULL,
+                             NULL, NULL);
+}
+
 // --- X11 ENGINE ---
 bool VideoEncoder::init_x11()
 {
@@ -266,6 +319,13 @@ bool VideoEncoder::init_x11()
     shminfo.shmaddr = img->data = (char*)shmat(shminfo.shmid, 0, 0);
     shminfo.readOnly = False;
     XShmAttach(dpy, &shminfo);
+
+    // Configure SWS for X11 format
+    pw_w = target_width;
+    pw_h = target_height;
+    pw_fmt = AV_PIX_FMT_BGRA;
+    update_sws();
+
     return true;
 }
 
@@ -316,13 +376,12 @@ bool VideoEncoder::init_pipewire(uint32_t node_id)
     struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
     const struct spa_pod* params[1];
 
-    struct spa_video_info_raw info;
-    memset(&info, 0, sizeof(info));
-    info.format = SPA_VIDEO_FORMAT_BGRx;
-    info.size = SPA_RECTANGLE((uint32_t)target_width, (uint32_t)target_height);
-    info.framerate = SPA_FRACTION(target_fps, 1);
-
-    params[0] = spa_format_video_raw_build(&b, SPA_PARAM_EnumFormat, &info);
+    // Flexible Format Negotiation! Offer multiple common formats and allow the compositor to choose.
+    params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
+        &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
+        SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), SPA_FORMAT_videoFormat,
+        SPA_POD_CHOICE_ENUM_Id(5, SPA_VIDEO_FORMAT_RGBx, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_RGBA,
+                               SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_RGB));
 
     int res = pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, PW_ID_ANY,
                                 (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 1);
@@ -423,13 +482,12 @@ bool VideoEncoder::init_encoder()
     av_frame_get_buffer(frame, 32);
     pkt = av_packet_alloc();
 
-    sws_ctx = sws_getContext(target_width, target_height, AV_PIX_FMT_BGRA, target_width, target_height,
-                             AV_PIX_FMT_YUV420P, SWS_BILINEAR, NULL, NULL, NULL);
     return true;
 }
 
 void VideoEncoder::cleanup_encoder()
 {
+    std::lock_guard<std::mutex> lock(sws_mutex);
     if (sws_ctx)
         sws_freeContext(sws_ctx);
     if (frame)
@@ -444,12 +502,16 @@ void VideoEncoder::cleanup_encoder()
     codec_ctx = nullptr;
 }
 
-void VideoEncoder::process_raw_frame(void* bgra_data, int stride, int /*pw_w*/, int pw_h)
+void VideoEncoder::process_raw_frame(void* bgra_data, int stride, int w, int h)
 {
+    std::lock_guard<std::mutex> lock(sws_mutex);
+    if (!sws_ctx)
+        return; // Drop frames until PipeWire negotiates the format
+
     const uint8_t* in_data[1] = {(uint8_t*)bgra_data};
     int in_linesize[1] = {stride};
 
-    sws_scale(sws_ctx, in_data, in_linesize, 0, pw_h, frame->data, frame->linesize);
+    sws_scale(sws_ctx, in_data, in_linesize, 0, h, frame->data, frame->linesize);
 
     frame->pts = get_monotonic_usec();
     frame->pict_type = request_keyframe.exchange(false) ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_NONE;

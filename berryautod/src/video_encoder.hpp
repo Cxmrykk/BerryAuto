@@ -2,6 +2,7 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -37,18 +38,14 @@ public:
     void stop();
     void force_keyframe();
 
-    int get_desktop_width() const
-    {
-        return target_width;
-    }
-    int get_desktop_height() const
-    {
-        return target_height;
-    }
-
-    void process_raw_frame(void* data, int stride, int width, int height);
+    void process_raw_frame(void* data, int stride, int w, int h);
+    void update_sws();
 
     struct pw_stream* pw_stream = nullptr;
+    int pw_w = 0;
+    int pw_h = 0;
+    AVPixelFormat pw_fmt = AV_PIX_FMT_BGRA;
+    std::mutex sws_mutex;
 
 private:
     int target_width, target_height, target_fps;
