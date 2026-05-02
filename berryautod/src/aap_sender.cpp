@@ -24,7 +24,7 @@ void tx_worker()
     {
         std::vector<std::vector<uint8_t>> batch;
         {
-            std::unique_lock<std::mutex> lock(queue_mutex);
+            std::uniquelock<std::mutex> lock(queue_mutex);
             queue_cv.wait(lock, [] { return !tx_queue.empty(); });
 
             batch = tx_queue.front();
@@ -67,21 +67,20 @@ void flush_usb_tx_queue()
     std::swap(tx_queue, empty);
 }
 
-// FIX: Properly expose the queue size to the Video Sender's Recovery State Machine
 int get_tx_queue_size()
 {
     std::lock_guard<std::mutex> lock(queue_mutex);
     return tx_queue.size();
 }
 
-void build_chunk(std::vector<std::vector<uint8_t>>& batch, const std::vector<uint8_t>& pt, uint8_t target_channel,
-                 uint8_t flags, uint32_t unfragmented_size)
+void build_chunk(std::vector<std::vector<uint8_t>>& batch, const std::vector<uint8_t>& chunk_data,
+                 uint8_t target_channel, uint8_t flags, uint32_t unfragmented_size)
 {
     std::vector<uint8_t> out;
-    uint16_t len_field = pt.size();
+    uint16_t len_field = chunk_data.size();
 
-    if ((flags & 0x03) == 0x01)
-        len_field += 4;
+    // CRITICAL FIX: The AAP header length field specifies the length of the ciphertext payload ONLY.
+    // Do NOT add +4 bytes for unfragmented_size.
 
     out.push_back(target_channel);
     out.push_back(flags);
@@ -96,53 +95,8 @@ void build_chunk(std::vector<std::vector<uint8_t>>& batch, const std::vector<uin
         out.push_back(unfragmented_size & 0xFF);
     }
 
-    out.insert(out.end(), pt.begin(), pt.end());
+    out.insert(out.end(), chunk_data.begin(), chunk_data.end());
     batch.push_back(std::move(out));
-}
-
-void fragment_and_batch(uint8_t channel, bool is_encrypted, const std::vector<uint8_t>& payload,
-                        std::vector<std::vector<uint8_t>>& batch)
-{
-    const size_t MAX_CHUNK = 15000;
-    uint32_t total_size = payload.size();
-
-    if (total_size <= MAX_CHUNK)
-    {
-        uint8_t flag = is_encrypted ? 0x0B : 0x03;
-        build_chunk(batch, payload, channel, flag, 0);
-    }
-    else
-    {
-        uint8_t base_flag = is_encrypted ? 0x08 : 0x00;
-        size_t offset = 0;
-
-        while (offset < total_size)
-        {
-            size_t remain = total_size - offset;
-            size_t chunk_size = std::min(remain, MAX_CHUNK);
-            std::vector<uint8_t> chunk(payload.begin() + offset, payload.begin() + offset + chunk_size);
-
-            uint8_t flag = base_flag;
-            uint32_t unfrag_size = 0;
-
-            if (offset == 0)
-            {
-                flag |= 0x01;
-                unfrag_size = total_size; // EXACT CIPHERTEXT SIZE. Precludes -251 Errors.
-            }
-            else if (offset + chunk_size >= total_size)
-            {
-                flag |= 0x02;
-            }
-            else
-            {
-                flag |= 0x00;
-            }
-
-            build_chunk(batch, chunk, channel, flag, unfrag_size);
-            offset += chunk_size;
-        }
-    }
 }
 
 void flush_ssl_buffers()
@@ -225,7 +179,6 @@ void send_message(uint8_t channel, uint16_t type, const google::protobuf::Messag
     init_tx_thread();
     {
         // STRICT LOCK: Ties TLS Sequence generation to TX Queue insertion.
-        // Absolutely prevents Touch Events (Ch 3) from racing Video Frames (Ch 2)!
         std::lock_guard<std::recursive_mutex> aap_lock(aap_mutex);
         std::lock_guard<std::mutex> tx_lock(queue_mutex);
 
@@ -262,23 +215,70 @@ bool send_media_payload(uint8_t channel, const std::vector<uint8_t>& pt)
     std::vector<std::vector<uint8_t>> batch;
 
     {
-        // STRICT LOCK: Serializes TLS Encryption AND Queue Insertion!
         std::lock_guard<std::recursive_mutex> aap_lock(aap_mutex);
         std::lock_guard<std::mutex> tx_lock(queue_mutex);
 
-        if (ssl_bypassed)
+        const size_t MAX_CHUNK = 15000;
+        uint32_t total_size = pt.size();
+
+        if (total_size <= MAX_CHUNK)
         {
-            fragment_and_batch(channel, false, pt, batch);
+            std::vector<uint8_t> chunk = pt;
+            if (!ssl_bypassed)
+            {
+                SSL_write(ssl, chunk.data(), chunk.size());
+                int pending = BIO_ctrl_pending(wbio);
+                if (pending > 0)
+                {
+                    chunk.resize(pending);
+                    BIO_read(wbio, chunk.data(), pending);
+                }
+            }
+            uint8_t flag = ssl_bypassed ? 0x03 : 0x0B;
+            build_chunk(batch, chunk, channel, flag, 0);
         }
         else
         {
-            SSL_write(ssl, pt.data(), pt.size());
-            int pending = BIO_ctrl_pending(wbio);
-            if (pending > 0)
+            uint8_t base_flag = ssl_bypassed ? 0x00 : 0x08;
+            size_t offset = 0;
+
+            while (offset < total_size)
             {
-                std::vector<uint8_t> ciphertext(pending);
-                BIO_read(wbio, ciphertext.data(), pending);
-                fragment_and_batch(channel, true, ciphertext, batch);
+                size_t remain = total_size - offset;
+                size_t chunk_size = std::min(remain, MAX_CHUNK);
+                std::vector<uint8_t> chunk(pt.begin() + offset, pt.begin() + offset + chunk_size);
+
+                // CRITICAL FIX: Fragment the payload FIRST, then encrypt EACH fragment independently
+                if (!ssl_bypassed)
+                {
+                    SSL_write(ssl, chunk.data(), chunk.size());
+                    int pending = BIO_ctrl_pending(wbio);
+                    if (pending > 0)
+                    {
+                        chunk.resize(pending);
+                        BIO_read(wbio, chunk.data(), pending);
+                    }
+                }
+
+                uint8_t flag = base_flag;
+                uint32_t unfrag_size = 0;
+
+                if (offset == 0)
+                {
+                    flag |= 0x01;
+                    unfrag_size = total_size;
+                }
+                else if (offset + chunk_size >= total_size)
+                {
+                    flag |= 0x02;
+                }
+                else
+                {
+                    flag |= 0x00;
+                }
+
+                build_chunk(batch, chunk, channel, flag, unfrag_size);
+                offset += chunk_size;
             }
         }
 

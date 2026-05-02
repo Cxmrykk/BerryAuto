@@ -28,7 +28,6 @@ void hex_dump(const std::string& prefix, const uint8_t* data, int len)
 
 void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data, int payload_len)
 {
-    // Ignore Video ACKs to prevent log flooding
     if (channel != 2 || type != MediaMsgType::MEDIA_MESSAGE_ACK)
     {
         std::cout << "[DEBUG-RX] Parsed - Channel: " << (int)channel << " Type: " << type << " Len: " << payload_len
@@ -90,8 +89,19 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                 {
                     if (config.has_max_unacked())
                     {
-                        max_video_unacked = config.max_unacked();
-                        LOG_I(">>> Max Unacked Frames set to " + std::to_string(max_video_unacked));
+                        // FIX: Failsafe for schema tag swap from headunit-revived
+                        // If HUR sends status = 2, max_unacked parses as 2.
+                        if (config.max_unacked() <= 2)
+                        {
+                            max_video_unacked = 16;
+                            LOG_I(">>> Max Unacked Frames parsed as " + std::to_string(config.max_unacked()) +
+                                  " (Likely swapped tag). Forcing to 16.");
+                        }
+                        else
+                        {
+                            max_video_unacked = config.max_unacked();
+                            LOG_I(">>> Max Unacked Frames set to " + std::to_string(max_video_unacked));
+                        }
                     }
                 }
                 LOG_I(">>> Video Configured via Car Response. Requesting Start and Focus... <<<");
@@ -126,10 +136,19 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
                 Ack ack_msg;
                 if (ack_msg.ParseFromArray(payload_data, payload_len))
                 {
-                    if (ack_msg.has_ack())
-                        video_unacked_count -= ack_msg.ack();
-                    if (video_unacked_count.load() < 0)
-                        video_unacked_count = 0;
+                    // FIX: Failsafe for schema tag swap from headunit-revived
+                    uint32_t ack_value = ack_msg.has_ack() ? ack_msg.ack() : 0;
+                    if (ack_value == 0 && ack_msg.has_session_id())
+                    {
+                        ack_value = 1;
+                    }
+
+                    if (ack_value > 0)
+                    {
+                        video_unacked_count -= ack_value;
+                        if (video_unacked_count.load() < 0)
+                            video_unacked_count = 0;
+                    }
                 }
             }
         }
