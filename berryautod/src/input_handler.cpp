@@ -21,13 +21,17 @@ void init_uinput()
         return;
     }
 
+    // Configure as an Absolute Pointer (Universally accepted by libinput as a mouse/tablet)
     ioctl(uinput_fd, UI_SET_EVBIT, EV_KEY);
-    ioctl(uinput_fd, UI_SET_KEYBIT, BTN_TOUCH);
+    ioctl(uinput_fd, UI_SET_KEYBIT, BTN_LEFT);  // Acts as a universal Left-Click
+    ioctl(uinput_fd, UI_SET_KEYBIT, BTN_TOUCH); // Flags it as a touch-capable device
+
     ioctl(uinput_fd, UI_SET_EVBIT, EV_ABS);
     ioctl(uinput_fd, UI_SET_ABSBIT, ABS_X);
     ioctl(uinput_fd, UI_SET_ABSBIT, ABS_Y);
-    ioctl(uinput_fd, UI_SET_ABSBIT, ABS_MT_POSITION_X);
-    ioctl(uinput_fd, UI_SET_ABSBIT, ABS_MT_POSITION_Y);
+
+    // Tell libinput this is a direct screen-mapping device
+    ioctl(uinput_fd, UI_SET_PROPBIT, INPUT_PROP_DIRECT);
 
     struct uinput_user_dev uidev;
     memset(&uidev, 0, sizeof(uidev));
@@ -42,10 +46,6 @@ void init_uinput()
     uidev.absmax[ABS_X] = ABS_MAX_VAL;
     uidev.absmin[ABS_Y] = 0;
     uidev.absmax[ABS_Y] = ABS_MAX_VAL;
-    uidev.absmin[ABS_MT_POSITION_X] = 0;
-    uidev.absmax[ABS_MT_POSITION_X] = ABS_MAX_VAL;
-    uidev.absmin[ABS_MT_POSITION_Y] = 0;
-    uidev.absmax[ABS_MT_POSITION_Y] = ABS_MAX_VAL;
 
     write(uinput_fd, &uidev, sizeof(uidev));
     ioctl(uinput_fd, UI_DEV_CREATE);
@@ -84,13 +84,13 @@ void handle_touch_event(const com::andrerinas::headunitrevived::aap::protocol::p
     {
         emit_uinput(EV_ABS, ABS_X, mapped_x);
         emit_uinput(EV_ABS, ABS_Y, mapped_y);
-        emit_uinput(EV_ABS, ABS_MT_POSITION_X, mapped_x);
-        emit_uinput(EV_ABS, ABS_MT_POSITION_Y, mapped_y);
+        emit_uinput(EV_KEY, BTN_LEFT, 1);
         emit_uinput(EV_KEY, BTN_TOUCH, 1);
         emit_uinput(EV_SYN, SYN_REPORT, 0);
     }
     else if (action == 1 || action == 6) // Up
     {
+        emit_uinput(EV_KEY, BTN_LEFT, 0);
         emit_uinput(EV_KEY, BTN_TOUCH, 0);
         emit_uinput(EV_SYN, SYN_REPORT, 0);
     }
@@ -98,8 +98,6 @@ void handle_touch_event(const com::andrerinas::headunitrevived::aap::protocol::p
     {
         emit_uinput(EV_ABS, ABS_X, mapped_x);
         emit_uinput(EV_ABS, ABS_Y, mapped_y);
-        emit_uinput(EV_ABS, ABS_MT_POSITION_X, mapped_x);
-        emit_uinput(EV_ABS, ABS_MT_POSITION_Y, mapped_y);
         emit_uinput(EV_SYN, SYN_REPORT, 0);
     }
 }
