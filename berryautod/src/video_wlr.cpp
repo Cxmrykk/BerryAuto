@@ -1,4 +1,5 @@
 #include "globals.hpp"
+#include "input_handler.hpp"
 #include "video_encoder.hpp"
 #include <cerrno>
 #include <cstring>
@@ -8,6 +9,8 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
+extern uint64_t get_monotonic_usec();
+
 static void frame_handle_buffer(void* data, struct zwlr_screencopy_frame_v1* frame, uint32_t format, uint32_t width,
                                 uint32_t height, uint32_t stride)
 {
@@ -15,7 +18,6 @@ static void frame_handle_buffer(void* data, struct zwlr_screencopy_frame_v1* fra
 
     size_t size = stride * height;
 
-    // Explicit system call avoids dependency on newer glibc versions
     int fd = syscall(SYS_memfd_create, "wayland-shm", MFD_CLOEXEC | MFD_ALLOW_SEALING);
     if (fd < 0)
     {
@@ -34,7 +36,6 @@ static void frame_handle_buffer(void* data, struct zwlr_screencopy_frame_v1* fra
     enc->pw_h = height;
     enc->latest_stride = stride;
 
-    // Properly map internal SHM format to FFmpeg decoding space
     switch (format)
     {
         case WL_SHM_FORMAT_XRGB8888:
@@ -55,8 +56,6 @@ static void frame_handle_buffer(void* data, struct zwlr_screencopy_frame_v1* fra
     }
 
     enc->update_sws();
-
-    // Commands compositor to perform a direct blit to our memory buffer
     zwlr_screencopy_frame_v1_copy(frame, enc->current_buffer);
     close(fd);
 }
@@ -136,8 +135,6 @@ void VideoEncoder::request_wayland_frame_sync()
     current_data = nullptr;
     current_buffer = nullptr;
 
-    // By explicitly requesting a frame here, Wayland MUST generate one
-    // even if absolutely no pixel damage has occurred.
     zwlr_screencopy_frame_v1* frame = zwlr_screencopy_manager_v1_capture_output(wlr_screencopy, 0, wl_out);
     zwlr_screencopy_frame_v1_add_listener(frame, &frame_listener, this);
 
@@ -173,6 +170,7 @@ static void registry_handle_global(void* data, struct wl_registry* registry, uin
     {
         enc->wlr_screencopy =
             (zwlr_screencopy_manager_v1*)wl_registry_bind(registry, name, &zwlr_screencopy_manager_v1_interface, 1);
+        enc->has_wlr_screencopy = true;
     }
 }
 
@@ -188,7 +186,7 @@ static const struct wl_registry_listener registry_listener = {
     .global_remove = registry_handle_global_remove,
 };
 
-bool VideoEncoder::init_wayland()
+bool VideoEncoder::init_wlr_registry()
 {
     wl_dpy = wl_display_connect(NULL);
     if (!wl_dpy)
@@ -199,17 +197,10 @@ bool VideoEncoder::init_wayland()
     wl_display_roundtrip(wl_dpy);
     wl_display_roundtrip(wl_dpy);
 
-    if (!wl_shm_inst || !wl_out || !wlr_screencopy)
-    {
-        LOG_E("[Capture] Wayland: Missing required interfaces (shm, output, or screencopy).");
-        cleanup_wayland();
-        return false;
-    }
-
     return true;
 }
 
-void VideoEncoder::cleanup_wayland()
+void VideoEncoder::cleanup_wlr_registry()
 {
     if (wlr_screencopy)
         zwlr_screencopy_manager_v1_destroy(wlr_screencopy);
@@ -221,10 +212,54 @@ void VideoEncoder::cleanup_wayland()
         wl_registry_destroy(wl_reg);
     if (wl_dpy)
         wl_display_disconnect(wl_dpy);
+}
 
-    wlr_screencopy = nullptr;
-    wl_out = nullptr;
-    wl_shm_inst = nullptr;
-    wl_reg = nullptr;
-    wl_dpy = nullptr;
+void VideoEncoder::run_wlr_loop()
+{
+    uint64_t frame_interval_us = 1000000 / target_fps;
+    uint64_t next_frame_time = get_monotonic_usec() + frame_interval_us;
+    int wake_timer = 0;
+
+    wake_up_display();
+
+    while (running.load())
+    {
+        wake_timer++;
+        if (wake_timer >= target_fps)
+        {
+            wake_up_display();
+            wake_timer = 0;
+        }
+
+        request_wayland_frame_sync();
+
+        std::vector<uint8_t> frame_copy;
+        int current_stride = 0;
+        int current_w = 0;
+        int current_h = 0;
+
+        {
+            std::lock_guard<std::mutex> lock(frame_mutex);
+            current_w = pw_w;
+            current_h = pw_h;
+            frame_copy = latest_frame_buffer;
+            current_stride = latest_stride;
+        }
+
+        if (!frame_copy.empty() && current_w > 0 && current_h > 0)
+        {
+            process_raw_frame(frame_copy.data(), current_stride, current_w, current_h);
+        }
+
+        uint64_t now = get_monotonic_usec();
+        if (now < next_frame_time)
+        {
+            usleep(next_frame_time - now);
+            next_frame_time += frame_interval_us;
+        }
+        else
+        {
+            next_frame_time = now + frame_interval_us;
+        }
+    }
 }

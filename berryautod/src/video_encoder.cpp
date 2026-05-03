@@ -1,6 +1,6 @@
 #include "video_encoder.hpp"
+#include "dbus_portal.hpp"
 #include "globals.hpp"
-#include "input_handler.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
@@ -9,7 +9,7 @@
 #include <time.h>
 #include <unistd.h>
 
-static uint64_t get_monotonic_usec()
+uint64_t get_monotonic_usec()
 {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -39,6 +39,8 @@ void VideoEncoder::stop()
     if (!running.load())
         return;
     running = false;
+    if (pw_loop)
+        pw_main_loop_quit(pw_loop);
     if (worker_thread.joinable())
         worker_thread.join();
 }
@@ -89,12 +91,10 @@ bool VideoEncoder::init_encoder()
         codec_ctx->width = target_width;
         codec_ctx->height = target_height;
         codec_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
-
         codec_ctx->colorspace = AVCOL_SPC_BT709;
         codec_ctx->color_range = AVCOL_RANGE_MPEG;
         codec_ctx->color_primaries = AVCOL_PRI_BT709;
         codec_ctx->color_trc = AVCOL_TRC_BT709;
-
         codec_ctx->time_base = {1, 1000000};
         codec_ctx->framerate = {target_fps, 1};
         codec_ctx->gop_size = target_fps * 2;
@@ -107,7 +107,6 @@ bool VideoEncoder::init_encoder()
         codec_ctx->rc_min_rate = target_bitrate;
         codec_ctx->rc_max_rate = target_bitrate;
         codec_ctx->rc_buffer_size = target_bitrate / 2;
-
         codec_ctx->thread_count = std::max(1u, std::thread::hardware_concurrency());
         codec_ctx->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
 
@@ -194,98 +193,62 @@ void VideoEncoder::capture_loop()
 
     if (getenv("WAYLAND_DISPLAY"))
     {
-        LOG_I("[Capture] Wayland detected. Initializing wlr-screencopy native grabber...");
-
-        if (init_wayland())
+        LOG_I("[Capture] Wayland detected. Probing compositor capabilities...");
+        if (init_wlr_registry())
         {
-            LOG_I("[Capture] wlr-screencopy Negotiated successfully!");
-            std::thread encoder_thread(
-                [this]()
-                {
-                    uint64_t frame_interval_us = 1000000 / target_fps;
-                    uint64_t next_frame_time = get_monotonic_usec() + frame_interval_us;
-                    int wake_timer = 0;
-
-                    while (running.load())
-                    {
-                        wake_timer++;
-                        if (wake_timer >= target_fps)
-                        {
-                            wake_up_display();
-                            wake_timer = 0;
-                        }
-
-                        // SYNCHRONOUSLY pull a fresh frame explicitly bypassing damage limits!
-                        request_wayland_frame_sync();
-
-                        std::vector<uint8_t> frame_copy;
-                        int current_stride = 0;
-                        int current_w = 0;
-                        int current_h = 0;
-
-                        {
-                            std::lock_guard<std::mutex> lock(frame_mutex);
-                            current_w = pw_w;
-                            current_h = pw_h;
-                            frame_copy = latest_frame_buffer;
-                            current_stride = latest_stride;
-                        }
-
-                        if (!frame_copy.empty() && current_w > 0 && current_h > 0)
-                        {
-                            process_raw_frame(frame_copy.data(), current_stride, current_w, current_h);
-                        }
-
-                        uint64_t now = get_monotonic_usec();
-                        if (now < next_frame_time)
-                        {
-                            usleep(next_frame_time - now);
-                            next_frame_time += frame_interval_us;
-                        }
-                        else
-                        {
-                            next_frame_time = now + frame_interval_us;
-                        }
-                    }
-                });
-
-            wake_up_display();
-            while (running.load())
+            if (has_wlr_screencopy && wlr_screencopy && wl_out)
             {
-                usleep(100000);
+                LOG_I("[Capture] wlroots compositor detected. Using native wlr-screencopy.");
+                run_wlr_loop();
             }
-            if (encoder_thread.joinable())
-                encoder_thread.join();
-            cleanup_wayland();
+            else
+            {
+                LOG_I("[Capture] GNOME/Mutter detected. Falling back to PipeWire Portal.");
+                uint32_t node_id = 0;
+                if (negotiate_wayland_screencast(node_id))
+                {
+                    run_pipewire_loop(node_id);
+                }
+                else
+                {
+                    LOG_E("[Capture] Wayland PipeWire Portal negotiation failed.");
+                }
+            }
+            cleanup_wlr_registry();
         }
-        else
-            LOG_E("[Capture] Wayland Screencopy negotiation failed.");
     }
     else
     {
         LOG_I("[Capture] X11 detected. Initializing XShm engine...");
-        if (init_x11())
-        {
-            uint64_t frame_interval_us = 1000000 / target_fps;
-            uint64_t next_frame_time = get_monotonic_usec() + frame_interval_us;
-
-            while (running.load())
-            {
-                XShmGetImage(dpy, root_window, img, 0, 0, AllPlanes);
-                process_raw_frame((uint8_t*)img->data, img->bytes_per_line, img->width, img->height);
-
-                uint64_t now = get_monotonic_usec();
-                if (now < next_frame_time)
-                {
-                    usleep(next_frame_time - now);
-                    next_frame_time += frame_interval_us;
-                }
-                else
-                    next_frame_time = now + frame_interval_us;
-            }
-            cleanup_x11();
-        }
+        run_x11_loop(); // Relies on video_x11.cpp
     }
 
     cleanup_encoder();
+}
+
+void VideoEncoder::run_x11_loop()
+{
+    if (init_x11())
+    {
+        uint64_t frame_interval_us = 1000000 / target_fps;
+        uint64_t next_frame_time = get_monotonic_usec() + frame_interval_us;
+
+        while (running.load())
+        {
+            XShmGetImage(dpy, root_window, img, 0, 0, AllPlanes);
+            process_raw_frame((uint8_t*)img->data, img->bytes_per_line, img->width, img->height);
+
+            uint64_t now = get_monotonic_usec();
+            if (now < next_frame_time)
+            {
+                usleep(next_frame_time - now);
+                next_frame_time += frame_interval_us;
+            }
+            else
+            {
+                next_frame_time = now + frame_interval_us;
+            }
+        }
+        cleanup_x11();
+    }
 }

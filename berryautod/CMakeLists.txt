@@ -10,6 +10,8 @@ pkg_check_modules(PROTOBUF REQUIRED protobuf)
 pkg_check_modules(FFMPEG REQUIRED libavcodec libavutil libswscale)
 pkg_check_modules(X11 REQUIRED x11 xext)
 pkg_check_modules(WAYLAND REQUIRED wayland-client)
+pkg_check_modules(PIPEWIRE REQUIRED libpipewire-0.3)
+pkg_check_modules(GLIB REQUIRED glib-2.0 gio-2.0 gio-unix-2.0)
 
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS 
     "${CMAKE_SOURCE_DIR}/certs/android_auto.crt" 
@@ -39,7 +41,6 @@ foreach(PROTO_FILE ${PROTO_FILES})
     )
 endforeach()
 
-# Parse the wlroots screencopy protocol from our local protocols folder
 set(WLR_SCREENCOPY_XML "${CMAKE_SOURCE_DIR}/protocols/wlr-screencopy-unstable-v1.xml")
 
 execute_process(
@@ -56,14 +57,13 @@ include_directories(
     ${FFMPEG_INCLUDE_DIRS} 
     ${X11_INCLUDE_DIRS}
     ${WAYLAND_INCLUDE_DIRS}
+    ${PIPEWIRE_INCLUDE_DIRS}
+    ${GLIB_INCLUDE_DIRS}
     src 
     ${GENERATED_DIR}
 )
 
 file(GLOB SOURCES "src/*.cpp")
-# Exclude the D-Bus Portal script as we no longer use it
-list(REMOVE_ITEM SOURCES "${CMAKE_SOURCE_DIR}/src/dbus_portal.cpp")
-
 file(GLOB PROTO_SRCS "${PROTO_BUILD_DIR}/*.pb.cc")
 
 add_executable(opengal_emitter ${SOURCES} ${GENERATED_DIR}/wlr-screencopy-unstable-v1-protocol.c ${PROTO_SRCS})
@@ -73,5 +73,7 @@ target_link_libraries(opengal_emitter
     ${FFMPEG_LIBRARIES}
     ${X11_LIBRARIES}
     ${WAYLAND_LIBRARIES}
+    ${PIPEWIRE_LIBRARIES}
+    ${GLIB_LIBRARIES}
     pthread
 )
