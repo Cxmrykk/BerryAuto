@@ -1,13 +1,12 @@
 #include "video_encoder.hpp"
+#include "dbus_portal.hpp"
 #include "globals.hpp"
-#include "input_handler.hpp" // NEW: Required for wake_up_display()
+#include "input_handler.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
-#include <gio/gio.h>
 #include <iostream>
-#include <spa/param/buffers.h> // NEW: Required for SPA_PARAM_Buffers
 #include <time.h>
 #include <unistd.h>
 
@@ -17,279 +16,6 @@ static uint64_t get_monotonic_usec()
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
 }
-
-// -------------------------------------------------------------------------
-// D-Bus XDG Desktop Portal Negotiator
-// -------------------------------------------------------------------------
-static uint32_t negotiated_node_id = 0;
-static GMainLoop* dbus_loop = nullptr;
-
-static void on_signal_response(GDBusConnection* conn, const gchar* sender, const gchar* path, const gchar* iface,
-                               const gchar* signal, GVariant* params, gpointer user_data)
-{
-    (void)conn;
-    (void)sender;
-    (void)path;
-    (void)iface;
-    (void)signal;
-    int step = GPOINTER_TO_INT(user_data);
-    uint32_t response = 0;
-    GVariant* results = nullptr;
-
-    g_variant_get(params, "(u@a{sv})", &response, &results);
-
-    if (response != 0)
-    {
-        LOG_E("[Portal] Request failed or cancelled (response=" << response
-                                                                << "). Ensure chooser_type=none is set in config!");
-        if (results)
-            g_variant_unref(results);
-        g_main_loop_quit(dbus_loop);
-        return;
-    }
-
-    if (step == 3)
-    {
-        GVariant* streams = g_variant_lookup_value(results, "streams", G_VARIANT_TYPE("a(ua{sv})"));
-        if (streams)
-        {
-            GVariantIter iter;
-            g_variant_iter_init(&iter, streams);
-            uint32_t node_id;
-            GVariant* stream_props;
-            if (g_variant_iter_next(&iter, "(u@a{sv})", &node_id, &stream_props))
-            {
-                negotiated_node_id = node_id;
-                g_variant_unref(stream_props);
-            }
-            g_variant_unref(streams);
-        }
-    }
-
-    if (results)
-        g_variant_unref(results);
-    g_main_loop_quit(dbus_loop);
-}
-
-static bool negotiate_wayland_screencast(uint32_t& out_node_id)
-{
-    GError* error = nullptr;
-    GDBusConnection* conn = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, &error);
-    if (!conn)
-    {
-        LOG_E("[Portal] Failed to connect to D-Bus Session: " << error->message);
-        g_error_free(error);
-        return false;
-    }
-
-    std::string sender = g_dbus_connection_get_unique_name(conn);
-    sender.erase(std::remove(sender.begin(), sender.end(), ':'), sender.end());
-    std::replace(sender.begin(), sender.end(), '.', '_');
-
-    std::string session_path = "/org/freedesktop/portal/desktop/session/" + sender + "/berryauto";
-    std::string request_path = "/org/freedesktop/portal/desktop/request/" + sender;
-
-    dbus_loop = g_main_loop_new(nullptr, FALSE);
-
-    // STEP 1: CreateSession
-    guint sub1 =
-        g_dbus_connection_signal_subscribe(conn, "org.freedesktop.portal.Desktop", "org.freedesktop.portal.Request",
-                                           "Response", (request_path + "/req1").c_str(), nullptr,
-                                           G_DBUS_SIGNAL_FLAGS_NONE, on_signal_response, GINT_TO_POINTER(1), nullptr);
-
-    GVariantBuilder b1;
-    g_variant_builder_init(&b1, G_VARIANT_TYPE_VARDICT);
-    g_variant_builder_add(&b1, "{sv}", "session_handle_token", g_variant_new_string("berryauto"));
-    g_variant_builder_add(&b1, "{sv}", "handle_token", g_variant_new_string("req1"));
-
-    GVariant* res1 = g_dbus_connection_call_sync(
-        conn, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop", "org.freedesktop.portal.ScreenCast",
-        "CreateSession", g_variant_new("(a{sv})", &b1), nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, &error);
-    if (error)
-    {
-        LOG_E("[Portal] CreateSession failed: " << error->message);
-        return false;
-    }
-    g_variant_unref(res1);
-    g_main_loop_run(dbus_loop);
-    g_dbus_connection_signal_unsubscribe(conn, sub1);
-
-    // STEP 2: SelectSources
-    guint sub2 =
-        g_dbus_connection_signal_subscribe(conn, "org.freedesktop.portal.Desktop", "org.freedesktop.portal.Request",
-                                           "Response", (request_path + "/req2").c_str(), nullptr,
-                                           G_DBUS_SIGNAL_FLAGS_NONE, on_signal_response, GINT_TO_POINTER(2), nullptr);
-
-    GVariantBuilder b2;
-    g_variant_builder_init(&b2, G_VARIANT_TYPE_VARDICT);
-    g_variant_builder_add(&b2, "{sv}", "multiple", g_variant_new_boolean(FALSE));
-    g_variant_builder_add(&b2, "{sv}", "types", g_variant_new_uint32(1)); // 1 = monitor
-    g_variant_builder_add(&b2, "{sv}", "handle_token", g_variant_new_string("req2"));
-
-    GVariant* res2 = g_dbus_connection_call_sync(conn, "org.freedesktop.portal.Desktop",
-                                                 "/org/freedesktop/portal/desktop", "org.freedesktop.portal.ScreenCast",
-                                                 "SelectSources", g_variant_new("(oa{sv})", session_path.c_str(), &b2),
-                                                 nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, &error);
-    if (error)
-    {
-        LOG_E("[Portal] SelectSources failed: " << error->message);
-        return false;
-    }
-    g_variant_unref(res2);
-    g_main_loop_run(dbus_loop);
-    g_dbus_connection_signal_unsubscribe(conn, sub2);
-
-    // STEP 3: Start
-    guint sub3 =
-        g_dbus_connection_signal_subscribe(conn, "org.freedesktop.portal.Desktop", "org.freedesktop.portal.Request",
-                                           "Response", (request_path + "/req3").c_str(), nullptr,
-                                           G_DBUS_SIGNAL_FLAGS_NONE, on_signal_response, GINT_TO_POINTER(3), nullptr);
-
-    GVariantBuilder b3;
-    g_variant_builder_init(&b3, G_VARIANT_TYPE_VARDICT);
-    g_variant_builder_add(&b3, "{sv}", "handle_token", g_variant_new_string("req3"));
-
-    GVariant* res3 = g_dbus_connection_call_sync(conn, "org.freedesktop.portal.Desktop",
-                                                 "/org/freedesktop/portal/desktop", "org.freedesktop.portal.ScreenCast",
-                                                 "Start", g_variant_new("(osa{sv})", session_path.c_str(), "", &b3),
-                                                 nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, &error);
-    if (error)
-    {
-        LOG_E("[Portal] Start failed: " << error->message);
-        return false;
-    }
-    g_variant_unref(res3);
-    g_main_loop_run(dbus_loop);
-    g_dbus_connection_signal_unsubscribe(conn, sub3);
-
-    g_main_loop_unref(dbus_loop);
-    g_object_unref(conn);
-
-    if (negotiated_node_id > 0)
-    {
-        out_node_id = negotiated_node_id;
-        return true;
-    }
-    return false;
-}
-// -------------------------------------------------------------------------
-
-static void on_process(void* userdata)
-{
-    VideoEncoder* enc = static_cast<VideoEncoder*>(userdata);
-    struct pw_buffer* b = pw_stream_dequeue_buffer(enc->pw_stream);
-    if (!b)
-        return;
-
-    struct spa_buffer* buf = b->buffer;
-    if (buf->datas[0].data)
-    {
-        std::lock_guard<std::mutex> lock(enc->frame_mutex);
-        int size = buf->datas[0].chunk->size;
-        int stride = buf->datas[0].chunk->stride;
-
-        if (enc->latest_frame_buffer.size() != (size_t)size)
-        {
-            enc->latest_frame_buffer.resize(size);
-        }
-        memcpy(enc->latest_frame_buffer.data(), buf->datas[0].data, size);
-        enc->latest_stride = stride;
-    }
-    else
-    {
-        LOG_E("[PipeWire] Buffer data is null! DMA-BUF negotiation failure.");
-    }
-    pw_stream_queue_buffer(enc->pw_stream, b);
-}
-
-static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* param)
-{
-    VideoEncoder* enc = static_cast<VideoEncoder*>(userdata);
-    if (param == NULL || id != SPA_PARAM_Format)
-        return;
-
-    struct spa_video_info_raw info;
-    if (spa_format_video_raw_parse(param, &info) >= 0)
-    {
-        LOG_I("[PipeWire] Format negotiated successfully! Size: " << info.size.width << "x" << info.size.height
-                                                                  << ", SPA Format ID: " << info.format);
-
-        {
-            std::lock_guard<std::mutex> lock(enc->frame_mutex);
-            enc->pw_w = info.size.width;
-            enc->pw_h = info.size.height;
-
-            switch (info.format)
-            {
-                case SPA_VIDEO_FORMAT_RGBx:
-                case SPA_VIDEO_FORMAT_RGBA:
-                    enc->pw_fmt = AV_PIX_FMT_RGBA;
-                    break;
-                case SPA_VIDEO_FORMAT_BGRx:
-                case SPA_VIDEO_FORMAT_BGRA:
-                    enc->pw_fmt = AV_PIX_FMT_BGRA;
-                    break;
-                case SPA_VIDEO_FORMAT_xBGR:
-                case SPA_VIDEO_FORMAT_ABGR:
-                    enc->pw_fmt = AV_PIX_FMT_ABGR;
-                    break;
-                case SPA_VIDEO_FORMAT_xRGB:
-                case SPA_VIDEO_FORMAT_ARGB:
-                    enc->pw_fmt = AV_PIX_FMT_ARGB;
-                    break;
-                case SPA_VIDEO_FORMAT_RGB:
-                    enc->pw_fmt = AV_PIX_FMT_RGB24;
-                    break;
-                case SPA_VIDEO_FORMAT_BGR:
-                    enc->pw_fmt = AV_PIX_FMT_BGR24;
-                    break;
-                case SPA_VIDEO_FORMAT_NV12:
-                    enc->pw_fmt = AV_PIX_FMT_NV12;
-                    break;
-                case SPA_VIDEO_FORMAT_I420:
-                    enc->pw_fmt = AV_PIX_FMT_YUV420P;
-                    break;
-                case SPA_VIDEO_FORMAT_YUY2:
-                    enc->pw_fmt = AV_PIX_FMT_YUYV422;
-                    break;
-                case SPA_VIDEO_FORMAT_UYVY:
-                    enc->pw_fmt = AV_PIX_FMT_UYVY422;
-                    break;
-                default:
-                    LOG_E("[PipeWire] Unrecognized pixel format! Defaulting to BGRA.");
-                    enc->pw_fmt = AV_PIX_FMT_BGRA;
-                    break;
-            }
-            // Clear the cache buffer so it's forcefully reallocated for the new format
-            enc->latest_frame_buffer.clear();
-        }
-        enc->update_sws();
-    }
-}
-
-static void on_state_changed(void* userdata, enum pw_stream_state old, enum pw_stream_state state, const char* error)
-{
-    (void)userdata;
-    (void)old;
-    if (error)
-    {
-        LOG_E("[PipeWire] Stream Error: " << error);
-    }
-    else
-    {
-        LOG_I("[PipeWire] Stream State changed to: " << pw_stream_state_as_string(state));
-    }
-}
-
-static const struct pw_stream_events stream_events = []()
-{
-    struct pw_stream_events ev{};
-    ev.version = PW_VERSION_STREAM_EVENTS;
-    ev.process = on_process;
-    ev.state_changed = on_state_changed;
-    ev.param_changed = on_param_changed;
-    return ev;
-}();
 
 VideoEncoder::VideoEncoder(int width, int height, int fps, NalCallback callback)
     : target_width(width), target_height(height), target_fps(fps), nal_callback(callback)
@@ -341,133 +67,6 @@ void VideoEncoder::update_sws()
                              NULL, NULL);
 }
 
-// --- X11 ENGINE ---
-bool VideoEncoder::init_x11()
-{
-    const char* disp_env = getenv("DISPLAY");
-    if (!disp_env)
-        setenv("DISPLAY", ":0", 1);
-
-    dpy = XOpenDisplay(NULL);
-    if (!dpy)
-        return false;
-
-    root_window = DefaultRootWindow(dpy);
-    img = XShmCreateImage(dpy, DefaultVisual(dpy, DefaultScreen(dpy)), DefaultDepth(dpy, DefaultScreen(dpy)), ZPixmap,
-                          NULL, &shminfo, target_width, target_height);
-    shminfo.shmid = shmget(IPC_PRIVATE, img->bytes_per_line * img->height, IPC_CREAT | 0777);
-    shminfo.shmaddr = img->data = (char*)shmat(shminfo.shmid, 0, 0);
-    shminfo.readOnly = False;
-    XShmAttach(dpy, &shminfo);
-
-    pw_w = target_width;
-    pw_h = target_height;
-    pw_fmt = AV_PIX_FMT_BGRA;
-    update_sws();
-
-    return true;
-}
-
-void VideoEncoder::cleanup_x11()
-{
-    if (img)
-    {
-        XShmDetach(dpy, &shminfo);
-        XSync(dpy, False);
-        XDestroyImage(img);
-        shmdt(shminfo.shmaddr);
-        shmctl(shminfo.shmid, IPC_RMID, 0);
-        img = nullptr;
-    }
-    if (dpy)
-    {
-        XCloseDisplay(dpy);
-        dpy = nullptr;
-    }
-}
-
-// --- WAYLAND/PIPEWIRE ENGINE ---
-bool VideoEncoder::init_pipewire(uint32_t node_id)
-{
-    pw_loop = pw_main_loop_new(NULL);
-    if (!pw_loop)
-    {
-        LOG_E("[PipeWire] Failed to create main loop");
-        return false;
-    }
-
-    pw_ctx = pw_context_new(pw_main_loop_get_loop(pw_loop), NULL, 0);
-    pw_core = pw_context_connect(pw_ctx, NULL, 0);
-    if (!pw_core)
-    {
-        LOG_E("[PipeWire] Failed to connect to core");
-        return false;
-    }
-
-    pw_stream =
-        pw_stream_new(pw_core, "OpenGAL Capture",
-                      pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture", PW_KEY_MEDIA_ROLE,
-                                        "Screen", PW_KEY_TARGET_OBJECT, std::to_string(node_id).c_str(), NULL));
-
-    pw_stream_add_listener(pw_stream, &stream_listener, &stream_events, this);
-
-    alignas(8) uint8_t buffer[2048];
-    struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
-    const struct spa_pod* params[2]; // NEW: Update array size to 2
-
-    struct spa_rectangle def_rect;
-    def_rect.width = target_width;
-    def_rect.height = target_height;
-    struct spa_fraction def_frac;
-    def_frac.num = target_fps;
-    def_frac.denom = 1;
-
-    // Forces Wayland to provide the Exact Resolution. Removes Choice Ranges.
-    params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
-        &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
-        SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), SPA_FORMAT_VIDEO_format,
-        SPA_POD_CHOICE_ENUM_Id(17,
-                               SPA_VIDEO_FORMAT_BGRx, // Preferred Default
-                               SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_RGBx,
-                               SPA_VIDEO_FORMAT_RGBA, SPA_VIDEO_FORMAT_xBGR, SPA_VIDEO_FORMAT_ABGR,
-                               SPA_VIDEO_FORMAT_xRGB, SPA_VIDEO_FORMAT_ARGB, SPA_VIDEO_FORMAT_RGB, SPA_VIDEO_FORMAT_BGR,
-                               SPA_VIDEO_FORMAT_NV12, SPA_VIDEO_FORMAT_I420, SPA_VIDEO_FORMAT_YUY2,
-                               SPA_VIDEO_FORMAT_UYVY, SPA_VIDEO_FORMAT_YVYU, SPA_VIDEO_FORMAT_VYUY),
-        SPA_FORMAT_VIDEO_size, SPA_POD_Rectangle(&def_rect), SPA_FORMAT_VIDEO_framerate, SPA_POD_Fraction(&def_frac));
-
-    // NEW: Force Shared Memory (MemFd/MemPtr) to ensure CPU-readable buffers (data != NULL) and avoid DMA-BUF maps.
-    params[1] = (const struct spa_pod*)spa_pod_builder_add_object(
-        &b, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers, SPA_PARAM_BUFFERS_dataType,
-        SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr)));
-
-    int res = pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, PW_ID_ANY,
-                                (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 2);
-
-    if (res < 0)
-    {
-        LOG_E("[PipeWire] Failed to connect stream: " << spa_strerror(res));
-        return false;
-    }
-    return true;
-}
-
-void VideoEncoder::cleanup_pipewire()
-{
-    if (pw_stream)
-        pw_stream_destroy(pw_stream);
-    if (pw_core)
-        pw_core_disconnect(pw_core);
-    if (pw_ctx)
-        pw_context_destroy(pw_ctx);
-    if (pw_loop)
-        pw_main_loop_destroy(pw_loop);
-    pw_stream = nullptr;
-    pw_core = nullptr;
-    pw_ctx = nullptr;
-    pw_loop = nullptr;
-}
-
-// --- FFMPEG ENGINE ---
 bool VideoEncoder::init_encoder()
 {
     std::vector<std::string> encoder_names;
@@ -609,7 +208,6 @@ void VideoEncoder::capture_loop()
             LOG_I("[Capture] ScreenCast Negotiated successfully! Target Node ID: " << node_id);
             if (init_pipewire(node_id))
             {
-                // Launch continuous encoder thread to defeat Wayland Damage Tracking
                 std::thread encoder_thread(
                     [this]()
                     {
@@ -620,31 +218,23 @@ void VideoEncoder::capture_loop()
                         {
                             {
                                 std::lock_guard<std::mutex> lock(frame_mutex);
-
-                                // --- WAYLAND IDLE KICKSTARTER ---
-                                // Wayland stops sending memory pointers if nothing is moving on screen.
-                                // If the cache is empty, we must manually allocate a blank (black/green)
-                                // frame matching the exact negotiated format so the hardware encoder wakes up.
                                 if (latest_frame_buffer.empty() && pw_w > 0 && pw_h > 0)
                                 {
                                     int required_size = av_image_get_buffer_size(pw_fmt, pw_w, pw_h, 1);
                                     if (required_size > 0)
                                     {
                                         latest_frame_buffer.resize(required_size, 0);
-                                        latest_stride = 0; // Let FFmpeg auto-calculate stride
-
-                                        // NEW: Fix YUV Green Screen: Fill YUV formats with proper Black values
+                                        latest_stride = 0;
                                         if (pw_fmt == AV_PIX_FMT_NV12 || pw_fmt == AV_PIX_FMT_YUV420P)
                                         {
                                             int y_size = pw_w * pw_h;
                                             if (required_size >= y_size)
                                             {
-                                                memset(latest_frame_buffer.data(), 0, y_size); // Y = 0 (Black)
+                                                memset(latest_frame_buffer.data(), 0, y_size);
                                                 memset(latest_frame_buffer.data() + y_size, 128,
-                                                       required_size - y_size); // U,V = 128 (Neutral)
+                                                       required_size - y_size);
                                             }
                                         }
-
                                         LOG_I("[Capture] Wayland is idle. Created dummy frame to kickstart stream.");
                                     }
                                 }
@@ -668,12 +258,8 @@ void VideoEncoder::capture_loop()
                         }
                     });
 
-                // NEW: Ensure the screen is awake so Wayfire actually renders the active desktop frame!
                 wake_up_display();
-
                 pw_main_loop_run(pw_loop);
-
-                // Ensure encoder thread cleanly shuts down
                 running = false;
                 if (encoder_thread.joinable())
                     encoder_thread.join();

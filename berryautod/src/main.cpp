@@ -1,26 +1,14 @@
-#include <algorithm>
 #include <atomic>
-#include <chrono>
-#include <errno.h>
-#include <iomanip>
 #include <iostream>
-#include <linux/usb/functionfs.h>
-#include <mutex>
-#include <openssl/err.h>
 #include <openssl/ssl.h>
-#include <string.h>
-#include <sys/stat.h>
-#include <sys/syscall.h>
 #include <thread>
 #include <unistd.h>
-#include <vector>
 
-#include "aap_sender.hpp"
 #include "certs.hpp"
 #include "ffs_usb.hpp"
 #include "globals.hpp"
-#include "input_handler.hpp"
-#include "message_handler.hpp"
+#include "usb_ep0.hpp"
+#include "usb_rx.hpp"
 #include "video_encoder.hpp"
 
 // Global Instantiations
@@ -36,7 +24,6 @@ bool input_channel_ready = false;
 
 std::atomic<bool> should_exit{false};
 
-// Dynamic Channel Assignments
 int video_channel_id = 2;
 int input_channel_id = 3;
 
@@ -48,7 +35,7 @@ int os_desktop_height = 480;
 
 int global_video_config_index = 0;
 int global_video_codec_type = 3;
-int global_video_fps = 60; // NEW: Initialize to 60 FPS
+int global_video_fps = 60;
 int global_video_width = 800;
 int global_video_height = 480;
 int global_video_margin_w = 0;
@@ -68,8 +55,6 @@ void stop_video_stream()
     {
         VideoEncoder* enc = video_streamer;
         video_streamer = nullptr;
-        // FIX: Destroy the encoder in a detached thread to prevent
-        // a thread-join deadlock against the aap_mutex!
         std::thread(
             [enc]()
             {
@@ -102,104 +87,6 @@ int dummy_verify_cb(int preverify_ok, X509_STORE_CTX* ctx)
     (void)preverify_ok;
     (void)ctx;
     return 1;
-}
-
-void force_zero_ack(int ep0, bool is_in)
-{
-    if (is_in)
-    {
-        syscall(SYS_write, ep0, NULL, 0);
-    }
-    else
-    {
-        syscall(SYS_read, ep0, NULL, 0);
-    }
-}
-
-void ep0_thread(int ep0)
-{
-    struct usb_functionfs_event event;
-
-    while (true)
-    {
-        int r = read(ep0, &event, sizeof(event));
-        if (r < 0)
-        {
-            usleep(10000);
-            continue;
-        }
-        switch (event.type)
-        {
-            case FUNCTIONFS_BIND:
-                LOG_I("[USB] Gadget Bound to Host");
-                break;
-            case FUNCTIONFS_ENABLE:
-                LOG_I("[USB] Configured & Enabled!");
-                break;
-            case FUNCTIONFS_DISABLE:
-            case FUNCTIONFS_UNBIND:
-            {
-                LOG_I("[USB] Disabled/Unbound by Host (Port Reset/Suspend)");
-                std::lock_guard<std::recursive_mutex> lock(aap_mutex);
-                is_tls_connected = false;
-                ssl_bypassed = false;
-                stop_video_stream();
-                flush_usb_tx_queue();
-                video_channel_ready = false;
-                input_channel_ready = false;
-                video_unacked_count = 0;
-                break;
-            }
-            case FUNCTIONFS_SETUP:
-            {
-                auto& setup = event.u.setup;
-
-                if ((setup.bRequestType & USB_TYPE_MASK) == USB_TYPE_VENDOR)
-                {
-                    if (setup.bRequest == 51)
-                    {
-                        uint16_t version = 1;
-                        write(ep0, &version, 2);
-                        LOG_I("[AOA] Answered GET_PROTOCOL (51) with Version 1.0");
-                    }
-                    else if (setup.bRequest == 52)
-                    {
-                        char str_buf[256];
-                        memset(str_buf, 0, sizeof(str_buf));
-
-                        if (setup.wLength > 0)
-                        {
-                            int to_read = std::min((int)setup.wLength, 255);
-                            read(ep0, str_buf, to_read);
-                        }
-                        else
-                        {
-                            force_zero_ack(ep0, false);
-                        }
-                        LOG_I("[AOA] Received SEND_STRING (index " << setup.wIndex << "): " << str_buf);
-                    }
-                    else if (setup.bRequest == 53)
-                    {
-                        force_zero_ack(ep0, false);
-                        LOG_I("[AOA] Received START (53). Acknowledged. Waiting 500ms to flush, then morphing...");
-                        usleep(500000);
-
-                        should_exit = true;
-                        exit(42);
-                    }
-                    else
-                    {
-                        force_zero_ack(ep0, (setup.bRequestType & USB_DIR_IN));
-                    }
-                }
-                else
-                {
-                    force_zero_ack(ep0, (setup.bRequestType & USB_DIR_IN));
-                }
-                break;
-            }
-        }
-    }
 }
 
 int main()
@@ -247,126 +134,6 @@ int main()
     std::thread ep0_t(ep0_thread, ep0);
     ep0_t.detach();
 
-    std::vector<uint8_t> usb_rx_buffer;
-    uint8_t tmp_buf[16384];
-
-    while (true)
-    {
-        if (should_exit.load())
-            break;
-
-        int r = read(ep_out, tmp_buf, sizeof(tmp_buf));
-
-        if (r < 0)
-        {
-            if (errno == EAGAIN || errno == EINTR)
-            {
-                usleep(1000);
-                continue;
-            }
-            if (errno == ESHUTDOWN || errno == ENODEV)
-            {
-                usleep(10000);
-                continue;
-            }
-            LOG_E("[BULK-RX] Read error: " << strerror(errno));
-            usleep(100000);
-            continue;
-        }
-        if (r == 0)
-        {
-            usleep(1000);
-            continue;
-        }
-
-        if (!is_video_streaming.load())
-        {
-            LOG_I("[BULK-RX] Read " << r << " raw bytes from USB.");
-        }
-
-        usb_rx_buffer.insert(usb_rx_buffer.end(), tmp_buf, tmp_buf + r);
-
-        while (usb_rx_buffer.size() >= 4)
-        {
-            uint16_t len = (usb_rx_buffer[2] << 8) | usb_rx_buffer[3];
-
-            if (usb_rx_buffer.size() >= (size_t)(4 + len))
-            {
-                uint8_t channel = usb_rx_buffer[0];
-                uint8_t flags = usb_rx_buffer[1];
-                std::vector<uint8_t> payload(usb_rx_buffer.begin() + 4, usb_rx_buffer.begin() + 4 + len);
-
-                usb_rx_buffer.erase(usb_rx_buffer.begin(), usb_rx_buffer.begin() + 4 + len);
-
-                if (channel != 2)
-                {
-                    std::cout << "[DEBUG-RX] Raw Packet - Channel: " << (int)channel << " Flags: 0x" << std::hex
-                              << (int)flags << std::dec << " Len: " << len << std::endl;
-                }
-
-                if ((flags & 0x08) != 0)
-                {
-                    {
-                        std::lock_guard<std::recursive_mutex> lock(aap_mutex);
-
-                        size_t offset = 0;
-                        if ((flags & 0x01) != 0 && (flags & 0x02) == 0)
-                        { // 0x09
-                            if (payload.size() >= 4)
-                                offset = 4;
-                        }
-
-                        if (payload.size() > offset)
-                        {
-                            BIO_write(rbio, payload.data() + offset, payload.size() - offset);
-
-                            uint8_t dec_buf[16384];
-                            while (true)
-                            {
-                                int dec_bytes = SSL_read(ssl, dec_buf, sizeof(dec_buf));
-                                if (dec_bytes > 0)
-                                {
-                                    if (dec_bytes >= 2)
-                                    {
-                                        uint16_t type = (dec_buf[0] << 8) | dec_buf[1];
-                                        handle_decrypted_payload(channel, type, dec_buf + 2, dec_bytes - 2);
-                                    }
-                                }
-                                else
-                                {
-                                    int err = SSL_get_error(ssl, dec_bytes);
-                                    if (err != SSL_ERROR_WANT_READ && err != SSL_ERROR_WANT_WRITE)
-                                    {
-                                        LOG_E(">>> SSL_read Decryption Error: " << err << " <<<");
-                                        SSL_clear(ssl);
-                                        is_tls_connected = false;
-                                    }
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    flush_ssl_buffers();
-                }
-                else
-                {
-                    if (payload.size() >= 2)
-                    {
-                        uint16_t type = (payload[0] << 8) | payload[1];
-                        handle_unencrypted_payload(channel, type, payload.data() + 2, payload.size() - 2);
-                    }
-                }
-            }
-            else
-            {
-                break;
-            }
-        }
-    }
-
-    cleanup_input();
-
-    if (should_exit.load())
-        return 42;
-    return 0;
+    // Replaces the huge loop with an isolated, clean function call
+    return usb_rx_loop();
 }
