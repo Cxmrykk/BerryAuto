@@ -30,15 +30,7 @@ static void on_process(void* userdata)
             src_data = nullptr;
         }
         else
-        {
             mapped_dmabuf = true;
-        }
-    }
-
-    if (pw_frame_count == 0)
-    {
-        LOG_I("[PipeWire] First frame arrived! Type=" << buf->datas[0].type << " FD=" << buf->datas[0].fd
-                                                      << " Data=" << src_data);
     }
 
     if (src_data)
@@ -51,13 +43,10 @@ static void on_process(void* userdata)
         {
             pw_frame_count++;
             if (pw_frame_count == 1)
-            {
-                LOG_I("[PipeWire] SUCCESS! Extracted first frame! (Size: " << size << " bytes)");
-            }
+                LOG_I("[PipeWire] SUCCESS! Extracted first frame! (Size: " << size << " bytes, Stride: " << stride
+                                                                           << ")");
             else if (pw_frame_count % 60 == 0)
-            {
                 LOG_I("[PipeWire] Heartbeat: Receiving healthy frames... (Total: " << pw_frame_count << ")");
-            }
 
             if (enc->latest_frame_buffer.size() != (size_t)size)
                 enc->latest_frame_buffer.resize(size);
@@ -67,9 +56,7 @@ static void on_process(void* userdata)
         }
 
         if (mapped_dmabuf)
-        {
             munmap(src_data, buf->datas[0].maxsize);
-        }
     }
     else
     {
@@ -140,19 +127,14 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
         struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
         const struct spa_pod* params[1];
 
-        int stride = info.size.width * 4;
-        if (info.format == SPA_VIDEO_FORMAT_RGB || info.format == SPA_VIDEO_FORMAT_BGR)
-            stride = info.size.width * 3;
-
+        // CRITICAL FIX: Omit 'size' and 'stride' to allow the server to allocate hardware-aligned padded memory
         params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
             &b, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers, SPA_PARAM_BUFFERS_buffers,
-            SPA_POD_CHOICE_RANGE_Int(4, 1, 8), SPA_PARAM_BUFFERS_blocks, SPA_POD_Int(1), SPA_PARAM_BUFFERS_size,
-            SPA_POD_Int(stride * info.size.height), SPA_PARAM_BUFFERS_stride, SPA_POD_Int(stride),
-            SPA_PARAM_BUFFERS_align, SPA_POD_Int(16), SPA_PARAM_BUFFERS_dataType,
-            SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr) | (1 << SPA_DATA_DmaBuf)));
+            SPA_POD_CHOICE_RANGE_Int(4, 2, 8), SPA_PARAM_BUFFERS_blocks, SPA_POD_Int(1), SPA_PARAM_BUFFERS_dataType,
+            SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr)));
 
         pw_stream_update_params(enc->pw_stream, params, 1);
-        LOG_I("[PipeWire] Buffer requirements pushed. Waiting for data...");
+        LOG_I("[PipeWire] Buffer requirements pushed (Allowing Server-Side Alignment). Waiting for data...");
     }
 }
 
@@ -196,27 +178,29 @@ bool VideoEncoder::init_pipewire(uint32_t node_id)
     struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
     const struct spa_pod* params[2];
 
-    struct spa_rectangle def_rect;
-    def_rect.width = target_width;
-    def_rect.height = target_height;
-    struct spa_fraction def_frac;
-    def_frac.num = target_fps;
-    def_frac.denom = 1;
+    struct spa_rectangle def_rect = {(uint32_t)target_width, (uint32_t)target_height};
+    struct spa_rectangle min_rect = {1, 1};
+    struct spa_rectangle max_rect = {8192, 8192};
+    struct spa_fraction def_frac = {(uint32_t)target_fps, 1};
+    struct spa_fraction min_frac = {1, 1};
+    struct spa_fraction max_frac = {144, 1};
 
+    // CRITICAL FIX: Use Ranges for Resolution so Wayland isn't forced to reject the stream if it's off by 1 pixel
     params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
         &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
         SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), SPA_FORMAT_VIDEO_format,
-        SPA_POD_CHOICE_ENUM_Id(17, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRA,
-                               SPA_VIDEO_FORMAT_RGBx, SPA_VIDEO_FORMAT_RGBA, SPA_VIDEO_FORMAT_xBGR,
-                               SPA_VIDEO_FORMAT_ABGR, SPA_VIDEO_FORMAT_xRGB, SPA_VIDEO_FORMAT_ARGB,
-                               SPA_VIDEO_FORMAT_RGB, SPA_VIDEO_FORMAT_BGR, SPA_VIDEO_FORMAT_NV12, SPA_VIDEO_FORMAT_I420,
-                               SPA_VIDEO_FORMAT_YUY2, SPA_VIDEO_FORMAT_UYVY, SPA_VIDEO_FORMAT_YVYU,
-                               SPA_VIDEO_FORMAT_VYUY),
-        SPA_FORMAT_VIDEO_size, SPA_POD_Rectangle(&def_rect), SPA_FORMAT_VIDEO_framerate, SPA_POD_Fraction(&def_frac));
+        SPA_POD_CHOICE_ENUM_Id(17, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_RGBx,
+                               SPA_VIDEO_FORMAT_RGBA, SPA_VIDEO_FORMAT_xBGR, SPA_VIDEO_FORMAT_ABGR,
+                               SPA_VIDEO_FORMAT_xRGB, SPA_VIDEO_FORMAT_ARGB, SPA_VIDEO_FORMAT_RGB, SPA_VIDEO_FORMAT_BGR,
+                               SPA_VIDEO_FORMAT_NV12, SPA_VIDEO_FORMAT_I420, SPA_VIDEO_FORMAT_YUY2,
+                               SPA_VIDEO_FORMAT_UYVY, SPA_VIDEO_FORMAT_YVYU, SPA_VIDEO_FORMAT_VYUY),
+        SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(&def_rect, &min_rect, &max_rect),
+        SPA_FORMAT_VIDEO_framerate, SPA_POD_CHOICE_RANGE_Fraction(&def_frac, &min_frac, &max_frac));
 
+    // Notice we omitted 'size' and 'stride' here too
     params[1] = (const struct spa_pod*)spa_pod_builder_add_object(
         &b, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers, SPA_PARAM_BUFFERS_dataType,
-        SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr) | (1 << SPA_DATA_DmaBuf)));
+        SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr)));
 
     int res = pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, PW_ID_ANY,
                                 (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 2);
