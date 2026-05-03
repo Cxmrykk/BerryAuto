@@ -17,9 +17,9 @@ static void on_process(void* userdata)
         int size = buf->datas[0].chunk->size;
         int stride = buf->datas[0].chunk->stride;
 
-        // Wayland sends size == 0 when there is NO DAMAGE.
-        // We MUST NOT clear our cached frame, or else we fallback to the black dummy output!
-        // SPA_CHUNK_FLAG_CORRUPTED also ensures we don't draw torn frames.
+        // CRITICAL FIX: Wayland sends size == 0 when the screen is idle (no damage).
+        // We MUST ignore these empty frames to prevent overwriting our valid frame cache
+        // with black/empty data.
         if (size > 0 && !(buf->datas[0].chunk->flags & SPA_CHUNK_FLAG_CORRUPTED))
         {
             if (enc->latest_frame_buffer.size() != (size_t)size)
@@ -153,8 +153,14 @@ bool VideoEncoder::init_pipewire(uint32_t node_id)
     struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
     const struct spa_pod* params[2];
 
-    // Removed def_rect and def_frac here because forcing a resolution/framerate
-    // dynamically causes some Wayland compositors to reject the format negotiation.
+    // RESTORED: Wayfire defaults to a 64x64 dummy stream if a specific resolution is not requested.
+    // We must pass the target width and height to force it to render the actual desktop.
+    struct spa_rectangle def_rect;
+    def_rect.width = target_width;
+    def_rect.height = target_height;
+    struct spa_fraction def_frac;
+    def_frac.num = target_fps;
+    def_frac.denom = 1;
 
     params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
         &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
@@ -164,7 +170,8 @@ bool VideoEncoder::init_pipewire(uint32_t node_id)
                                SPA_VIDEO_FORMAT_ABGR, SPA_VIDEO_FORMAT_xRGB, SPA_VIDEO_FORMAT_ARGB,
                                SPA_VIDEO_FORMAT_RGB, SPA_VIDEO_FORMAT_BGR, SPA_VIDEO_FORMAT_NV12, SPA_VIDEO_FORMAT_I420,
                                SPA_VIDEO_FORMAT_YUY2, SPA_VIDEO_FORMAT_UYVY, SPA_VIDEO_FORMAT_YVYU,
-                               SPA_VIDEO_FORMAT_VYUY));
+                               SPA_VIDEO_FORMAT_VYUY),
+        SPA_FORMAT_VIDEO_size, SPA_POD_Rectangle(&def_rect), SPA_FORMAT_VIDEO_framerate, SPA_POD_Fraction(&def_frac));
 
     params[1] = (const struct spa_pod*)spa_pod_builder_add_object(
         &b, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers, SPA_PARAM_BUFFERS_dataType,
