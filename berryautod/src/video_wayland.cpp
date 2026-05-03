@@ -45,14 +45,18 @@ static void on_process(void* userdata)
     if (src_data)
     {
         std::lock_guard<std::mutex> lock(enc->frame_mutex);
-        int size = buf->datas[0].chunk->size;
-        int stride = buf->datas[0].chunk->stride;
+        uint32_t size = buf->datas[0].chunk->size;
+        uint32_t stride = buf->datas[0].chunk->stride;
 
         // DmaBuf streams frequently omit chunk metadata; safely estimate if missing
         if (size == 0)
             size = buf->datas[0].maxsize;
         if (stride == 0)
             stride = enc->pw_w * 4;
+
+        // Safety bound check
+        if (size > buf->datas[0].maxsize)
+            size = buf->datas[0].maxsize;
 
         if (size > 0 && !(buf->datas[0].chunk->flags & SPA_CHUNK_FLAG_CORRUPTED))
         {
@@ -61,7 +65,7 @@ static void on_process(void* userdata)
                 LOG_I("[PipeWire] SUCCESS! Extracted first frame! (Size: " << size << " bytes, Stride: " << stride
                                                                            << ")");
             else if (pw_frame_count % 60 == 0)
-                LOG_I("[PipeWire] Heartbeat: Extracted 60 healthy frames...");
+                LOG_I("[PipeWire] Heartbeat: Extracted " << pw_frame_count << " healthy frames...");
 
             if (enc->latest_frame_buffer.size() != (size_t)size)
                 enc->latest_frame_buffer.resize(size);
@@ -137,10 +141,30 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
 
         enc->update_sws();
 
-        // CRITICAL GEAR SHIFT: We DO NOT push SPA_PARAM_Buffers back to the stream here.
-        // Doing so overrides xdg-desktop-portal-wlr's internal allocator, frequently causing
-        // silent crashes inside the portal where buffers are never dispatched to `on_process`.
-        // By omitting the params update, PipeWire natively allocates perfectly matched buffers!
+        // Calculate explicit stride and size to satisfy the SHM allocator
+        uint32_t stride = (info.size.width * 4 + 3) & ~3;
+        if (info.format == SPA_VIDEO_FORMAT_RGB || info.format == SPA_VIDEO_FORMAT_BGR)
+        {
+            stride = (info.size.width * 3 + 3) & ~3;
+        }
+
+        uint32_t size = stride * info.size.height;
+
+        uint8_t buffer[1024];
+        struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+        const struct spa_pod* params[1];
+
+        // CRITICAL GEAR FIX: We MUST reply with SPA_PARAM_Buffers to un-stall the PipeWire
+        // allocator, using the exact size calculated from the native Wayland format.
+        params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
+            &b, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers, SPA_PARAM_BUFFERS_buffers,
+            SPA_POD_CHOICE_RANGE_Int(4, 2, 8), SPA_PARAM_BUFFERS_blocks, SPA_POD_Int(1), SPA_PARAM_BUFFERS_size,
+            SPA_POD_Int(size), SPA_PARAM_BUFFERS_stride, SPA_POD_Int(stride), SPA_PARAM_BUFFERS_align, SPA_POD_Int(16),
+            SPA_PARAM_BUFFERS_dataType,
+            SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr) | (1 << SPA_DATA_DmaBuf)));
+
+        pw_stream_update_params(enc->pw_stream, params, 1);
+        LOG_I("[PipeWire] Pushed explicit SHM requirements (Size: " << size << ", Stride: " << stride << ").");
     }
 }
 
@@ -177,8 +201,7 @@ bool VideoEncoder::init_pipewire(uint32_t node_id)
         pw_stream_new(pw_core, "OpenGAL Capture",
                       pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture", PW_KEY_MEDIA_ROLE,
                                         "Screen", PW_KEY_TARGET_OBJECT, std::to_string(node_id).c_str(),
-                                        PW_KEY_NODE_ALWAYS_PROCESS, "true", // Prevents headless sleep
-                                        NULL));
+                                        PW_KEY_NODE_ALWAYS_PROCESS, "true", NULL));
 
     pw_stream_add_listener(pw_stream, &stream_listener, &stream_events, this);
 
@@ -186,19 +209,12 @@ bool VideoEncoder::init_pipewire(uint32_t node_id)
     struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
     const struct spa_pod* params[2];
 
-    // CRITICAL GEAR SHIFT: Force EXACT dimensions to prevent PipeWire from matching a 64x64 macroblock
-    // Since resize_desktop.sh has already resized the screen to target_width x target_height,
-    // this will perfectly match the Wayland output and result in a zero-copy blit.
-    struct spa_rectangle exact_rect = {(uint32_t)target_width, (uint32_t)target_height};
-    struct spa_fraction exact_frac = {(uint32_t)target_fps, 1};
-
+    // Guarantee the Wayland portal gives us the native desktop resolution by omitting size bounds
     params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
         &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
         SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), SPA_FORMAT_VIDEO_format,
         SPA_POD_CHOICE_ENUM_Id(5, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRA,
-                               SPA_VIDEO_FORMAT_RGBx, SPA_VIDEO_FORMAT_RGBA),
-        SPA_FORMAT_VIDEO_size, SPA_POD_Rectangle(&exact_rect), SPA_FORMAT_VIDEO_framerate,
-        SPA_POD_Fraction(&exact_frac));
+                               SPA_VIDEO_FORMAT_RGBx, SPA_VIDEO_FORMAT_RGBA));
 
     // Allow all memory types, so the Wayland portal doesn't reject us for being too restrictive
     params[1] = (const struct spa_pod*)spa_pod_builder_add_object(
