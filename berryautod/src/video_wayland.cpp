@@ -3,6 +3,9 @@
 #include <iostream>
 #include <spa/param/buffers.h>
 
+// Debug counter to see if PipeWire is actively receiving data
+static int pw_frame_count = 0;
+
 static void on_process(void* userdata)
 {
     VideoEncoder* enc = static_cast<VideoEncoder*>(userdata);
@@ -17,10 +20,14 @@ static void on_process(void* userdata)
         int size = buf->datas[0].chunk->size;
         int stride = buf->datas[0].chunk->stride;
 
-        // CRITICAL FIX: Ignore size == 0 (Idle frames) so we don't overwrite our
-        // cached desktop frame with empty black data.
         if (size > 0 && !(buf->datas[0].chunk->flags & SPA_CHUNK_FLAG_CORRUPTED))
         {
+            pw_frame_count++;
+            if (pw_frame_count % 60 == 0)
+            {
+                LOG_I("[PipeWire] Heartbeat: Received 60 healthy Wayland frames! (Size: " << size << " bytes)");
+            }
+
             if (enc->latest_frame_buffer.size() != (size_t)size)
             {
                 enc->latest_frame_buffer.resize(size);
@@ -53,11 +60,9 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
             enc->pw_w = info.size.width;
             enc->pw_h = info.size.height;
 
+            // Attempt to ignore alpha first (BGR0), fallback to standard BGRA if needed
             switch (info.format)
             {
-                // CRITICAL FIX: Change RGBA/BGRA to RGB0/BGR0.
-                // This forces FFmpeg to ignore the Alpha channel. Without this,
-                // transparent desktop backgrounds render as pitch black!
                 case SPA_VIDEO_FORMAT_RGBx:
                 case SPA_VIDEO_FORMAT_RGBA:
                     enc->pw_fmt = AV_PIX_FMT_RGB0;
@@ -86,20 +91,23 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
                 case SPA_VIDEO_FORMAT_I420:
                     enc->pw_fmt = AV_PIX_FMT_YUV420P;
                     break;
-                case SPA_VIDEO_FORMAT_YUY2:
-                    enc->pw_fmt = AV_PIX_FMT_YUYV422;
-                    break;
-                case SPA_VIDEO_FORMAT_UYVY:
-                    enc->pw_fmt = AV_PIX_FMT_UYVY422;
-                    break;
                 default:
-                    LOG_E("[PipeWire] Unrecognized pixel format! Defaulting to BGR0.");
-                    enc->pw_fmt = AV_PIX_FMT_BGR0;
+                    LOG_E("[PipeWire] Unrecognized pixel format! Defaulting to BGRA.");
+                    enc->pw_fmt = AV_PIX_FMT_BGRA;
                     break;
             }
             enc->latest_frame_buffer.clear();
         }
+
         enc->update_sws();
+
+        // Safety Fallback: If BGR0/RGB0 is unsupported by Pi FFmpeg, drop back to standard format
+        if (enc->sws_ctx == nullptr)
+        {
+            LOG_E("[Capture] Retrying FFmpeg context with standard Alpha channel (BGRA)...");
+            enc->pw_fmt = AV_PIX_FMT_BGRA;
+            enc->update_sws();
+        }
     }
 }
 

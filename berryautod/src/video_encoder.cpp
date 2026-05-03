@@ -63,8 +63,19 @@ void VideoEncoder::update_sws()
     }
     if (pw_w == 0 || pw_h == 0)
         return;
+
     sws_ctx = sws_getContext(pw_w, pw_h, pw_fmt, target_width, target_height, AV_PIX_FMT_YUV420P, SWS_BILINEAR, NULL,
                              NULL, NULL);
+
+    if (!sws_ctx)
+    {
+        LOG_E("[Capture] CRITICAL: sws_getContext failed! FFmpeg does not support converting from PipeWire format "
+              << pw_fmt);
+    }
+    else
+    {
+        LOG_I("[Capture] FFmpeg SWS Context initialized successfully for format " << pw_fmt);
+    }
 }
 
 bool VideoEncoder::init_encoder()
@@ -162,7 +173,10 @@ void VideoEncoder::process_raw_frame(void* raw_data, int stride, int pw_w, int p
 {
     std::lock_guard<std::mutex> lock(sws_mutex);
     if (!sws_ctx)
+    {
+        // Silent failure prevented here. If this hits, the stream will be black.
         return;
+    }
 
     const uint8_t* in_data[4] = {nullptr};
     int in_linesize[4] = {0};
