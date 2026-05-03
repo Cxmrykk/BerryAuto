@@ -39,54 +39,8 @@ foreach(PROTO_FILE ${PROTO_FILES})
     )
 endforeach()
 
-# Dynamically generate wlroots screencopy protocol
-set(WLR_SCREENCOPY_XML "${GENERATED_DIR}/wlr-screencopy-unstable-v1.xml")
-file(WRITE "${WLR_SCREENCOPY_XML}"
-"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
-"<protocol name=\"wlr_screencopy_unstable_v1\">\n"
-"  <interface name=\"zwlr_screencopy_manager_v1\" version=\"1\">\n"
-"    <request name=\"capture_output\">\n"
-"      <arg name=\"frame\" type=\"new_id\" interface=\"zwlr_screencopy_frame_v1\"/>\n"
-"      <arg name=\"overlay_cursor\" type=\"int\"/>\n"
-"      <arg name=\"output\" type=\"object\" interface=\"wl_output\"/>\n"
-"    </request>\n"
-"    <request name=\"capture_output_region\">\n"
-"      <arg name=\"frame\" type=\"new_id\" interface=\"zwlr_screencopy_frame_v1\"/>\n"
-"      <arg name=\"overlay_cursor\" type=\"int\"/>\n"
-"      <arg name=\"output\" type=\"object\" interface=\"wl_output\"/>\n"
-"      <arg name=\"x\" type=\"int\"/>\n"
-"      <arg name=\"y\" type=\"int\"/>\n"
-"      <arg name=\"width\" type=\"int\"/>\n"
-"      <arg name=\"height\" type=\"int\"/>\n"
-"    </request>\n"
-"    <request name=\"destroy\" type=\"destructor\"/>\n"
-"  </interface>\n"
-"  <interface name=\"zwlr_screencopy_frame_v1\" version=\"1\">\n"
-"    <event name=\"buffer\">\n"
-"      <arg name=\"format\" type=\"uint\"/>\n"
-"      <arg name=\"width\" type=\"uint\"/>\n"
-"      <arg name=\"height\" type=\"uint\"/>\n"
-"      <arg name=\"stride\" type=\"uint\"/>\n"
-"    </event>\n"
-"    <request name=\"copy\">\n"
-"      <arg name=\"buffer\" type=\"object\" interface=\"wl_buffer\"/>\n"
-"    </request>\n"
-"    <event name=\"flags\">\n"
-"      <arg name=\"flags\" type=\"uint\" enum=\"flags\"/>\n"
-"    </event>\n"
-"    <enum name=\"flags\">\n"
-"      <entry name=\"y_invert\" value=\"1\"/>\n"
-"    </enum>\n"
-"    <event name=\"ready\">\n"
-"      <arg name=\"tv_sec_hi\" type=\"uint\"/>\n"
-"      <arg name=\"tv_sec_lo\" type=\"uint\"/>\n"
-"      <arg name=\"tv_nsec\" type=\"uint\"/>\n"
-"    </event>\n"
-"    <event name=\"failed\"/>\n"
-"    <request name=\"destroy\" type=\"destructor\"/>\n"
-"  </interface>\n"
-"</protocol>\n"
-)
+# Parse the wlroots screencopy protocol from our local protocols folder
+set(WLR_SCREENCOPY_XML "${CMAKE_SOURCE_DIR}/protocols/wlr-screencopy-unstable-v1.xml")
 
 execute_process(
     COMMAND wayland-scanner client-header ${WLR_SCREENCOPY_XML} ${GENERATED_DIR}/wlr-screencopy-unstable-v1-client-protocol.h
