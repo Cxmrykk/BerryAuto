@@ -24,9 +24,13 @@ static void on_process(void* userdata)
         if (size > 0 && !(buf->datas[0].chunk->flags & SPA_CHUNK_FLAG_CORRUPTED))
         {
             pw_frame_count++;
-            if (pw_frame_count % 60 == 0)
+            if (pw_frame_count == 1)
             {
-                LOG_I("[PipeWire] Heartbeat: Received 60 healthy Wayland frames! (Size: " << size << " bytes)");
+                LOG_I("[PipeWire] SUCCESS! Received first frame from Wayland compositor! (Size: " << size << " bytes)");
+            }
+            else if (pw_frame_count % 60 == 0)
+            {
+                LOG_I("[PipeWire] Heartbeat: Receiving healthy frames... (Total: " << pw_frame_count << ")");
             }
 
             if (enc->latest_frame_buffer.size() != (size_t)size)
@@ -39,7 +43,6 @@ static void on_process(void* userdata)
     }
     else
     {
-        // Traps the silent failure
         LOG_E("[PipeWire] WARNING: Received buffer with NULL data pointer! SPA Data Type: " << buf->datas[0].type);
     }
 
@@ -113,7 +116,6 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
             stride = info.size.width * 3;
         }
 
-        // Removed SPA_DATA_DmaBuf to force wlroots to provide a CPU-mapped MemFd via shm readback.
         params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
             &b, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers, SPA_PARAM_BUFFERS_buffers,
             SPA_POD_CHOICE_RANGE_Int(4, 2, 8), SPA_PARAM_BUFFERS_blocks, SPA_POD_Int(1), SPA_PARAM_BUFFERS_size,

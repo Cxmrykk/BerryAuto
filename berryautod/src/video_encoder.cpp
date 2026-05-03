@@ -173,10 +173,7 @@ void VideoEncoder::process_raw_frame(void* raw_data, int stride, int pw_w, int p
 {
     std::lock_guard<std::mutex> lock(sws_mutex);
     if (!sws_ctx)
-    {
-        // Silent failure prevented here. If this hits, the stream will be black.
         return;
-    }
 
     const uint8_t* in_data[4] = {nullptr};
     int in_linesize[4] = {0};
@@ -230,33 +227,48 @@ void VideoEncoder::capture_loop()
 
                         while (running.load())
                         {
+                            std::vector<uint8_t> frame_copy;
+                            int current_stride = 0;
+                            int current_w = 0;
+                            int current_h = 0;
+
                             {
+                                // STRICT LOCAL LOCK: Decoupled to prevent PipeWire stalls!
                                 std::lock_guard<std::mutex> lock(frame_mutex);
-                                if (latest_frame_buffer.empty() && pw_w > 0 && pw_h > 0)
+                                current_w = pw_w;
+                                current_h = pw_h;
+
+                                if (latest_frame_buffer.empty() && current_w > 0 && current_h > 0)
                                 {
-                                    int required_size = av_image_get_buffer_size(pw_fmt, pw_w, pw_h, 1);
+                                    int required_size = av_image_get_buffer_size(pw_fmt, current_w, current_h, 1);
                                     if (required_size > 0)
                                     {
                                         latest_frame_buffer.resize(required_size, 0);
-                                        latest_stride = 0;
-                                        if (pw_fmt == AV_PIX_FMT_NV12 || pw_fmt == AV_PIX_FMT_YUV420P)
+                                        // Generate an unmistakable bright Magenta dummy frame
+                                        for (size_t i = 0; i + 3 < latest_frame_buffer.size(); i += 4)
                                         {
-                                            int y_size = pw_w * pw_h;
-                                            if (required_size >= y_size)
+                                            if (pw_fmt == AV_PIX_FMT_BGRA || pw_fmt == AV_PIX_FMT_BGR0 ||
+                                                pw_fmt == AV_PIX_FMT_RGB0)
                                             {
-                                                memset(latest_frame_buffer.data(), 0, y_size);
-                                                memset(latest_frame_buffer.data() + y_size, 128,
-                                                       required_size - y_size);
+                                                latest_frame_buffer[i] = 255;     // B (or R)
+                                                latest_frame_buffer[i + 1] = 0;   // G
+                                                latest_frame_buffer[i + 2] = 255; // R (or B)
+                                                latest_frame_buffer[i + 3] = 0;   // A
                                             }
                                         }
-                                        LOG_I("[Capture] Wayland is idle. Created dummy frame to kickstart stream.");
+                                        latest_stride = current_w * 4;
+                                        LOG_I("[Capture] Wayland is idle. Created MAGENTA dummy frame to kickstart "
+                                              "stream.");
                                     }
                                 }
 
-                                if (!latest_frame_buffer.empty() && pw_w > 0 && pw_h > 0)
-                                {
-                                    process_raw_frame(latest_frame_buffer.data(), latest_stride, pw_w, pw_h);
-                                }
+                                frame_copy = latest_frame_buffer;
+                                current_stride = latest_stride;
+                            }
+
+                            if (!frame_copy.empty() && current_w > 0 && current_h > 0)
+                            {
+                                process_raw_frame(frame_copy.data(), current_stride, current_w, current_h);
                             }
 
                             uint64_t now = get_monotonic_usec();
