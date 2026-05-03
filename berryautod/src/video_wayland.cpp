@@ -97,25 +97,23 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
 
         enc->update_sws();
 
-        // --- CRITICAL FIX: PIPEWIRE MEMORY HANDSHAKE ---
-        // We must reply to PipeWire with the expected stride and buffer size,
-        // otherwise PipeWire will never allocate memory and will never call on_process!
         uint8_t buffer[1024];
         struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
         const struct spa_pod* params[1];
 
-        // Safely calculate 4-bytes per pixel for standard Wayland RGBA/BGRA buffers
         int stride = info.size.width * 4;
         if (info.format == SPA_VIDEO_FORMAT_RGB || info.format == SPA_VIDEO_FORMAT_BGR)
         {
             stride = info.size.width * 3;
         }
 
+        // CRITICAL FIX: Add SPA_DATA_DmaBuf so PipeWire agrees to allocate hardware memory
         params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
             &b, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers, SPA_PARAM_BUFFERS_buffers,
             SPA_POD_CHOICE_RANGE_Int(4, 2, 8), SPA_PARAM_BUFFERS_blocks, SPA_POD_Int(1), SPA_PARAM_BUFFERS_size,
             SPA_POD_Int(stride * info.size.height), SPA_PARAM_BUFFERS_stride, SPA_POD_Int(stride),
-            SPA_PARAM_BUFFERS_dataType, SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr)));
+            SPA_PARAM_BUFFERS_align, SPA_POD_Int(16), SPA_PARAM_BUFFERS_dataType,
+            SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr) | (1 << SPA_DATA_DmaBuf)));
 
         pw_stream_update_params(enc->pw_stream, params, 1);
         LOG_I("[PipeWire] Buffer requirements pushed. Waiting for data...");
@@ -194,7 +192,7 @@ bool VideoEncoder::init_pipewire(uint32_t node_id)
 
     params[1] = (const struct spa_pod*)spa_pod_builder_add_object(
         &b, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers, SPA_PARAM_BUFFERS_dataType,
-        SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr)));
+        SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr) | (1 << SPA_DATA_DmaBuf)));
 
     int res = pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, PW_ID_ANY,
                                 (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 2);
