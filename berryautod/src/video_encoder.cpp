@@ -68,14 +68,9 @@ void VideoEncoder::update_sws()
                              NULL, NULL);
 
     if (!sws_ctx)
-    {
-        LOG_E("[Capture] CRITICAL: sws_getContext failed! FFmpeg does not support converting from PipeWire format "
-              << pw_fmt);
-    }
+        LOG_E("[Capture] CRITICAL: sws_getContext failed! Format: " << pw_fmt);
     else
-    {
         LOG_I("[Capture] FFmpeg SWS Context initialized successfully for format " << pw_fmt);
-    }
 }
 
 bool VideoEncoder::init_encoder()
@@ -111,12 +106,10 @@ bool VideoEncoder::init_encoder()
         codec_ctx->framerate = {target_fps, 1};
         codec_ctx->gop_size = target_fps * 2;
         codec_ctx->max_b_frames = 0;
-
         codec_ctx->profile = FF_PROFILE_H264_HIGH;
 
         int target_bitrate = static_cast<int>(target_width * target_height * target_fps * 0.15);
         target_bitrate = std::clamp(target_bitrate, 4000000, 40000000);
-
         codec_ctx->bit_rate = target_bitrate;
         codec_ctx->rc_min_rate = target_bitrate;
         codec_ctx->rc_max_rate = target_bitrate;
@@ -179,11 +172,8 @@ void VideoEncoder::process_raw_frame(void* raw_data, int stride, int pw_w, int p
     int in_linesize[4] = {0};
 
     av_image_fill_arrays((uint8_t**)in_data, in_linesize, (const uint8_t*)raw_data, pw_fmt, pw_w, pw_h, 1);
-
     if (stride > in_linesize[0])
-    {
         in_linesize[0] = stride;
-    }
 
     sws_scale(sws_ctx, in_data, in_linesize, 0, pw_h, frame->data, frame->linesize);
 
@@ -224,16 +214,23 @@ void VideoEncoder::capture_loop()
                     {
                         uint64_t frame_interval_us = 1000000 / target_fps;
                         uint64_t next_frame_time = get_monotonic_usec() + frame_interval_us;
+                        int wake_timer = 0;
 
                         while (running.load())
                         {
+                            wake_timer++;
+                            if (wake_timer >= target_fps)
+                            {
+                                wake_up_display();
+                                wake_timer = 0;
+                            }
+
                             std::vector<uint8_t> frame_copy;
                             int current_stride = 0;
                             int current_w = 0;
                             int current_h = 0;
 
                             {
-                                // STRICT LOCAL LOCK: Decoupled to prevent PipeWire stalls!
                                 std::lock_guard<std::mutex> lock(frame_mutex);
                                 current_w = pw_w;
                                 current_h = pw_h;
@@ -244,21 +241,18 @@ void VideoEncoder::capture_loop()
                                     if (required_size > 0)
                                     {
                                         latest_frame_buffer.resize(required_size, 0);
-                                        // Generate an unmistakable bright Magenta dummy frame
                                         for (size_t i = 0; i + 3 < latest_frame_buffer.size(); i += 4)
                                         {
                                             if (pw_fmt == AV_PIX_FMT_BGRA || pw_fmt == AV_PIX_FMT_BGR0 ||
                                                 pw_fmt == AV_PIX_FMT_RGB0)
                                             {
-                                                latest_frame_buffer[i] = 255;     // B (or R)
-                                                latest_frame_buffer[i + 1] = 0;   // G
-                                                latest_frame_buffer[i + 2] = 255; // R (or B)
-                                                latest_frame_buffer[i + 3] = 0;   // A
+                                                latest_frame_buffer[i] = 255;
+                                                latest_frame_buffer[i + 1] = 0;
+                                                latest_frame_buffer[i + 2] = 255;
+                                                latest_frame_buffer[i + 3] = 0;
                                             }
                                         }
                                         latest_stride = current_w * 4;
-                                        LOG_I("[Capture] Wayland is idle. Created MAGENTA dummy frame to kickstart "
-                                              "stream.");
                                     }
                                 }
 
@@ -289,14 +283,11 @@ void VideoEncoder::capture_loop()
                 running = false;
                 if (encoder_thread.joinable())
                     encoder_thread.join();
-
                 cleanup_pipewire();
             }
         }
         else
-        {
             LOG_E("[Capture] Wayland ScreenCast negotiation failed.");
-        }
     }
     else
     {
@@ -318,9 +309,7 @@ void VideoEncoder::capture_loop()
                     next_frame_time += frame_interval_us;
                 }
                 else
-                {
                     next_frame_time = now + frame_interval_us;
-                }
             }
             cleanup_x11();
         }

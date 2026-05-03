@@ -1,10 +1,12 @@
 #include "globals.hpp"
 #include "video_encoder.hpp"
+#include <cerrno>
+#include <cstring>
 #include <iostream>
 #include <spa/param/buffers.h>
 #include <spa/param/video/format-utils.h>
+#include <sys/mman.h>
 
-// Debug counter to see if PipeWire is actively receiving data
 static int pw_frame_count = 0;
 
 static void on_process(void* userdata)
@@ -15,7 +17,31 @@ static void on_process(void* userdata)
         return;
 
     struct spa_buffer* buf = b->buffer;
-    if (buf->datas[0].data)
+    void* src_data = buf->datas[0].data;
+    bool mapped_dmabuf = false;
+
+    // --- CRITICAL FALLBACK: Manually map DmaBuf if PipeWire skipped it ---
+    if (!src_data && buf->datas[0].type == SPA_DATA_DmaBuf && buf->datas[0].fd >= 0)
+    {
+        src_data = mmap(NULL, buf->datas[0].maxsize, PROT_READ, MAP_SHARED, buf->datas[0].fd, buf->datas[0].mapoffset);
+        if (src_data == MAP_FAILED)
+        {
+            LOG_E("[PipeWire] CRITICAL: DmaBuf mmap failed! " << strerror(errno));
+            src_data = nullptr;
+        }
+        else
+        {
+            mapped_dmabuf = true;
+        }
+    }
+
+    if (pw_frame_count == 0)
+    {
+        LOG_I("[PipeWire] First frame arrived! Type=" << buf->datas[0].type << " FD=" << buf->datas[0].fd
+                                                      << " Data=" << src_data);
+    }
+
+    if (src_data)
     {
         std::lock_guard<std::mutex> lock(enc->frame_mutex);
         int size = buf->datas[0].chunk->size;
@@ -26,7 +52,7 @@ static void on_process(void* userdata)
             pw_frame_count++;
             if (pw_frame_count == 1)
             {
-                LOG_I("[PipeWire] SUCCESS! Received first frame from Wayland compositor! (Size: " << size << " bytes)");
+                LOG_I("[PipeWire] SUCCESS! Extracted first frame! (Size: " << size << " bytes)");
             }
             else if (pw_frame_count % 60 == 0)
             {
@@ -34,16 +60,20 @@ static void on_process(void* userdata)
             }
 
             if (enc->latest_frame_buffer.size() != (size_t)size)
-            {
                 enc->latest_frame_buffer.resize(size);
-            }
-            memcpy(enc->latest_frame_buffer.data(), buf->datas[0].data, size);
+
+            memcpy(enc->latest_frame_buffer.data(), src_data, size);
             enc->latest_stride = stride;
+        }
+
+        if (mapped_dmabuf)
+        {
+            munmap(src_data, buf->datas[0].maxsize);
         }
     }
     else
     {
-        LOG_E("[PipeWire] WARNING: Received buffer with NULL data pointer! SPA Data Type: " << buf->datas[0].type);
+        LOG_E("[PipeWire] WARNING: Received unreadable buffer! Type: " << buf->datas[0].type);
     }
 
     pw_stream_queue_buffer(enc->pw_stream, b);
@@ -112,16 +142,14 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
 
         int stride = info.size.width * 4;
         if (info.format == SPA_VIDEO_FORMAT_RGB || info.format == SPA_VIDEO_FORMAT_BGR)
-        {
             stride = info.size.width * 3;
-        }
 
         params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
             &b, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers, SPA_PARAM_BUFFERS_buffers,
-            SPA_POD_CHOICE_RANGE_Int(4, 2, 8), SPA_PARAM_BUFFERS_blocks, SPA_POD_Int(1), SPA_PARAM_BUFFERS_size,
+            SPA_POD_CHOICE_RANGE_Int(4, 1, 8), SPA_PARAM_BUFFERS_blocks, SPA_POD_Int(1), SPA_PARAM_BUFFERS_size,
             SPA_POD_Int(stride * info.size.height), SPA_PARAM_BUFFERS_stride, SPA_POD_Int(stride),
             SPA_PARAM_BUFFERS_align, SPA_POD_Int(16), SPA_PARAM_BUFFERS_dataType,
-            SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr)));
+            SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr) | (1 << SPA_DATA_DmaBuf)));
 
         pw_stream_update_params(enc->pw_stream, params, 1);
         LOG_I("[PipeWire] Buffer requirements pushed. Waiting for data...");
@@ -130,16 +158,10 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
 
 static void on_state_changed(void* userdata, enum pw_stream_state old, enum pw_stream_state state, const char* error)
 {
-    (void)userdata;
-    (void)old;
     if (error)
-    {
         LOG_E("[PipeWire] Stream Error: " << error);
-    }
     else
-    {
         LOG_I("[PipeWire] Stream State changed to: " << pw_stream_state_as_string(state));
-    }
 }
 
 static const struct pw_stream_events stream_events = []()
@@ -156,18 +178,12 @@ bool VideoEncoder::init_pipewire(uint32_t node_id)
 {
     pw_loop = pw_main_loop_new(NULL);
     if (!pw_loop)
-    {
-        LOG_E("[PipeWire] Failed to create main loop");
         return false;
-    }
 
     pw_ctx = pw_context_new(pw_main_loop_get_loop(pw_loop), NULL, 0);
     pw_core = pw_context_connect(pw_ctx, NULL, 0);
     if (!pw_core)
-    {
-        LOG_E("[PipeWire] Failed to connect to core");
         return false;
-    }
 
     pw_stream =
         pw_stream_new(pw_core, "OpenGAL Capture",
@@ -200,16 +216,13 @@ bool VideoEncoder::init_pipewire(uint32_t node_id)
 
     params[1] = (const struct spa_pod*)spa_pod_builder_add_object(
         &b, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers, SPA_PARAM_BUFFERS_dataType,
-        SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr)));
+        SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr) | (1 << SPA_DATA_DmaBuf)));
 
     int res = pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, PW_ID_ANY,
                                 (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 2);
 
     if (res < 0)
-    {
-        LOG_E("[PipeWire] Failed to connect stream: " << spa_strerror(res));
         return false;
-    }
     return true;
 }
 

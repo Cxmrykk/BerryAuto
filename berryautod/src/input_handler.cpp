@@ -18,27 +18,20 @@ void init_uinput()
 
     uinput_fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
     if (uinput_fd < 0)
-    {
-        LOG_E("Failed to open /dev/uinput. Are you running as root?");
         return;
-    }
 
-    // Configure as a Direct Touchscreen Device
     ioctl(uinput_fd, UI_SET_EVBIT, EV_KEY);
-    ioctl(uinput_fd, UI_SET_KEYBIT, BTN_TOUCH);  // Key property for touchscreens
-    ioctl(uinput_fd, UI_SET_KEYBIT, KEY_WAKEUP); // NEW: Allow display wakeups
+    ioctl(uinput_fd, UI_SET_KEYBIT, BTN_TOUCH);
+    ioctl(uinput_fd, UI_SET_KEYBIT, KEY_WAKEUP);
 
     ioctl(uinput_fd, UI_SET_EVBIT, EV_ABS);
     ioctl(uinput_fd, UI_SET_ABSBIT, ABS_X);
     ioctl(uinput_fd, UI_SET_ABSBIT, ABS_Y);
 
-    // Multi-touch Protocol B properties
     ioctl(uinput_fd, UI_SET_ABSBIT, ABS_MT_SLOT);
     ioctl(uinput_fd, UI_SET_ABSBIT, ABS_MT_TRACKING_ID);
     ioctl(uinput_fd, UI_SET_ABSBIT, ABS_MT_POSITION_X);
     ioctl(uinput_fd, UI_SET_ABSBIT, ABS_MT_POSITION_Y);
-
-    // Mark device as a direct physical touchscreen (vs touchpad/mouse)
     ioctl(uinput_fd, UI_SET_PROPBIT, INPUT_PROP_DIRECT);
 
     struct uinput_user_dev uidev;
@@ -49,22 +42,16 @@ void init_uinput()
     uidev.id.product = 0x5678;
     uidev.id.version = 1;
 
-    // Abstract Kernel scale to generic 0-65535 resolution
     uidev.absmin[ABS_X] = 0;
     uidev.absmax[ABS_X] = ABS_MAX_VAL;
     uidev.absmin[ABS_Y] = 0;
     uidev.absmax[ABS_Y] = ABS_MAX_VAL;
-
     uidev.absmin[ABS_MT_POSITION_X] = 0;
     uidev.absmax[ABS_MT_POSITION_X] = ABS_MAX_VAL;
     uidev.absmin[ABS_MT_POSITION_Y] = 0;
     uidev.absmax[ABS_MT_POSITION_Y] = ABS_MAX_VAL;
-
-    // Allocate 10 simultaneous multi-touch slots
     uidev.absmin[ABS_MT_SLOT] = 0;
     uidev.absmax[ABS_MT_SLOT] = MAX_FINGERS - 1;
-
-    // Tracking IDs map continuous strokes
     uidev.absmin[ABS_MT_TRACKING_ID] = 0;
     uidev.absmax[ABS_MT_TRACKING_ID] = 65535;
 
@@ -88,7 +75,6 @@ void reset_input_state()
 {
     if (uinput_fd >= 0)
     {
-        // Forcefully release all multi-touch slots and BTN_TOUCH if connection drops
         for (int i = 0; i < MAX_FINGERS; i++)
         {
             emit_uinput(EV_ABS, ABS_MT_SLOT, i);
@@ -99,7 +85,7 @@ void reset_input_state()
     }
 }
 
-// NEW: Force the Wayland compositor to wake from DPMS Sleep and process a frame
+// CRITICAL FIX: Simulate a screen tap to guarantee Wayland recalculates the screen and pushes a frame
 void wake_up_display()
 {
     if (uinput_fd < 0)
@@ -110,14 +96,21 @@ void wake_up_display()
         emit_uinput(EV_SYN, SYN_REPORT, 0);
         emit_uinput(EV_KEY, KEY_WAKEUP, 0);
         emit_uinput(EV_SYN, SYN_REPORT, 0);
+
+        static int wiggle = 0;
+        wiggle = (wiggle == 0) ? 1 : 0;
+        emit_uinput(EV_ABS, ABS_X, wiggle);
+        emit_uinput(EV_ABS, ABS_Y, wiggle);
+        emit_uinput(EV_KEY, BTN_TOUCH, 1);
+        emit_uinput(EV_SYN, SYN_REPORT, 0);
+        emit_uinput(EV_KEY, BTN_TOUCH, 0);
+        emit_uinput(EV_SYN, SYN_REPORT, 0);
     }
 }
 
 void handle_touch_event(const com::andrerinas::headunitrevived::aap::protocol::proto::InputReport& report)
 {
     std::lock_guard<std::recursive_mutex> lock(aap_mutex);
-
-    // Fallback just in case
     init_uinput();
 
     if (uinput_fd < 0 || !report.has_touch_event() || report.touch_event().pointer_data_size() == 0)
@@ -125,58 +118,42 @@ void handle_touch_event(const com::andrerinas::headunitrevived::aap::protocol::p
 
     int action = report.touch_event().action();
     int action_index = report.touch_event().has_action_index() ? report.touch_event().action_index() : 0;
-
     bool is_down = (action == 0 || action == 5);
     bool is_up = (action == 1 || action == 3 || action == 6);
 
-    // Iterate through all active pointers reported by Android
     for (int i = 0; i < report.touch_event().pointer_data_size(); i++)
     {
         const auto& p = report.touch_event().pointer_data(i);
         int id = p.has_pointer_id() ? p.pointer_id() : i;
-
         if (id < 0 || id >= MAX_FINGERS)
             continue;
 
-        int raw_x = p.x();
-        int raw_y = p.y();
+        int mapped_x = (int)(((float)p.x() / global_touch_width) * ABS_MAX_VAL);
+        int mapped_y = (int)(((float)p.y() / global_touch_height) * ABS_MAX_VAL);
 
-        float ratio_x = (float)raw_x / global_touch_width;
-        float ratio_y = (float)raw_y / global_touch_height;
-
-        int mapped_x = (int)(ratio_x * ABS_MAX_VAL);
-        int mapped_y = (int)(ratio_y * ABS_MAX_VAL);
-
-        // Address the correct multi-touch slot
         emit_uinput(EV_ABS, ABS_MT_SLOT, id);
 
         if (is_up && (action == 1 || action == 3 || (action == 6 && i == action_index)))
         {
-            // Lift finger (-1 tells Linux the touch gesture ended)
             emit_uinput(EV_ABS, ABS_MT_TRACKING_ID, -1);
         }
         else if (is_down && (action == 0 || (action == 5 && i == action_index)))
         {
-            // Put finger down
             emit_uinput(EV_ABS, ABS_MT_TRACKING_ID, tracking_id_counter++);
             if (tracking_id_counter > 65000)
                 tracking_id_counter = 1;
-
             emit_uinput(EV_ABS, ABS_MT_POSITION_X, mapped_x);
             emit_uinput(EV_ABS, ABS_MT_POSITION_Y, mapped_y);
-
-            // Update legacy X/Y for the primary pointer to keep backward compatibility
             if (id == 0)
             {
                 emit_uinput(EV_ABS, ABS_X, mapped_x);
                 emit_uinput(EV_ABS, ABS_Y, mapped_y);
             }
         }
-        else if (action == 2) // Move
+        else if (action == 2)
         {
             emit_uinput(EV_ABS, ABS_MT_POSITION_X, mapped_x);
             emit_uinput(EV_ABS, ABS_MT_POSITION_Y, mapped_y);
-
             if (id == 0)
             {
                 emit_uinput(EV_ABS, ABS_X, mapped_x);
@@ -185,17 +162,11 @@ void handle_touch_event(const com::andrerinas::headunitrevived::aap::protocol::p
         }
     }
 
-    // Determine aggregate state of touchscreen
     if (action == 0)
-    {
         emit_uinput(EV_KEY, BTN_TOUCH, 1);
-    }
     else if (action == 1 || action == 3)
-    {
         emit_uinput(EV_KEY, BTN_TOUCH, 0);
-    }
 
-    // Commit hardware frame to the OS
     emit_uinput(EV_SYN, SYN_REPORT, 0);
 }
 
