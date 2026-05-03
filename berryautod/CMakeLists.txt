@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(OpenGALEmitter CXX)
+project(OpenGALEmitter C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -pthread -O2")
@@ -107,6 +107,7 @@ include_directories(
 )
 
 file(GLOB SOURCES "src/*.cpp")
+# Exclude the D-Bus Portal script as we no longer use it
 list(REMOVE_ITEM SOURCES "${CMAKE_SOURCE_DIR}/src/dbus_portal.cpp")
 
 file(GLOB PROTO_SRCS "${PROTO_BUILD_DIR}/*.pb.cc")

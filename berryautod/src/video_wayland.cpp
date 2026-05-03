@@ -71,6 +71,7 @@ static void frame_handle_flags(void* data, struct zwlr_screencopy_frame_v1* fram
 static void frame_handle_ready(void* data, struct zwlr_screencopy_frame_v1* frame, uint32_t tv_sec_hi,
                                uint32_t tv_sec_lo, uint32_t tv_nsec)
 {
+    (void)frame;
     (void)tv_sec_hi;
     (void)tv_sec_lo;
     (void)tv_nsec;
@@ -104,6 +105,7 @@ static void frame_handle_ready(void* data, struct zwlr_screencopy_frame_v1* fram
 
 static void frame_handle_failed(void* data, struct zwlr_screencopy_frame_v1* frame)
 {
+    (void)frame;
     VideoEncoder* enc = static_cast<VideoEncoder*>(data);
 
     if (enc->current_data && enc->current_data != MAP_FAILED)
