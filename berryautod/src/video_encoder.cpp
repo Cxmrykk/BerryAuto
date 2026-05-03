@@ -182,7 +182,6 @@ static void on_process(void* userdata)
     struct spa_buffer* buf = b->buffer;
     if (buf->datas[0].data)
     {
-        // Copy the frame data into the cache so the continuous encoding thread can use it
         std::lock_guard<std::mutex> lock(enc->frame_mutex);
         int size = buf->datas[0].chunk->size;
         int stride = buf->datas[0].chunk->stride;
@@ -212,49 +211,55 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
     {
         LOG_I("[PipeWire] Format negotiated successfully! Size: " << info.size.width << "x" << info.size.height
                                                                   << ", SPA Format ID: " << info.format);
-        enc->pw_w = info.size.width;
-        enc->pw_h = info.size.height;
 
-        switch (info.format)
         {
-            case SPA_VIDEO_FORMAT_RGBx:
-            case SPA_VIDEO_FORMAT_RGBA:
-                enc->pw_fmt = AV_PIX_FMT_RGBA;
-                break;
-            case SPA_VIDEO_FORMAT_BGRx:
-            case SPA_VIDEO_FORMAT_BGRA:
-                enc->pw_fmt = AV_PIX_FMT_BGRA;
-                break;
-            case SPA_VIDEO_FORMAT_xBGR:
-            case SPA_VIDEO_FORMAT_ABGR:
-                enc->pw_fmt = AV_PIX_FMT_ABGR;
-                break;
-            case SPA_VIDEO_FORMAT_xRGB:
-            case SPA_VIDEO_FORMAT_ARGB:
-                enc->pw_fmt = AV_PIX_FMT_ARGB;
-                break;
-            case SPA_VIDEO_FORMAT_RGB:
-                enc->pw_fmt = AV_PIX_FMT_RGB24;
-                break;
-            case SPA_VIDEO_FORMAT_BGR:
-                enc->pw_fmt = AV_PIX_FMT_BGR24;
-                break;
-            case SPA_VIDEO_FORMAT_NV12:
-                enc->pw_fmt = AV_PIX_FMT_NV12;
-                break;
-            case SPA_VIDEO_FORMAT_I420:
-                enc->pw_fmt = AV_PIX_FMT_YUV420P;
-                break;
-            case SPA_VIDEO_FORMAT_YUY2:
-                enc->pw_fmt = AV_PIX_FMT_YUYV422;
-                break;
-            case SPA_VIDEO_FORMAT_UYVY:
-                enc->pw_fmt = AV_PIX_FMT_UYVY422;
-                break;
-            default:
-                LOG_E("[PipeWire] Unrecognized pixel format! Defaulting to BGRA.");
-                enc->pw_fmt = AV_PIX_FMT_BGRA;
-                break;
+            std::lock_guard<std::mutex> lock(enc->frame_mutex);
+            enc->pw_w = info.size.width;
+            enc->pw_h = info.size.height;
+
+            switch (info.format)
+            {
+                case SPA_VIDEO_FORMAT_RGBx:
+                case SPA_VIDEO_FORMAT_RGBA:
+                    enc->pw_fmt = AV_PIX_FMT_RGBA;
+                    break;
+                case SPA_VIDEO_FORMAT_BGRx:
+                case SPA_VIDEO_FORMAT_BGRA:
+                    enc->pw_fmt = AV_PIX_FMT_BGRA;
+                    break;
+                case SPA_VIDEO_FORMAT_xBGR:
+                case SPA_VIDEO_FORMAT_ABGR:
+                    enc->pw_fmt = AV_PIX_FMT_ABGR;
+                    break;
+                case SPA_VIDEO_FORMAT_xRGB:
+                case SPA_VIDEO_FORMAT_ARGB:
+                    enc->pw_fmt = AV_PIX_FMT_ARGB;
+                    break;
+                case SPA_VIDEO_FORMAT_RGB:
+                    enc->pw_fmt = AV_PIX_FMT_RGB24;
+                    break;
+                case SPA_VIDEO_FORMAT_BGR:
+                    enc->pw_fmt = AV_PIX_FMT_BGR24;
+                    break;
+                case SPA_VIDEO_FORMAT_NV12:
+                    enc->pw_fmt = AV_PIX_FMT_NV12;
+                    break;
+                case SPA_VIDEO_FORMAT_I420:
+                    enc->pw_fmt = AV_PIX_FMT_YUV420P;
+                    break;
+                case SPA_VIDEO_FORMAT_YUY2:
+                    enc->pw_fmt = AV_PIX_FMT_YUYV422;
+                    break;
+                case SPA_VIDEO_FORMAT_UYVY:
+                    enc->pw_fmt = AV_PIX_FMT_UYVY422;
+                    break;
+                default:
+                    LOG_E("[PipeWire] Unrecognized pixel format! Defaulting to BGRA.");
+                    enc->pw_fmt = AV_PIX_FMT_BGRA;
+                    break;
+            }
+            // Clear the cache buffer so it's forcefully reallocated for the new format
+            enc->latest_frame_buffer.clear();
         }
         enc->update_sws();
     }
@@ -608,6 +613,23 @@ void VideoEncoder::capture_loop()
                         {
                             {
                                 std::lock_guard<std::mutex> lock(frame_mutex);
+
+                                // --- WAYLAND IDLE KICKSTARTER ---
+                                // Wayland stops sending memory pointers if nothing is moving on screen.
+                                // If the cache is empty, we must manually allocate a blank (black/green)
+                                // frame matching the exact negotiated format so the hardware encoder wakes up.
+                                if (latest_frame_buffer.empty() && pw_w > 0 && pw_h > 0)
+                                {
+                                    int required_size = av_image_get_buffer_size(pw_fmt, pw_w, pw_h, 1);
+                                    if (required_size > 0)
+                                    {
+                                        latest_frame_buffer.resize(required_size,
+                                                                   0); // Zeros naturally form Black/Green
+                                        latest_stride = 0;             // Let FFmpeg auto-calculate stride
+                                        LOG_I("[Capture] Wayland is idle. Created dummy frame to kickstart stream.");
+                                    }
+                                }
+
                                 if (!latest_frame_buffer.empty() && pw_w > 0 && pw_h > 0)
                                 {
                                     process_raw_frame(latest_frame_buffer.data(), latest_stride, pw_w, pw_h);
