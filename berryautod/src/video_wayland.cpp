@@ -5,7 +5,6 @@
 #include <iostream>
 #include <spa/param/buffers.h>
 #include <spa/param/video/format-utils.h>
-#include <sys/mman.h>
 
 static int pw_frame_count = 0;
 
@@ -17,21 +16,9 @@ static void on_process(void* userdata)
         return;
 
     struct spa_buffer* buf = b->buffer;
-    void* src_data = buf->datas[0].data;
-    bool mapped_dmabuf = false;
 
-    // --- CRITICAL FALLBACK: Manually map DmaBuf if PipeWire skipped it ---
-    if (!src_data && buf->datas[0].type == SPA_DATA_DmaBuf && buf->datas[0].fd >= 0)
-    {
-        src_data = mmap(NULL, buf->datas[0].maxsize, PROT_READ, MAP_SHARED, buf->datas[0].fd, buf->datas[0].mapoffset);
-        if (src_data == MAP_FAILED)
-        {
-            LOG_E("[PipeWire] CRITICAL: DmaBuf mmap failed! " << strerror(errno));
-            src_data = nullptr;
-        }
-        else
-            mapped_dmabuf = true;
-    }
+    // PW_STREAM_FLAG_MAP_BUFFERS guarantees this is a valid CPU pointer for MemFd
+    void* src_data = buf->datas[0].data;
 
     if (src_data)
     {
@@ -39,8 +26,7 @@ static void on_process(void* userdata)
         int size = buf->datas[0].chunk->size;
         int stride = buf->datas[0].chunk->stride;
 
-        // Wayland portals (wlroots) often leave chunk parameters 0 for DmaBufs.
-        // Fall back to maxsize and estimated stride to prevent discarding the frame.
+        // Wayland portals sometimes omit chunk metadata on the first few frames
         if (size == 0)
             size = buf->datas[0].maxsize;
         if (stride == 0)
@@ -53,21 +39,21 @@ static void on_process(void* userdata)
                 LOG_I("[PipeWire] SUCCESS! Extracted first frame! (Size: " << size << " bytes, Stride: " << stride
                                                                            << ")");
             else if (pw_frame_count % 60 == 0)
-                LOG_I("[PipeWire] Heartbeat: Receiving healthy frames... (Total: " << pw_frame_count << ")");
+                LOG_I("[PipeWire] Heartbeat: Extracted 60 healthy frames...");
 
+            // Make sure the destination buffer matches the incoming frame size
             if (enc->latest_frame_buffer.size() != (size_t)size)
                 enc->latest_frame_buffer.resize(size);
 
+            // Directly copy the linear SHM buffer into our encoder's frame buffer
             memcpy(enc->latest_frame_buffer.data(), src_data, size);
             enc->latest_stride = stride;
         }
-
-        if (mapped_dmabuf)
-            munmap(src_data, buf->datas[0].maxsize);
     }
     else
     {
-        LOG_E("[PipeWire] WARNING: Received unreadable buffer! Type: " << buf->datas[0].type);
+        // If this triggers, it means PipeWire failed to map the SHM FD into CPU memory
+        LOG_E("[PipeWire] WARNING: Received buffer with NULL data pointer! Type: " << buf->datas[0].type);
     }
 
     pw_stream_queue_buffer(enc->pw_stream, b);
@@ -130,8 +116,8 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
 
         enc->update_sws();
 
-        // Calculate explicit stride and size for the SHM Allocator fallback
-        uint32_t stride = (info.size.width * 4 + 3) & ~3; // Default to 4 bytes per pixel, 4-byte aligned
+        // Calculate explicit stride and size to satisfy the SHM allocator
+        uint32_t stride = (info.size.width * 4 + 3) & ~3;
 
         if (info.format == SPA_VIDEO_FORMAT_RGB || info.format == SPA_VIDEO_FORMAT_BGR)
         {
@@ -139,30 +125,29 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
         }
         else if (info.format == SPA_VIDEO_FORMAT_NV12 || info.format == SPA_VIDEO_FORMAT_I420)
         {
-            stride = (info.size.width + 3) & ~3; // Y plane stride
+            stride = (info.size.width + 3) & ~3;
         }
 
         uint32_t size = stride * info.size.height;
         if (info.format == SPA_VIDEO_FORMAT_NV12 || info.format == SPA_VIDEO_FORMAT_I420)
         {
-            size = size * 3 / 2; // Add UV planes sizes
+            size = size * 3 / 2;
         }
 
         uint8_t buffer[1024];
         struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
         const struct spa_pod* params[1];
 
-        // Include SPA_DATA_DmaBuf to satisfy hardware-backed Wayland portals
+        // CRITICAL: Strictly force MemFd (SHM) only. DmaBuf is explicitly omitted.
+        // This forces the Wayland portal to render the desktop into a flat CPU buffer.
         params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
             &b, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers, SPA_PARAM_BUFFERS_buffers,
             SPA_POD_CHOICE_RANGE_Int(4, 2, 8), SPA_PARAM_BUFFERS_blocks, SPA_POD_Int(1), SPA_PARAM_BUFFERS_size,
             SPA_POD_Int(size), SPA_PARAM_BUFFERS_stride, SPA_POD_Int(stride), SPA_PARAM_BUFFERS_align, SPA_POD_Int(16),
-            SPA_PARAM_BUFFERS_dataType,
-            SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr) | (1 << SPA_DATA_DmaBuf)));
+            SPA_PARAM_BUFFERS_dataType, SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr)));
 
         pw_stream_update_params(enc->pw_stream, params, 1);
-        LOG_I("[PipeWire] Buffer requirements pushed (Size: " << size << ", Stride: " << stride
-                                                              << "). Waiting for data...");
+        LOG_I("[PipeWire] Pushed explicit SHM requirements (Size: " << size << ", Stride: " << stride << ").");
     }
 }
 
@@ -207,8 +192,8 @@ bool VideoEncoder::init_pipewire(uint32_t node_id)
     const struct spa_pod* params[2];
 
     struct spa_rectangle def_rect = {(uint32_t)target_width, (uint32_t)target_height};
-    // CRITICAL FIX: Increased min_rect to 128x128 to mathematically prevent xdg-desktop-portal
-    // from offering its 64x64 cursor stream as a fallback.
+
+    // Mathematically block out the cursor plane (64x64) by requiring at least 128x128
     struct spa_rectangle min_rect = {128, 128};
     struct spa_rectangle max_rect = {8192, 8192};
     struct spa_fraction def_frac = {(uint32_t)target_fps, 1};
@@ -227,10 +212,10 @@ bool VideoEncoder::init_pipewire(uint32_t node_id)
         SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(&def_rect, &min_rect, &max_rect),
         SPA_FORMAT_VIDEO_framerate, SPA_POD_CHOICE_RANGE_Fraction(&def_frac, &min_frac, &max_frac));
 
-    // Allow DmaBuf here as well, letting Wayland expose the actual zero-copy desktop surface
+    // CRITICAL: Strictly force MemFd (SHM) only. No DmaBuf allowed.
     params[1] = (const struct spa_pod*)spa_pod_builder_add_object(
         &b, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers, SPA_PARAM_BUFFERS_dataType,
-        SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr) | (1 << SPA_DATA_DmaBuf)));
+        SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr)));
 
     int res = pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, PW_ID_ANY,
                                 (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 2);
