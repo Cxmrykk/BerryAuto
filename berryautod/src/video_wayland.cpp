@@ -37,6 +37,12 @@ static void on_process(void* userdata)
             enc->latest_stride = stride;
         }
     }
+    else
+    {
+        // Traps the silent failure
+        LOG_E("[PipeWire] WARNING: Received buffer with NULL data pointer! SPA Data Type: " << buf->datas[0].type);
+    }
+
     pw_stream_queue_buffer(enc->pw_stream, b);
 }
 
@@ -107,13 +113,13 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
             stride = info.size.width * 3;
         }
 
-        // CRITICAL FIX: Add SPA_DATA_DmaBuf so PipeWire agrees to allocate hardware memory
+        // Removed SPA_DATA_DmaBuf to force wlroots to provide a CPU-mapped MemFd via shm readback.
         params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
             &b, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers, SPA_PARAM_BUFFERS_buffers,
             SPA_POD_CHOICE_RANGE_Int(4, 2, 8), SPA_PARAM_BUFFERS_blocks, SPA_POD_Int(1), SPA_PARAM_BUFFERS_size,
             SPA_POD_Int(stride * info.size.height), SPA_PARAM_BUFFERS_stride, SPA_POD_Int(stride),
             SPA_PARAM_BUFFERS_align, SPA_POD_Int(16), SPA_PARAM_BUFFERS_dataType,
-            SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr) | (1 << SPA_DATA_DmaBuf)));
+            SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr)));
 
         pw_stream_update_params(enc->pw_stream, params, 1);
         LOG_I("[PipeWire] Buffer requirements pushed. Waiting for data...");
@@ -192,7 +198,7 @@ bool VideoEncoder::init_pipewire(uint32_t node_id)
 
     params[1] = (const struct spa_pod*)spa_pod_builder_add_object(
         &b, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers, SPA_PARAM_BUFFERS_dataType,
-        SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr) | (1 << SPA_DATA_DmaBuf)));
+        SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr)));
 
     int res = pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, PW_ID_ANY,
                                 (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 2);
