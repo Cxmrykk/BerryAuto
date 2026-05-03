@@ -1,5 +1,4 @@
 #include "video_encoder.hpp"
-#include "dbus_portal.hpp"
 #include "globals.hpp"
 #include "input_handler.hpp"
 #include <algorithm>
@@ -20,13 +19,11 @@ static uint64_t get_monotonic_usec()
 VideoEncoder::VideoEncoder(int width, int height, int fps, NalCallback callback)
     : target_width(width), target_height(height), target_fps(fps), nal_callback(callback)
 {
-    pw_init(NULL, NULL);
 }
 
 VideoEncoder::~VideoEncoder()
 {
     stop();
-    pw_deinit();
 }
 
 void VideoEncoder::start()
@@ -42,8 +39,6 @@ void VideoEncoder::stop()
     if (!running.load())
         return;
     running = false;
-    if (pw_loop)
-        pw_main_loop_quit(pw_loop);
     if (worker_thread.joinable())
         worker_thread.join();
 }
@@ -69,8 +64,6 @@ void VideoEncoder::update_sws()
 
     if (!sws_ctx)
         LOG_E("[Capture] CRITICAL: sws_getContext failed! Format: " << pw_fmt);
-    else
-        LOG_I("[Capture] FFmpeg SWS Context initialized successfully for format " << pw_fmt);
 }
 
 bool VideoEncoder::init_encoder()
@@ -201,93 +194,72 @@ void VideoEncoder::capture_loop()
 
     if (getenv("WAYLAND_DISPLAY"))
     {
-        LOG_I("[Capture] Wayland detected. Negotiating D-Bus ScreenCast Session...");
-        uint32_t node_id = 0;
+        LOG_I("[Capture] Wayland detected. Initializing wlr-screencopy native grabber...");
 
-        if (negotiate_wayland_screencast(node_id))
+        if (init_wayland())
         {
-            LOG_I("[Capture] ScreenCast Negotiated successfully! Target Node ID: " << node_id);
-            if (init_pipewire(node_id))
-            {
-                std::thread encoder_thread(
-                    [this]()
+            LOG_I("[Capture] wlr-screencopy Negotiated successfully!");
+            std::thread encoder_thread(
+                [this]()
+                {
+                    uint64_t frame_interval_us = 1000000 / target_fps;
+                    uint64_t next_frame_time = get_monotonic_usec() + frame_interval_us;
+                    int wake_timer = 0;
+
+                    while (running.load())
                     {
-                        uint64_t frame_interval_us = 1000000 / target_fps;
-                        uint64_t next_frame_time = get_monotonic_usec() + frame_interval_us;
-                        int wake_timer = 0;
-
-                        while (running.load())
+                        wake_timer++;
+                        if (wake_timer >= target_fps)
                         {
-                            wake_timer++;
-                            if (wake_timer >= target_fps)
-                            {
-                                wake_up_display();
-                                wake_timer = 0;
-                            }
-
-                            std::vector<uint8_t> frame_copy;
-                            int current_stride = 0;
-                            int current_w = 0;
-                            int current_h = 0;
-
-                            {
-                                std::lock_guard<std::mutex> lock(frame_mutex);
-                                current_w = pw_w;
-                                current_h = pw_h;
-
-                                if (latest_frame_buffer.empty() && current_w > 0 && current_h > 0)
-                                {
-                                    int required_size = av_image_get_buffer_size(pw_fmt, current_w, current_h, 1);
-                                    if (required_size > 0)
-                                    {
-                                        latest_frame_buffer.resize(required_size, 0);
-                                        for (size_t i = 0; i + 3 < latest_frame_buffer.size(); i += 4)
-                                        {
-                                            if (pw_fmt == AV_PIX_FMT_BGRA || pw_fmt == AV_PIX_FMT_BGR0 ||
-                                                pw_fmt == AV_PIX_FMT_RGB0)
-                                            {
-                                                latest_frame_buffer[i] = 255;
-                                                latest_frame_buffer[i + 1] = 0;
-                                                latest_frame_buffer[i + 2] = 255;
-                                                latest_frame_buffer[i + 3] = 0;
-                                            }
-                                        }
-                                        latest_stride = current_w * 4;
-                                    }
-                                }
-
-                                frame_copy = latest_frame_buffer;
-                                current_stride = latest_stride;
-                            }
-
-                            if (!frame_copy.empty() && current_w > 0 && current_h > 0)
-                            {
-                                process_raw_frame(frame_copy.data(), current_stride, current_w, current_h);
-                            }
-
-                            uint64_t now = get_monotonic_usec();
-                            if (now < next_frame_time)
-                            {
-                                usleep(next_frame_time - now);
-                                next_frame_time += frame_interval_us;
-                            }
-                            else
-                            {
-                                next_frame_time = now + frame_interval_us;
-                            }
+                            wake_up_display();
+                            wake_timer = 0;
                         }
-                    });
 
-                wake_up_display();
-                pw_main_loop_run(pw_loop);
-                running = false;
-                if (encoder_thread.joinable())
-                    encoder_thread.join();
-                cleanup_pipewire();
+                        // SYNCHRONOUSLY pull a fresh frame explicitly bypassing damage limits!
+                        request_wayland_frame_sync();
+
+                        std::vector<uint8_t> frame_copy;
+                        int current_stride = 0;
+                        int current_w = 0;
+                        int current_h = 0;
+
+                        {
+                            std::lock_guard<std::mutex> lock(frame_mutex);
+                            current_w = pw_w;
+                            current_h = pw_h;
+                            frame_copy = latest_frame_buffer;
+                            current_stride = latest_stride;
+                        }
+
+                        if (!frame_copy.empty() && current_w > 0 && current_h > 0)
+                        {
+                            process_raw_frame(frame_copy.data(), current_stride, current_w, current_h);
+                        }
+
+                        uint64_t now = get_monotonic_usec();
+                        if (now < next_frame_time)
+                        {
+                            usleep(next_frame_time - now);
+                            next_frame_time += frame_interval_us;
+                        }
+                        else
+                        {
+                            next_frame_time = now + frame_interval_us;
+                        }
+                    }
+                });
+
+            wake_up_display();
+            while (running.load())
+            {
+                usleep(100000);
             }
+            if (encoder_thread.joinable())
+                encoder_thread.join();
+            cleanup_wayland();
         }
         else
-            LOG_E("[Capture] Wayland ScreenCast negotiation failed.");
+            LOG_E("[Capture] Wayland Screencopy negotiation failed.");
     }
     else
     {

@@ -3,244 +3,226 @@
 #include <cerrno>
 #include <cstring>
 #include <iostream>
-#include <linux/dma-buf.h>
-#include <spa/param/buffers.h>
-#include <spa/param/video/format-utils.h>
-#include <sys/ioctl.h>
+#include <linux/memfd.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 
-static int pw_frame_count = 0;
-
-static void on_process(void* userdata)
+static void frame_handle_buffer(void* data, struct zwlr_screencopy_frame_v1* frame, uint32_t format, uint32_t width,
+                                uint32_t height, uint32_t stride)
 {
-    VideoEncoder* enc = static_cast<VideoEncoder*>(userdata);
-    struct pw_buffer* b = pw_stream_dequeue_buffer(enc->pw_stream);
-    if (!b)
-        return;
+    VideoEncoder* enc = static_cast<VideoEncoder*>(data);
 
-    struct spa_buffer* buf = b->buffer;
-    void* src_data = buf->datas[0].data;
-    bool mapped_dmabuf = false;
+    size_t size = stride * height;
 
-    // --- CRITICAL ARM DMABUF FALLBACK ---
-    // If PipeWire didn't map the data automatically, we map the hardware FD
-    if (!src_data && buf->datas[0].type == SPA_DATA_DmaBuf && buf->datas[0].fd >= 0)
+    // Explicit system call avoids dependency on newer glibc versions
+    int fd = syscall(SYS_memfd_create, "wayland-shm", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    if (fd < 0)
     {
-        src_data = mmap(NULL, buf->datas[0].maxsize, PROT_READ, MAP_SHARED, buf->datas[0].fd, buf->datas[0].mapoffset);
-        if (src_data == MAP_FAILED)
-        {
-            LOG_E("[PipeWire] CRITICAL: DmaBuf mmap failed! " << strerror(errno));
-            src_data = nullptr;
-        }
-        else
-        {
-            mapped_dmabuf = true;
-            // ARM ARCHITECTURE FIX: Force the GPU to flush this buffer to the CPU cache.
-            // Without this, the CPU reads stale cache, resulting in a blank/magenta screen!
-            struct dma_buf_sync sync_start = {.flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ};
-            ioctl(buf->datas[0].fd, DMA_BUF_IOCTL_SYNC, &sync_start);
-        }
+        LOG_E("[Capture] memfd_create failed.");
+        return;
+    }
+    ftruncate(fd, size);
+    enc->current_data = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+
+    wl_shm_pool* pool = wl_shm_create_pool(enc->wl_shm_inst, fd, size);
+    enc->current_buffer = wl_shm_pool_create_buffer(pool, 0, width, height, stride, format);
+    wl_shm_pool_destroy(pool);
+
+    enc->current_size = size;
+    enc->pw_w = width;
+    enc->pw_h = height;
+    enc->latest_stride = stride;
+
+    // Properly map internal SHM format to FFmpeg decoding space
+    switch (format)
+    {
+        case WL_SHM_FORMAT_XRGB8888:
+            enc->pw_fmt = AV_PIX_FMT_BGR0;
+            break;
+        case WL_SHM_FORMAT_ARGB8888:
+            enc->pw_fmt = AV_PIX_FMT_BGRA;
+            break;
+        case WL_SHM_FORMAT_XBGR8888:
+            enc->pw_fmt = AV_PIX_FMT_RGB0;
+            break;
+        case WL_SHM_FORMAT_ABGR8888:
+            enc->pw_fmt = AV_PIX_FMT_RGBA;
+            break;
+        default:
+            enc->pw_fmt = AV_PIX_FMT_BGR0;
+            break;
     }
 
-    if (src_data)
+    enc->update_sws();
+
+    // Commands compositor to perform a direct blit to our memory buffer
+    zwlr_screencopy_frame_v1_copy(frame, enc->current_buffer);
+    close(fd);
+}
+
+static void frame_handle_flags(void* data, struct zwlr_screencopy_frame_v1* frame, uint32_t flags)
+{
+    (void)data;
+    (void)frame;
+    (void)flags;
+}
+
+static void frame_handle_ready(void* data, struct zwlr_screencopy_frame_v1* frame, uint32_t tv_sec_hi,
+                               uint32_t tv_sec_lo, uint32_t tv_nsec)
+{
+    (void)tv_sec_hi;
+    (void)tv_sec_lo;
+    (void)tv_nsec;
+    VideoEncoder* enc = static_cast<VideoEncoder*>(data);
+
     {
         std::lock_guard<std::mutex> lock(enc->frame_mutex);
-        uint32_t size = buf->datas[0].chunk->size;
-        uint32_t stride = buf->datas[0].chunk->stride;
-
-        // DmaBuf streams frequently omit chunk metadata; safely estimate if missing
-        if (size == 0)
-            size = buf->datas[0].maxsize;
-        if (stride == 0)
-            stride = enc->pw_w * 4;
-
-        // Safety bound check
-        if (size > buf->datas[0].maxsize)
-            size = buf->datas[0].maxsize;
-
-        if (size > 0 && !(buf->datas[0].chunk->flags & SPA_CHUNK_FLAG_CORRUPTED))
+        if (enc->latest_frame_buffer.size() != enc->current_size)
         {
-            pw_frame_count++;
-            if (pw_frame_count == 1)
-                LOG_I("[PipeWire] SUCCESS! Extracted first frame! (Size: " << size << " bytes, Stride: " << stride
-                                                                           << ")");
-            else if (pw_frame_count % 60 == 0)
-                LOG_I("[PipeWire] Heartbeat: Extracted " << pw_frame_count << " healthy frames...");
-
-            if (enc->latest_frame_buffer.size() != (size_t)size)
-                enc->latest_frame_buffer.resize(size);
-
-            memcpy(enc->latest_frame_buffer.data(), src_data, size);
-            enc->latest_stride = stride;
+            enc->latest_frame_buffer.resize(enc->current_size);
         }
-
-        if (mapped_dmabuf)
+        if (enc->current_data && enc->current_data != MAP_FAILED)
         {
-            // ARM ARCHITECTURE FIX: Release the CPU cache lock back to the GPU
-            struct dma_buf_sync sync_end = {.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ};
-            ioctl(buf->datas[0].fd, DMA_BUF_IOCTL_SYNC, &sync_end);
-            munmap(src_data, buf->datas[0].maxsize);
+            memcpy(enc->latest_frame_buffer.data(), enc->current_data, enc->current_size);
         }
     }
-    else
+
+    if (enc->current_data && enc->current_data != MAP_FAILED)
     {
-        LOG_E("[PipeWire] WARNING: Received buffer with NULL data pointer!");
+        munmap(enc->current_data, enc->current_size);
     }
-
-    pw_stream_queue_buffer(enc->pw_stream, b);
-}
-
-static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* param)
-{
-    VideoEncoder* enc = static_cast<VideoEncoder*>(userdata);
-    if (param == NULL || id != SPA_PARAM_Format)
-        return;
-
-    struct spa_video_info_raw info;
-    if (spa_format_video_raw_parse(param, &info) >= 0)
+    if (enc->current_buffer)
     {
-        LOG_I("[PipeWire] Native Format negotiated successfully! Size: " << info.size.width << "x" << info.size.height
-                                                                         << ", SPA Format ID: " << info.format);
+        wl_buffer_destroy(enc->current_buffer);
+    }
 
+    enc->current_data = nullptr;
+    enc->current_buffer = nullptr;
+    enc->frame_ready = true;
+}
+
+static void frame_handle_failed(void* data, struct zwlr_screencopy_frame_v1* frame)
+{
+    VideoEncoder* enc = static_cast<VideoEncoder*>(data);
+
+    if (enc->current_data && enc->current_data != MAP_FAILED)
+    {
+        munmap(enc->current_data, enc->current_size);
+    }
+    if (enc->current_buffer)
+    {
+        wl_buffer_destroy(enc->current_buffer);
+    }
+
+    enc->current_data = nullptr;
+    enc->current_buffer = nullptr;
+    enc->frame_ready = true;
+    LOG_E("[Capture] wlr-screencopy failed to acquire frame.");
+}
+
+static const struct zwlr_screencopy_frame_v1_listener frame_listener = {
+    .buffer = frame_handle_buffer,
+    .flags = frame_handle_flags,
+    .ready = frame_handle_ready,
+    .failed = frame_handle_failed,
+};
+
+void VideoEncoder::request_wayland_frame_sync()
+{
+    frame_ready = false;
+    current_data = nullptr;
+    current_buffer = nullptr;
+
+    // By explicitly requesting a frame here, Wayland MUST generate one
+    // even if absolutely no pixel damage has occurred.
+    zwlr_screencopy_frame_v1* frame = zwlr_screencopy_manager_v1_capture_output(wlr_screencopy, 0, wl_out);
+    zwlr_screencopy_frame_v1_add_listener(frame, &frame_listener, this);
+
+    while (!frame_ready)
+    {
+        if (wl_display_dispatch(wl_dpy) < 0)
         {
-            std::lock_guard<std::mutex> lock(enc->frame_mutex);
-            enc->pw_w = info.size.width;
-            enc->pw_h = info.size.height;
-
-            switch (info.format)
-            {
-                case SPA_VIDEO_FORMAT_RGBx:
-                case SPA_VIDEO_FORMAT_RGBA:
-                    enc->pw_fmt = AV_PIX_FMT_RGB0;
-                    break;
-                case SPA_VIDEO_FORMAT_BGRx:
-                case SPA_VIDEO_FORMAT_BGRA:
-                    enc->pw_fmt = AV_PIX_FMT_BGR0;
-                    break;
-                case SPA_VIDEO_FORMAT_xBGR:
-                case SPA_VIDEO_FORMAT_ABGR:
-                    enc->pw_fmt = AV_PIX_FMT_0BGR;
-                    break;
-                case SPA_VIDEO_FORMAT_xRGB:
-                case SPA_VIDEO_FORMAT_ARGB:
-                    enc->pw_fmt = AV_PIX_FMT_0RGB;
-                    break;
-                case SPA_VIDEO_FORMAT_RGB:
-                    enc->pw_fmt = AV_PIX_FMT_RGB24;
-                    break;
-                case SPA_VIDEO_FORMAT_BGR:
-                    enc->pw_fmt = AV_PIX_FMT_BGR24;
-                    break;
-                default:
-                    LOG_E("[PipeWire] Unrecognized pixel format! Defaulting to BGRA.");
-                    enc->pw_fmt = AV_PIX_FMT_BGRA;
-                    break;
-            }
-            enc->latest_frame_buffer.clear();
+            LOG_E("[Capture] wl_display_dispatch failed.");
+            break;
         }
+    }
+    zwlr_screencopy_frame_v1_destroy(frame);
+}
 
-        enc->update_sws();
+static void registry_handle_global(void* data, struct wl_registry* registry, uint32_t name, const char* interface,
+                                   uint32_t version)
+{
+    (void)version;
+    VideoEncoder* enc = static_cast<VideoEncoder*>(data);
 
-        // Calculate explicit stride and size to satisfy the SHM allocator
-        uint32_t stride = (info.size.width * 4 + 3) & ~3;
-        if (info.format == SPA_VIDEO_FORMAT_RGB || info.format == SPA_VIDEO_FORMAT_BGR)
+    if (strcmp(interface, wl_shm_interface.name) == 0)
+    {
+        enc->wl_shm_inst = (wl_shm*)wl_registry_bind(registry, name, &wl_shm_interface, 1);
+    }
+    else if (strcmp(interface, wl_output_interface.name) == 0)
+    {
+        if (!enc->wl_out)
         {
-            stride = (info.size.width * 3 + 3) & ~3;
+            enc->wl_out = (wl_output*)wl_registry_bind(registry, name, &wl_output_interface, 1);
         }
-
-        uint32_t size = stride * info.size.height;
-
-        uint8_t buffer[1024];
-        struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
-        const struct spa_pod* params[1];
-
-        // CRITICAL GEAR FIX: We MUST reply with SPA_PARAM_Buffers to un-stall the PipeWire
-        // allocator, using the exact size calculated from the native Wayland format.
-        params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
-            &b, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers, SPA_PARAM_BUFFERS_buffers,
-            SPA_POD_CHOICE_RANGE_Int(4, 2, 8), SPA_PARAM_BUFFERS_blocks, SPA_POD_Int(1), SPA_PARAM_BUFFERS_size,
-            SPA_POD_Int(size), SPA_PARAM_BUFFERS_stride, SPA_POD_Int(stride), SPA_PARAM_BUFFERS_align, SPA_POD_Int(16),
-            SPA_PARAM_BUFFERS_dataType,
-            SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr) | (1 << SPA_DATA_DmaBuf)));
-
-        pw_stream_update_params(enc->pw_stream, params, 1);
-        LOG_I("[PipeWire] Pushed explicit SHM requirements (Size: " << size << ", Stride: " << stride << ").");
+    }
+    else if (strcmp(interface, zwlr_screencopy_manager_v1_interface.name) == 0)
+    {
+        enc->wlr_screencopy =
+            (zwlr_screencopy_manager_v1*)wl_registry_bind(registry, name, &zwlr_screencopy_manager_v1_interface, 1);
     }
 }
 
-static void on_state_changed(void* userdata, enum pw_stream_state old, enum pw_stream_state state, const char* error)
+static void registry_handle_global_remove(void* data, struct wl_registry* registry, uint32_t name)
 {
-    if (error)
-        LOG_E("[PipeWire] Stream Error: " << error);
-    else
-        LOG_I("[PipeWire] Stream State changed to: " << pw_stream_state_as_string(state));
+    (void)data;
+    (void)registry;
+    (void)name;
 }
 
-static const struct pw_stream_events stream_events = []()
+static const struct wl_registry_listener registry_listener = {
+    .global = registry_handle_global,
+    .global_remove = registry_handle_global_remove,
+};
+
+bool VideoEncoder::init_wayland()
 {
-    struct pw_stream_events ev{};
-    ev.version = PW_VERSION_STREAM_EVENTS;
-    ev.process = on_process;
-    ev.state_changed = on_state_changed;
-    ev.param_changed = on_param_changed;
-    return ev;
-}();
-
-bool VideoEncoder::init_pipewire(uint32_t node_id)
-{
-    pw_loop = pw_main_loop_new(NULL);
-    if (!pw_loop)
+    wl_dpy = wl_display_connect(NULL);
+    if (!wl_dpy)
         return false;
 
-    pw_ctx = pw_context_new(pw_main_loop_get_loop(pw_loop), NULL, 0);
-    pw_core = pw_context_connect(pw_ctx, NULL, 0);
-    if (!pw_core)
+    wl_reg = wl_display_get_registry(wl_dpy);
+    wl_registry_add_listener(wl_reg, &registry_listener, this);
+    wl_display_roundtrip(wl_dpy);
+    wl_display_roundtrip(wl_dpy);
+
+    if (!wl_shm_inst || !wl_out || !wlr_screencopy)
+    {
+        LOG_E("[Capture] Wayland: Missing required interfaces (shm, output, or screencopy).");
+        cleanup_wayland();
         return false;
+    }
 
-    pw_stream =
-        pw_stream_new(pw_core, "OpenGAL Capture",
-                      pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture", PW_KEY_MEDIA_ROLE,
-                                        "Screen", PW_KEY_TARGET_OBJECT, std::to_string(node_id).c_str(),
-                                        PW_KEY_NODE_ALWAYS_PROCESS, "true", NULL));
-
-    pw_stream_add_listener(pw_stream, &stream_listener, &stream_events, this);
-
-    alignas(8) uint8_t buffer[2048];
-    struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
-    const struct spa_pod* params[2];
-
-    // Guarantee the Wayland portal gives us the native desktop resolution by omitting size bounds
-    params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
-        &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
-        SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), SPA_FORMAT_VIDEO_format,
-        SPA_POD_CHOICE_ENUM_Id(5, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRA,
-                               SPA_VIDEO_FORMAT_RGBx, SPA_VIDEO_FORMAT_RGBA));
-
-    // Allow all memory types, so the Wayland portal doesn't reject us for being too restrictive
-    params[1] = (const struct spa_pod*)spa_pod_builder_add_object(
-        &b, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers, SPA_PARAM_BUFFERS_dataType,
-        SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr) | (1 << SPA_DATA_DmaBuf)));
-
-    int res = pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, PW_ID_ANY,
-                                (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 2);
-
-    if (res < 0)
-        return false;
     return true;
 }
 
-void VideoEncoder::cleanup_pipewire()
+void VideoEncoder::cleanup_wayland()
 {
-    if (pw_stream)
-        pw_stream_destroy(pw_stream);
-    if (pw_core)
-        pw_core_disconnect(pw_core);
-    if (pw_ctx)
-        pw_context_destroy(pw_ctx);
-    if (pw_loop)
-        pw_main_loop_destroy(pw_loop);
-    pw_stream = nullptr;
-    pw_core = nullptr;
-    pw_ctx = nullptr;
-    pw_loop = nullptr;
+    if (wlr_screencopy)
+        zwlr_screencopy_manager_v1_destroy(wlr_screencopy);
+    if (wl_out)
+        wl_output_destroy(wl_out);
+    if (wl_shm_inst)
+        wl_shm_destroy(wl_shm_inst);
+    if (wl_reg)
+        wl_registry_destroy(wl_reg);
+    if (wl_dpy)
+        wl_display_disconnect(wl_dpy);
+
+    wlr_screencopy = nullptr;
+    wl_out = nullptr;
+    wl_shm_inst = nullptr;
+    wl_reg = nullptr;
+    wl_dpy = nullptr;
 }
