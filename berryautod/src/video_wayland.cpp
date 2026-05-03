@@ -60,7 +60,6 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
             enc->pw_w = info.size.width;
             enc->pw_h = info.size.height;
 
-            // Attempt to ignore alpha first (BGR0), fallback to standard BGRA if needed
             switch (info.format)
             {
                 case SPA_VIDEO_FORMAT_RGBx:
@@ -100,14 +99,6 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
         }
 
         enc->update_sws();
-
-        // Safety Fallback: If BGR0/RGB0 is unsupported by Pi FFmpeg, drop back to standard format
-        if (enc->sws_ctx == nullptr)
-        {
-            LOG_E("[Capture] Retrying FFmpeg context with standard Alpha channel (BGRA)...");
-            enc->pw_fmt = AV_PIX_FMT_BGRA;
-            enc->update_sws();
-        }
     }
 }
 
