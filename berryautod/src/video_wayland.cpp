@@ -17,9 +17,8 @@ static void on_process(void* userdata)
         int size = buf->datas[0].chunk->size;
         int stride = buf->datas[0].chunk->stride;
 
-        // CRITICAL FIX: Wayland sends size == 0 when the screen is idle (no damage).
-        // We MUST ignore these empty frames to prevent overwriting our valid frame cache
-        // with black/empty data.
+        // CRITICAL FIX: Ignore size == 0 (Idle frames) so we don't overwrite our
+        // cached desktop frame with empty black data.
         if (size > 0 && !(buf->datas[0].chunk->flags & SPA_CHUNK_FLAG_CORRUPTED))
         {
             if (enc->latest_frame_buffer.size() != (size_t)size)
@@ -56,21 +55,24 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
 
             switch (info.format)
             {
+                // CRITICAL FIX: Change RGBA/BGRA to RGB0/BGR0.
+                // This forces FFmpeg to ignore the Alpha channel. Without this,
+                // transparent desktop backgrounds render as pitch black!
                 case SPA_VIDEO_FORMAT_RGBx:
                 case SPA_VIDEO_FORMAT_RGBA:
-                    enc->pw_fmt = AV_PIX_FMT_RGBA;
+                    enc->pw_fmt = AV_PIX_FMT_RGB0;
                     break;
                 case SPA_VIDEO_FORMAT_BGRx:
                 case SPA_VIDEO_FORMAT_BGRA:
-                    enc->pw_fmt = AV_PIX_FMT_BGRA;
+                    enc->pw_fmt = AV_PIX_FMT_BGR0;
                     break;
                 case SPA_VIDEO_FORMAT_xBGR:
                 case SPA_VIDEO_FORMAT_ABGR:
-                    enc->pw_fmt = AV_PIX_FMT_ABGR;
+                    enc->pw_fmt = AV_PIX_FMT_0BGR;
                     break;
                 case SPA_VIDEO_FORMAT_xRGB:
                 case SPA_VIDEO_FORMAT_ARGB:
-                    enc->pw_fmt = AV_PIX_FMT_ARGB;
+                    enc->pw_fmt = AV_PIX_FMT_0RGB;
                     break;
                 case SPA_VIDEO_FORMAT_RGB:
                     enc->pw_fmt = AV_PIX_FMT_RGB24;
@@ -91,8 +93,8 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
                     enc->pw_fmt = AV_PIX_FMT_UYVY422;
                     break;
                 default:
-                    LOG_E("[PipeWire] Unrecognized pixel format! Defaulting to BGRA.");
-                    enc->pw_fmt = AV_PIX_FMT_BGRA;
+                    LOG_E("[PipeWire] Unrecognized pixel format! Defaulting to BGR0.");
+                    enc->pw_fmt = AV_PIX_FMT_BGR0;
                     break;
             }
             enc->latest_frame_buffer.clear();
@@ -153,8 +155,6 @@ bool VideoEncoder::init_pipewire(uint32_t node_id)
     struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
     const struct spa_pod* params[2];
 
-    // RESTORED: Wayfire defaults to a 64x64 dummy stream if a specific resolution is not requested.
-    // We must pass the target width and height to force it to render the actual desktop.
     struct spa_rectangle def_rect;
     def_rect.width = target_width;
     def_rect.height = target_height;
