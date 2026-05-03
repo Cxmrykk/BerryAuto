@@ -25,7 +25,8 @@ void init_uinput()
 
     // Configure as a Direct Touchscreen Device
     ioctl(uinput_fd, UI_SET_EVBIT, EV_KEY);
-    ioctl(uinput_fd, UI_SET_KEYBIT, BTN_TOUCH); // Key property for touchscreens
+    ioctl(uinput_fd, UI_SET_KEYBIT, BTN_TOUCH);  // Key property for touchscreens
+    ioctl(uinput_fd, UI_SET_KEYBIT, KEY_WAKEUP); // NEW: Allow display wakeups
 
     ioctl(uinput_fd, UI_SET_EVBIT, EV_ABS);
     ioctl(uinput_fd, UI_SET_ABSBIT, ABS_X);
@@ -94,6 +95,20 @@ void reset_input_state()
             emit_uinput(EV_ABS, ABS_MT_TRACKING_ID, -1);
         }
         emit_uinput(EV_KEY, BTN_TOUCH, 0);
+        emit_uinput(EV_SYN, SYN_REPORT, 0);
+    }
+}
+
+// NEW: Force the Wayland compositor to wake from DPMS Sleep and process a frame
+void wake_up_display()
+{
+    if (uinput_fd < 0)
+        init_uinput();
+    if (uinput_fd >= 0)
+    {
+        emit_uinput(EV_KEY, KEY_WAKEUP, 1);
+        emit_uinput(EV_SYN, SYN_REPORT, 0);
+        emit_uinput(EV_KEY, KEY_WAKEUP, 0);
         emit_uinput(EV_SYN, SYN_REPORT, 0);
     }
 }

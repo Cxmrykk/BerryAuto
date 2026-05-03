@@ -1,11 +1,13 @@
 #include "video_encoder.hpp"
 #include "globals.hpp"
+#include "input_handler.hpp" // NEW: Required for wake_up_display()
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <gio/gio.h>
 #include <iostream>
+#include <spa/param/buffers.h> // NEW: Required for SPA_PARAM_Buffers
 #include <time.h>
 #include <unistd.h>
 
@@ -411,7 +413,7 @@ bool VideoEncoder::init_pipewire(uint32_t node_id)
 
     alignas(8) uint8_t buffer[2048];
     struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
-    const struct spa_pod* params[1];
+    const struct spa_pod* params[2]; // NEW: Update array size to 2
 
     struct spa_rectangle def_rect;
     def_rect.width = target_width;
@@ -433,8 +435,13 @@ bool VideoEncoder::init_pipewire(uint32_t node_id)
                                SPA_VIDEO_FORMAT_UYVY, SPA_VIDEO_FORMAT_YVYU, SPA_VIDEO_FORMAT_VYUY),
         SPA_FORMAT_VIDEO_size, SPA_POD_Rectangle(&def_rect), SPA_FORMAT_VIDEO_framerate, SPA_POD_Fraction(&def_frac));
 
+    // NEW: Force Shared Memory (MemFd/MemPtr) to ensure CPU-readable buffers (data != NULL) and avoid DMA-BUF maps.
+    params[1] = (const struct spa_pod*)spa_pod_builder_add_object(
+        &b, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers, SPA_PARAM_BUFFERS_dataType,
+        SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr)));
+
     int res = pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, PW_ID_ANY,
-                                (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 1);
+                                (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 2);
 
     if (res < 0)
     {
@@ -623,9 +630,21 @@ void VideoEncoder::capture_loop()
                                     int required_size = av_image_get_buffer_size(pw_fmt, pw_w, pw_h, 1);
                                     if (required_size > 0)
                                     {
-                                        latest_frame_buffer.resize(required_size,
-                                                                   0); // Zeros naturally form Black/Green
-                                        latest_stride = 0;             // Let FFmpeg auto-calculate stride
+                                        latest_frame_buffer.resize(required_size, 0);
+                                        latest_stride = 0; // Let FFmpeg auto-calculate stride
+
+                                        // NEW: Fix YUV Green Screen: Fill YUV formats with proper Black values
+                                        if (pw_fmt == AV_PIX_FMT_NV12 || pw_fmt == AV_PIX_FMT_YUV420P)
+                                        {
+                                            int y_size = pw_w * pw_h;
+                                            if (required_size >= y_size)
+                                            {
+                                                memset(latest_frame_buffer.data(), 0, y_size); // Y = 0 (Black)
+                                                memset(latest_frame_buffer.data() + y_size, 128,
+                                                       required_size - y_size); // U,V = 128 (Neutral)
+                                            }
+                                        }
+
                                         LOG_I("[Capture] Wayland is idle. Created dummy frame to kickstart stream.");
                                     }
                                 }
@@ -648,6 +667,9 @@ void VideoEncoder::capture_loop()
                             }
                         }
                     });
+
+                // NEW: Ensure the screen is awake so Wayfire actually renders the active desktop frame!
+                wake_up_display();
 
                 pw_main_loop_run(pw_loop);
 
