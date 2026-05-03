@@ -41,7 +41,7 @@ static void on_process(void* userdata)
             else if (pw_frame_count % 60 == 0)
                 LOG_I("[PipeWire] Heartbeat: Extracted 60 healthy frames...");
 
-            // Make sure the destination buffer matches the incoming frame size
+            // Make sure the destination buffer matches the incoming native frame size
             if (enc->latest_frame_buffer.size() != (size_t)size)
                 enc->latest_frame_buffer.resize(size);
 
@@ -52,8 +52,7 @@ static void on_process(void* userdata)
     }
     else
     {
-        // If this triggers, it means PipeWire failed to map the SHM FD into CPU memory
-        LOG_E("[PipeWire] WARNING: Received buffer with NULL data pointer! Type: " << buf->datas[0].type);
+        LOG_E("[PipeWire] WARNING: Received buffer with NULL data pointer!");
     }
 
     pw_stream_queue_buffer(enc->pw_stream, b);
@@ -68,8 +67,8 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
     struct spa_video_info_raw info;
     if (spa_format_video_raw_parse(param, &info) >= 0)
     {
-        LOG_I("[PipeWire] Format negotiated successfully! Size: " << info.size.width << "x" << info.size.height
-                                                                  << ", SPA Format ID: " << info.format);
+        LOG_I("[PipeWire] Native Format negotiated successfully! Size: " << info.size.width << "x" << info.size.height
+                                                                         << ", SPA Format ID: " << info.format);
 
         {
             std::lock_guard<std::mutex> lock(enc->frame_mutex);
@@ -100,12 +99,6 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
                 case SPA_VIDEO_FORMAT_BGR:
                     enc->pw_fmt = AV_PIX_FMT_BGR24;
                     break;
-                case SPA_VIDEO_FORMAT_NV12:
-                    enc->pw_fmt = AV_PIX_FMT_NV12;
-                    break;
-                case SPA_VIDEO_FORMAT_I420:
-                    enc->pw_fmt = AV_PIX_FMT_YUV420P;
-                    break;
                 default:
                     LOG_E("[PipeWire] Unrecognized pixel format! Defaulting to BGRA.");
                     enc->pw_fmt = AV_PIX_FMT_BGRA;
@@ -118,28 +111,19 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
 
         // Calculate explicit stride and size to satisfy the SHM allocator
         uint32_t stride = (info.size.width * 4 + 3) & ~3;
-
         if (info.format == SPA_VIDEO_FORMAT_RGB || info.format == SPA_VIDEO_FORMAT_BGR)
         {
             stride = (info.size.width * 3 + 3) & ~3;
         }
-        else if (info.format == SPA_VIDEO_FORMAT_NV12 || info.format == SPA_VIDEO_FORMAT_I420)
-        {
-            stride = (info.size.width + 3) & ~3;
-        }
 
         uint32_t size = stride * info.size.height;
-        if (info.format == SPA_VIDEO_FORMAT_NV12 || info.format == SPA_VIDEO_FORMAT_I420)
-        {
-            size = size * 3 / 2;
-        }
 
         uint8_t buffer[1024];
         struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
         const struct spa_pod* params[1];
 
-        // CRITICAL: Strictly force MemFd (SHM) only. DmaBuf is explicitly omitted.
-        // This forces the Wayland portal to render the desktop into a flat CPU buffer.
+        // CRITICAL: Strictly force MemFd (SHM) only.
+        // We push the exact size requirements of the native resolution back to the server.
         params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
             &b, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers, SPA_PARAM_BUFFERS_buffers,
             SPA_POD_CHOICE_RANGE_Int(4, 2, 8), SPA_PARAM_BUFFERS_blocks, SPA_POD_Int(1), SPA_PARAM_BUFFERS_size,
@@ -180,10 +164,12 @@ bool VideoEncoder::init_pipewire(uint32_t node_id)
     if (!pw_core)
         return false;
 
+    // Added PW_KEY_NODE_ALWAYS_PROCESS to prevent the headless compositor from sleeping the node
     pw_stream =
         pw_stream_new(pw_core, "OpenGAL Capture",
                       pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture", PW_KEY_MEDIA_ROLE,
-                                        "Screen", PW_KEY_TARGET_OBJECT, std::to_string(node_id).c_str(), NULL));
+                                        "Screen", PW_KEY_TARGET_OBJECT, std::to_string(node_id).c_str(),
+                                        PW_KEY_NODE_ALWAYS_PROCESS, "true", NULL));
 
     pw_stream_add_listener(pw_stream, &stream_listener, &stream_events, this);
 
@@ -191,28 +177,15 @@ bool VideoEncoder::init_pipewire(uint32_t node_id)
     struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
     const struct spa_pod* params[2];
 
-    struct spa_rectangle def_rect = {(uint32_t)target_width, (uint32_t)target_height};
-
-    // Mathematically block out the cursor plane (64x64) by requiring at least 128x128
-    struct spa_rectangle min_rect = {128, 128};
-    struct spa_rectangle max_rect = {8192, 8192};
-    struct spa_fraction def_frac = {(uint32_t)target_fps, 1};
-    struct spa_fraction min_frac = {1, 1};
-    struct spa_fraction max_frac = {144, 1};
-
+    // GEAR CHANGE: Completely drop SPA_FORMAT_VIDEO_size and SPA_FORMAT_VIDEO_framerate.
+    // By omitting constraints, xdg-desktop-portal-wlr is forced to negotiate the exact native bounds (800x480).
     params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
         &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
         SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), SPA_FORMAT_VIDEO_format,
-        SPA_POD_CHOICE_ENUM_Id(17, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRA,
-                               SPA_VIDEO_FORMAT_RGBx, SPA_VIDEO_FORMAT_RGBA, SPA_VIDEO_FORMAT_xBGR,
-                               SPA_VIDEO_FORMAT_ABGR, SPA_VIDEO_FORMAT_xRGB, SPA_VIDEO_FORMAT_ARGB,
-                               SPA_VIDEO_FORMAT_RGB, SPA_VIDEO_FORMAT_BGR, SPA_VIDEO_FORMAT_NV12, SPA_VIDEO_FORMAT_I420,
-                               SPA_VIDEO_FORMAT_YUY2, SPA_VIDEO_FORMAT_UYVY, SPA_VIDEO_FORMAT_YVYU,
-                               SPA_VIDEO_FORMAT_VYUY),
-        SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(&def_rect, &min_rect, &max_rect),
-        SPA_FORMAT_VIDEO_framerate, SPA_POD_CHOICE_RANGE_Fraction(&def_frac, &min_frac, &max_frac));
+        SPA_POD_CHOICE_ENUM_Id(5, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRA,
+                               SPA_VIDEO_FORMAT_RGBx, SPA_VIDEO_FORMAT_RGBA));
 
-    // CRITICAL: Strictly force MemFd (SHM) only. No DmaBuf allowed.
+    // Strictly force CPU Shared Memory allocations
     params[1] = (const struct spa_pod*)spa_pod_builder_add_object(
         &b, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers, SPA_PARAM_BUFFERS_dataType,
         SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr)));
