@@ -10,8 +10,10 @@ cleanup() {
 }
 trap cleanup SIGINT
 
+# Kill any old ghost root processes from previous runs
 sudo pkill -9 opengal_emitter 2>/dev/null || true
 
+# Identify real user behind sudo
 CURRENT_USER=${SUDO_USER:-$USER}
 USER_UID=$(id -u "$CURRENT_USER")
 USER_HOME=$(getent passwd "$CURRENT_USER" | cut -d: -f6)
@@ -20,6 +22,7 @@ export DISPLAY=:0
 export XAUTHORITY="$USER_HOME/.Xauthority"
 export XDG_RUNTIME_DIR="/run/user/$USER_UID"
 
+# CRITICAL: Detect Wayland Socket if not set
 if [ -z "$WAYLAND_DISPLAY" ]; then
     if [ -S "$XDG_RUNTIME_DIR/wayland-1" ]; then
         export WAYLAND_DISPLAY="wayland-1"
@@ -28,13 +31,24 @@ if [ -z "$WAYLAND_DISPLAY" ]; then
     fi
 fi
 
+# CRITICAL: Re-enabled for Universal Grabber (Required for GNOME fallback)
+if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
+    export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+fi
+
+if [ -z "$XDG_CURRENT_DESKTOP" ]; then
+    export XDG_CURRENT_DESKTOP="Wayfire" # Default fallback hint
+fi
+
 xhost +SI:localuser:root > /dev/null 2>&1 || true
 
+# Setup gadget strings
 sudo /usr/local/bin/setup_opengal_gadget.sh
 echo "HU-AAAAAA001" | sudo tee /sys/kernel/config/usb_gadget/opengal/strings/0x409/serialnumber > /dev/null
 
-echo "[RUNNER] Native Wayland Environment: WAYLAND=$WAYLAND_DISPLAY"
+echo "[RUNNER] Environment: WAYLAND=$WAYLAND_DISPLAY DBUS=$DBUS_SESSION_BUS_ADDRESS DESKTOP=$XDG_CURRENT_DESKTOP"
 
+# Run the Universal Hybrid Emitter
 ./berryautod/build/opengal_emitter &
 EMITTER_PID=$!
 

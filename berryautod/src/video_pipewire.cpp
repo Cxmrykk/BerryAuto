@@ -155,12 +155,23 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
 
 static void on_state_changed(void* userdata, enum pw_stream_state old, enum pw_stream_state state, const char* error)
 {
+    (void)userdata;
     (void)old;
     if (error)
         LOG_E("[PipeWire] Stream Error: " << error);
     else
         LOG_I("[PipeWire] Stream State changed to: " << pw_stream_state_as_string(state));
 }
+
+static const struct pw_stream_events stream_events = []()
+{
+    struct pw_stream_events ev{};
+    ev.version = PW_VERSION_STREAM_EVENTS;
+    ev.process = on_process;
+    ev.state_changed = on_state_changed;
+    ev.param_changed = on_param_changed;
+    return ev;
+}();
 
 bool VideoEncoder::init_pipewire(uint32_t node_id)
 {
@@ -179,15 +190,8 @@ bool VideoEncoder::init_pipewire(uint32_t node_id)
                                         "Screen", PW_KEY_TARGET_OBJECT, std::to_string(node_id).c_str(),
                                         PW_KEY_NODE_ALWAYS_PROCESS, "true", NULL));
 
-    stream_listener.version = PW_VERSION_STREAM_EVENTS;
-    stream_listener.events = nullptr;
-
-    static const struct pw_stream_events ev = {.version = PW_VERSION_STREAM_EVENTS,
-                                               .state_changed = on_state_changed,
-                                               .param_changed = on_param_changed,
-                                               .process = on_process};
-
-    pw_stream_add_listener(pw_stream, &stream_listener, &ev, this);
+    spa_zero(stream_listener);
+    pw_stream_add_listener(pw_stream, &stream_listener, &stream_events, this);
 
     alignas(8) uint8_t buffer[2048];
     struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
