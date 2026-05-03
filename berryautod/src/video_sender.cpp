@@ -86,7 +86,6 @@ void send_video_frame_internal(const std::vector<uint8_t>& nal_data, uint64_t ti
     pt.push_back(0x00);
     pt.push_back(0x00); // MEDIA_MESSAGE_DATA (Type 0)
 
-    // AAP Timestamps must be 64-bit Big-Endian and perfectly match the encoded stream
     for (int i = 7; i >= 0; --i)
         pt.push_back((timestamp >> (i * 8)) & 0xFF);
 
@@ -107,18 +106,16 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
     static bool was_streaming = false;
     bool currently_streaming = is_video_streaming.load() && video_channel_ready && (is_tls_connected || ssl_bypassed);
 
-    // Edge Detector: Detects when the stream resumes after stopping/exiting
     if (currently_streaming && !was_streaming)
     {
         config_injected_this_session = false;
-        video_unacked_count = 0; // Reset ACK flow control for the new session
+        video_unacked_count = 0;
     }
     was_streaming = currently_streaming;
 
     if (!currently_streaming)
         return;
 
-    // 1. Session Init: Must send CODEC_CONFIG exactly once per session
     if (!config_injected_this_session)
     {
         if (!has_cached_config)
@@ -133,24 +130,20 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
         }
         else
         {
-            // Cannot send video data until SPS/PPS is processed
+            LOG_E("[VideoSender] Waiting for SPS/PPS Header. Dropping Frame (Size: " << nal_data.size() << ")");
             if (video_streamer)
                 video_streamer->force_keyframe();
             return;
         }
     }
 
-    // 2. Strict Protocol Flow Control
     if (max_video_unacked > 0 && video_unacked_count.load() >= max_video_unacked)
     {
-        // The car's decoder is still digesting frames. Wait for ACKs.
-        // We drop this frame quietly to maintain stability and ask for a fresh keyframe.
         if (video_streamer)
             video_streamer->force_keyframe();
         return;
     }
 
-    // 3. Relaxed USB Backpressure Failsafe for 2K/4K @ 60 FPS overhead
     if (get_tx_queue_size() >= 60)
     {
         LOG_E("[WARNING] USB Queue Congested! Flushing pipeline and forcing a Keyframe.");
@@ -160,7 +153,6 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
         return;
     }
 
-    // 4. Send Frame
     send_video_frame_internal(nal_data, timestamp);
 }
 

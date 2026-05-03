@@ -47,6 +47,11 @@ public:
     AVPixelFormat pw_fmt = AV_PIX_FMT_BGRA;
     std::mutex sws_mutex;
 
+    // --- Frame Caching for Wayland Damage Tracking ---
+    std::vector<uint8_t> latest_frame_buffer;
+    int latest_stride = 0;
+    std::mutex frame_mutex;
+
 private:
     int target_width, target_height, target_fps;
     NalCallback nal_callback;

@@ -80,7 +80,6 @@ static bool negotiate_wayland_screencast(uint32_t& out_node_id)
         return false;
     }
 
-    // Determine deterministic session and request paths based on our unique D-Bus name
     std::string sender = g_dbus_connection_get_unique_name(conn);
     sender.erase(std::remove(sender.begin(), sender.end(), ':'), sender.end());
     std::replace(sender.begin(), sender.end(), '.', '_');
@@ -183,8 +182,17 @@ static void on_process(void* userdata)
     struct spa_buffer* buf = b->buffer;
     if (buf->datas[0].data)
     {
+        // Copy the frame data into the cache so the continuous encoding thread can use it
+        std::lock_guard<std::mutex> lock(enc->frame_mutex);
+        int size = buf->datas[0].chunk->size;
         int stride = buf->datas[0].chunk->stride;
-        enc->process_raw_frame(buf->datas[0].data, stride, enc->pw_w, enc->pw_h);
+
+        if (enc->latest_frame_buffer.size() != (size_t)size)
+        {
+            enc->latest_frame_buffer.resize(size);
+        }
+        memcpy(enc->latest_frame_buffer.data(), buf->datas[0].data, size);
+        enc->latest_stride = stride;
     }
     else
     {
@@ -345,7 +353,6 @@ bool VideoEncoder::init_x11()
     shminfo.readOnly = False;
     XShmAttach(dpy, &shminfo);
 
-    // Configure SWS for X11 format
     pw_w = target_width;
     pw_h = target_height;
     pw_fmt = AV_PIX_FMT_BGRA;
@@ -390,7 +397,6 @@ bool VideoEncoder::init_pipewire(uint32_t node_id)
         return false;
     }
 
-    // TARGET THE SPECIFIC NODE ID NEGOTIATED VIA D-BUS
     pw_stream =
         pw_stream_new(pw_core, "OpenGAL Capture",
                       pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture", PW_KEY_MEDIA_ROLE,
@@ -398,34 +404,18 @@ bool VideoEncoder::init_pipewire(uint32_t node_id)
 
     pw_stream_add_listener(pw_stream, &stream_listener, &stream_events, this);
 
-    // CRITICAL: PipeWire Pods require strict 8-byte alignment, otherwise data corruption occurs
     alignas(8) uint8_t buffer[2048];
     struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
     const struct spa_pod* params[1];
 
-    // C++ compatible way to pass compound structs to PipeWire macros
     struct spa_rectangle def_rect;
     def_rect.width = target_width;
     def_rect.height = target_height;
-    struct spa_rectangle min_rect;
-    min_rect.width = 1;
-    min_rect.height = 1;
-    struct spa_rectangle max_rect;
-    max_rect.width = 8192;
-    max_rect.height = 8192;
-
     struct spa_fraction def_frac;
     def_frac.num = target_fps;
     def_frac.denom = 1;
-    struct spa_fraction min_frac;
-    min_frac.num = 0;
-    min_frac.denom = 1;
-    struct spa_fraction max_frac;
-    max_frac.num = 1000;
-    max_frac.denom = 1;
 
-    // Highly Permissive Format Negotiation!
-    // Includes wlroots native hardware formats (NV12/I420/YUY2) to prevent "no more input formats" rejections.
+    // Forces Wayland to provide the Exact Resolution. Removes Choice Ranges.
     params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
         &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
         SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), SPA_FORMAT_VIDEO_format,
@@ -436,10 +426,8 @@ bool VideoEncoder::init_pipewire(uint32_t node_id)
                                SPA_VIDEO_FORMAT_xRGB, SPA_VIDEO_FORMAT_ARGB, SPA_VIDEO_FORMAT_RGB, SPA_VIDEO_FORMAT_BGR,
                                SPA_VIDEO_FORMAT_NV12, SPA_VIDEO_FORMAT_I420, SPA_VIDEO_FORMAT_YUY2,
                                SPA_VIDEO_FORMAT_UYVY, SPA_VIDEO_FORMAT_YVYU, SPA_VIDEO_FORMAT_VYUY),
-        SPA_FORMAT_VIDEO_size, SPA_POD_Rectangle(&def_rect), SPA_FORMAT_VIDEO_framerate,
-        SPA_POD_CHOICE_RANGE_Fraction(&def_frac, &min_frac, &max_frac));
+        SPA_FORMAT_VIDEO_size, SPA_POD_Rectangle(&def_rect), SPA_FORMAT_VIDEO_framerate, SPA_POD_Fraction(&def_frac));
 
-    // Map Buffers flag enforces SHM memory pointers (buf->datas[0].data) instead of raw DMA fds.
     int res = pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, PW_ID_ANY,
                                 (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 1);
 
@@ -563,15 +551,13 @@ void VideoEncoder::process_raw_frame(void* raw_data, int stride, int pw_w, int p
 {
     std::lock_guard<std::mutex> lock(sws_mutex);
     if (!sws_ctx)
-        return; // Drop frames until PipeWire negotiates the format
+        return;
 
     const uint8_t* in_data[4] = {nullptr};
     int in_linesize[4] = {0};
 
-    // Let FFmpeg automatically calculate plane pointers from the continuous memory block
     av_image_fill_arrays((uint8_t**)in_data, in_linesize, (const uint8_t*)raw_data, pw_fmt, pw_w, pw_h, 1);
 
-    // Some Wayland compositors pad the primary stride further than FFmpeg expects.
     if (stride > in_linesize[0])
     {
         in_linesize[0] = stride;
@@ -611,13 +597,49 @@ void VideoEncoder::capture_loop()
             LOG_I("[Capture] ScreenCast Negotiated successfully! Target Node ID: " << node_id);
             if (init_pipewire(node_id))
             {
+                // Launch continuous encoder thread to defeat Wayland Damage Tracking
+                std::thread encoder_thread(
+                    [this]()
+                    {
+                        uint64_t frame_interval_us = 1000000 / target_fps;
+                        uint64_t next_frame_time = get_monotonic_usec() + frame_interval_us;
+
+                        while (running.load())
+                        {
+                            {
+                                std::lock_guard<std::mutex> lock(frame_mutex);
+                                if (!latest_frame_buffer.empty() && pw_w > 0 && pw_h > 0)
+                                {
+                                    process_raw_frame(latest_frame_buffer.data(), latest_stride, pw_w, pw_h);
+                                }
+                            }
+
+                            uint64_t now = get_monotonic_usec();
+                            if (now < next_frame_time)
+                            {
+                                usleep(next_frame_time - now);
+                                next_frame_time += frame_interval_us;
+                            }
+                            else
+                            {
+                                next_frame_time = now + frame_interval_us;
+                            }
+                        }
+                    });
+
                 pw_main_loop_run(pw_loop);
+
+                // Ensure encoder thread cleanly shuts down
+                running = false;
+                if (encoder_thread.joinable())
+                    encoder_thread.join();
+
                 cleanup_pipewire();
             }
         }
         else
         {
-            LOG_E("[Capture] Wayland ScreenCast negotiation failed. Did you configure xdg-desktop-portal-wlr?");
+            LOG_E("[Capture] Wayland ScreenCast negotiation failed.");
         }
     }
     else
