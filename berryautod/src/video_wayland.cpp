@@ -21,6 +21,7 @@ static void on_process(void* userdata)
     bool mapped_dmabuf = false;
 
     // --- CRITICAL FALLBACK: Manually map DmaBuf if PipeWire skipped it ---
+    // (Note: With proper MemFd sizing below, this fallback is rarely hit as PipeWire handles SHM perfectly)
     if (!src_data && buf->datas[0].type == SPA_DATA_DmaBuf && buf->datas[0].fd >= 0)
     {
         src_data = mmap(NULL, buf->datas[0].maxsize, PROT_READ, MAP_SHARED, buf->datas[0].fd, buf->datas[0].mapoffset);
@@ -123,18 +124,39 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
 
         enc->update_sws();
 
+        // Calculate explicit stride and size for the SHM Allocator
+        uint32_t stride = (info.size.width * 4 + 3) & ~3; // Default to 4 bytes per pixel, 4-byte aligned
+
+        if (info.format == SPA_VIDEO_FORMAT_RGB || info.format == SPA_VIDEO_FORMAT_BGR)
+        {
+            stride = (info.size.width * 3 + 3) & ~3;
+        }
+        else if (info.format == SPA_VIDEO_FORMAT_NV12 || info.format == SPA_VIDEO_FORMAT_I420)
+        {
+            stride = (info.size.width + 3) & ~3; // Y plane stride
+        }
+
+        uint32_t size = stride * info.size.height;
+        if (info.format == SPA_VIDEO_FORMAT_NV12 || info.format == SPA_VIDEO_FORMAT_I420)
+        {
+            size = size * 3 / 2; // Add UV planes sizes
+        }
+
         uint8_t buffer[1024];
         struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
         const struct spa_pod* params[1];
 
-        // Omit 'size' and 'stride' to allow the server to allocate hardware-aligned padded memory
+        // CRITICAL FIX: The generic PipeWire SHM allocator REQUIRES explicit 'size' and 'stride'.
+        // Omitting them causes the allocator to create 0-byte FDs, preventing any frames from being queued.
         params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
             &b, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers, SPA_PARAM_BUFFERS_buffers,
-            SPA_POD_CHOICE_RANGE_Int(4, 2, 8), SPA_PARAM_BUFFERS_blocks, SPA_POD_Int(1), SPA_PARAM_BUFFERS_dataType,
-            SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr)));
+            SPA_POD_CHOICE_RANGE_Int(4, 2, 8), SPA_PARAM_BUFFERS_blocks, SPA_POD_Int(1), SPA_PARAM_BUFFERS_size,
+            SPA_POD_Int(size), SPA_PARAM_BUFFERS_stride, SPA_POD_Int(stride), SPA_PARAM_BUFFERS_align, SPA_POD_Int(16),
+            SPA_PARAM_BUFFERS_dataType, SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr)));
 
         pw_stream_update_params(enc->pw_stream, params, 1);
-        LOG_I("[PipeWire] Buffer requirements pushed (Allowing Server-Side Alignment). Waiting for data...");
+        LOG_I("[PipeWire] Buffer requirements pushed (Size: " << size << ", Stride: " << stride
+                                                              << "). Waiting for data...");
     }
 }
 
