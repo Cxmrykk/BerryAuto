@@ -85,6 +85,12 @@ sudo usermod -aG video $USER
 
 Do not run the daemon directly. Use the provided runner script which sets up the Wayland/X11 environment variables, configures FunctionFS, and handles the accessory morphing sequence.
 
+First you need to remove the password prompt from sudo. Run the following first:
+
+```sh
+echo "$(whoami) ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/$(whoami)
+```
+
 Plug your phone into the OTG port, then execute:
 
 ```sh
