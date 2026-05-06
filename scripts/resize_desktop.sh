@@ -28,58 +28,43 @@ run_x11() {
     sudo -u "$REAL_USER" env XDG_RUNTIME_DIR="/run/user/$USER_UID" DISPLAY=":0" XAUTHORITY="$USER_HOME/.Xauthority" "$@"
 }
 
-get_modeline() {
-    local res="${1}x${2}"
-    case "$res" in
-        "800x480")   echo '"800x480_60.00" 29.50 800 824 896 992 480 483 493 500 -hsync +vsync' ;;
-        "1280x720")  echo '"1280x720_60.00" 74.50 1280 1344 1472 1664 720 723 728 748 -hsync +vsync' ;;
-        "1920x1080") echo '"1920x1080_60.00" 173.00 1920 2048 2248 2576 1080 1083 1088 1120 -hsync +vsync' ;;
-        *) echo "" ;;
-    esac
-}
-
 if ! run_x11 pgrep -x pipewire > /dev/null; then
-    echo "[RESIZE] PipeWire is down! Attempting to start it..."
     run_x11 pipewire &
     sleep 2
 fi
 
 if [ -n "$DETECTED_WAYLAND_DISPLAY" ]; then
-    if ! command -v wlr-randr >/dev/null 2>&1; then
-        echo "[RESIZE] WARNING: Wayland detected but wlr-randr is missing! Please run: sudo apt install wlr-randr"
-    elif run_wayland wlr-randr >/dev/null 2>&1; then
-        echo "[RESIZE] Detected Wayland Environment..."
-        OUTPUT=$(run_wayland wlr-randr | grep "^[^ ]" | head -n 1 | awk '{print $1}')
+    # Wayland Path: Check for Rust gnome-randr (GNOME/Mutter)
+    if command -v gnome-randr >/dev/null 2>&1; then
+        echo "[RESIZE] Detected GNOME Wayland Environment (Rust gnome-randr)..."
+        
+        # Query active monitors and extract the last column (the connector name)
+        OUTPUT=$(run_wayland gnome-randr query --listactivemonitors | grep -v "Monitors:" | head -n 1 | awk '{print $NF}')
+        
         if [ -n "$OUTPUT" ]; then
-            run_wayland wlr-randr --output "$OUTPUT" --custom-mode "${W}x${H}"
+            echo "[RESIZE] Changing resolution of $OUTPUT to ${W}x${H}..."
+            # Modify the resolution. The rust tool natively accepts "WxH" format for --mode
+            run_wayland gnome-randr modify "$OUTPUT" --mode "${W}x${H}"
+            echo "[RESIZE] GNOME Desktop successfully adjusted!"
+            exit 0
+        fi
+        
+    # Fallback to wlroots (Wayfire)
+    elif run_wayland /usr/bin/wlr-randr >/dev/null 2>&1; then
+        echo "[RESIZE] Detected wlroots Wayland Environment..."
+        OUTPUT=$(run_wayland /usr/bin/wlr-randr | grep "^[^ ]" | head -n 1 | awk '{print $1}')
+        if [ -n "$OUTPUT" ]; then
+            run_wayland /usr/bin/wlr-randr --output "$OUTPUT" --custom-mode "${W}x${H}"
             echo "[RESIZE] Wayland Desktop successfully adjusted!"
             exit 0
         fi
     fi
 fi
 
+# X11 Fallback Path
 if command -v xrandr >/dev/null 2>&1 && run_x11 xrandr >/dev/null 2>&1; then
-    echo "[RESIZE] Detected X11 Environment..."
-    XRANDR_OUT=$(run_x11 xrandr)
-    
-    OUTPUT=$(echo "$XRANDR_OUT" | grep " connected" | head -n 1 | awk '{print $1}')
-    if [ -z "$OUTPUT" ]; then OUTPUT=$(echo "$XRANDR_OUT" | grep "primary" | head -n 1 | awk '{print $1}'); fi
-    if [ -z "$OUTPUT" ]; then OUTPUT=$(echo "$XRANDR_OUT" | grep "default" | head -n 1 | awk '{print $1}'); fi
-    if [ -z "$OUTPUT" ]; then OUTPUT=$(echo "$XRANDR_OUT" | grep -E "^(HDMI|DP|VGA|DVI|Virtual|XWAYLAND)" | head -n 1 | awk '{print $1}'); fi
-    
-    # Use a highly specific mode name to prevent regex collisions
-    MODE_NAME="${W}x${H}_AA"
-    
-    if ! echo "$XRANDR_OUT" | grep -q -w "$MODE_NAME"; then
-        MODE_INFO=$(get_modeline "$W" "$H")
-        MODE_PARAMS=$(echo "$MODE_INFO" | cut -d' ' -f2-)
-        run_x11 xrandr --newmode "$MODE_NAME" $MODE_PARAMS
-        run_x11 xrandr --addmode "$OUTPUT" "$MODE_NAME"
-    fi
-
-    run_x11 xrandr --output "$OUTPUT" --mode "$MODE_NAME"
-    echo "[RESIZE] X11 Desktop successfully adjusted to $MODE_NAME!"
-
+    echo "[RESIZE] Detected X11 Environment. Leaving resolution alone as X11 handles dynamic scaling better."
+    exit 0
 else
     echo "[RESIZE] ERROR: Desktop environment not accessible!"
     exit 1
