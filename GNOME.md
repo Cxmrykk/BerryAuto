@@ -36,7 +36,7 @@ cd gnome-randr-rust
 cargo build --release
 
 # Install it globally so BerryAuto scripts can find it
-sudo cp target/release/gnome-randr /usr/local/bin/
+sudo ln -sf "$(pwd)/target/release/gnome-randr" /usr/local/bin/
 sudo chmod +x /usr/local/bin/gnome-randr
 ```
 
@@ -59,3 +59,20 @@ GNOME uses the XDG Desktop Portal for screen capture (`org.freedesktop.portal.Sc
 
 **Future Runs:**
 Once you click "Share" the first time, GNOME generates a "Restore Token". BerryAuto automatically captures this token and saves it to `~/.config/berryauto_portal_token.txt`. On all subsequent runs, BerryAuto injects this token to completely bypass the prompt, allowing it to start headlessly.
+
+## 4. Force HDMI Output in the Kernel
+
+When the Raspberry Pi runs headless, we won't likely have a HDMI output connected (since we are using the head unit as the output). Therefore we need to tell the linux kernel to "pretend" that a monitor is connected with our preferred head unit resolution.
+
+1. Open `/boot/firmware/cmdline.txt`
+
+```sh
+sudo nano /boot/firmware/cmdline.txt
+```
+
+2. Add the following text to the end of the existing line (do not create a new line, everything in this file must stay on one single line):
+
+```sh
+# Change 800x480 to your head unit screen resolution
+video=HDMI-A-1:800x480@60D
+```
