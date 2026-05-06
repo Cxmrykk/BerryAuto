@@ -53,7 +53,7 @@ GNOME uses the XDG Desktop Portal for screen capture (`org.freedesktop.portal.Sc
 **On your very first run:**
 
 1. Connect a physical monitor and mouse to your Raspberry Pi.
-2. Run `./scripts/run_berryauto.sh` and plug in your phone.
+2. Make sure your Pi is connected to a head unit and run `./scripts/run_berryauto.sh`
 3. A GNOME pop-up will appear on your screen asking: _"Share your screen? opengal_emitter wants to share..."_.
 4. **You must click "Share".**
 
