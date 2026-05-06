@@ -20,22 +20,30 @@ void init_uinput()
     if (uinput_fd < 0)
         return;
 
+    // Standard pointer/touch keys
     ioctl(uinput_fd, UI_SET_EVBIT, EV_KEY);
     ioctl(uinput_fd, UI_SET_KEYBIT, BTN_TOUCH);
     ioctl(uinput_fd, UI_SET_KEYBIT, KEY_WAKEUP);
 
+    // CRITICAL FIX: libinput REQUIRES BTN_LEFT to recognize a mouse device!
+    ioctl(uinput_fd, UI_SET_KEYBIT, BTN_LEFT);
+    ioctl(uinput_fd, UI_SET_KEYBIT, BTN_RIGHT);
+    ioctl(uinput_fd, UI_SET_KEYBIT, BTN_MOUSE);
+
+    // Absolute Touch axes
     ioctl(uinput_fd, UI_SET_EVBIT, EV_ABS);
     ioctl(uinput_fd, UI_SET_ABSBIT, ABS_X);
     ioctl(uinput_fd, UI_SET_ABSBIT, ABS_Y);
-
-    ioctl(uinput_fd, UI_SET_EVBIT, EV_REL);
-    ioctl(uinput_fd, UI_SET_RELBIT, REL_X);
-    ioctl(uinput_fd, UI_SET_RELBIT, REL_Y);
-
     ioctl(uinput_fd, UI_SET_ABSBIT, ABS_MT_SLOT);
     ioctl(uinput_fd, UI_SET_ABSBIT, ABS_MT_TRACKING_ID);
     ioctl(uinput_fd, UI_SET_ABSBIT, ABS_MT_POSITION_X);
     ioctl(uinput_fd, UI_SET_ABSBIT, ABS_MT_POSITION_Y);
+
+    // Relative Mouse axes (For headless screen-wake injection)
+    ioctl(uinput_fd, UI_SET_EVBIT, EV_REL);
+    ioctl(uinput_fd, UI_SET_RELBIT, REL_X);
+    ioctl(uinput_fd, UI_SET_RELBIT, REL_Y);
+
     ioctl(uinput_fd, UI_SET_PROPBIT, INPUT_PROP_DIRECT);
 
     struct uinput_user_dev uidev;
@@ -89,7 +97,7 @@ void reset_input_state()
     }
 }
 
-// CRITICAL FIX: Simulate a screen tap/movement to guarantee Wayland recalculates the screen and pushes a frame
+// Emits an OS-recognized physical mouse movement to force Wayland to recalculate the frame
 void wake_up_display()
 {
     if (uinput_fd < 0)
@@ -102,9 +110,8 @@ void wake_up_display()
         emit_uinput(EV_SYN, SYN_REPORT, 0);
 
         static int wiggle = 1;
-        wiggle = -wiggle;
+        wiggle = -wiggle; // Oscillate movement back and forth
 
-        // Simulate a physical mouse moving back and forth
         emit_uinput(EV_REL, REL_X, wiggle);
         emit_uinput(EV_REL, REL_Y, wiggle);
         emit_uinput(EV_SYN, SYN_REPORT, 0);
