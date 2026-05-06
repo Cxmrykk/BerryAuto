@@ -24,24 +24,8 @@ static void on_process(void* userdata)
 
     struct spa_buffer* buf = b->buffer;
     void* src_data = buf->datas[0].data;
-    bool mapped_dmabuf = false;
 
-    if (!src_data && buf->datas[0].type == SPA_DATA_DmaBuf && buf->datas[0].fd >= 0)
-    {
-        src_data = mmap(NULL, buf->datas[0].maxsize, PROT_READ, MAP_SHARED, buf->datas[0].fd, buf->datas[0].mapoffset);
-        if (src_data == MAP_FAILED)
-        {
-            LOG_E("[PipeWire] CRITICAL: DmaBuf mmap failed! " << strerror(errno));
-            src_data = nullptr;
-        }
-        else
-        {
-            mapped_dmabuf = true;
-            struct dma_buf_sync sync_start = {.flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ};
-            ioctl(buf->datas[0].fd, DMA_BUF_IOCTL_SYNC, &sync_start);
-        }
-    }
-
+    // Direct memory handling (DmaBuf is explicitly disabled now)
     if (src_data)
     {
         std::lock_guard<std::mutex> lock(enc->frame_mutex);
@@ -69,13 +53,6 @@ static void on_process(void* userdata)
             memcpy(enc->latest_frame_buffer.data(), src_data, size);
             enc->latest_stride = stride;
         }
-
-        if (mapped_dmabuf)
-        {
-            struct dma_buf_sync sync_end = {.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ};
-            ioctl(buf->datas[0].fd, DMA_BUF_IOCTL_SYNC, &sync_end);
-            munmap(src_data, buf->datas[0].maxsize);
-        }
     }
 
     pw_stream_queue_buffer(enc->pw_stream, b);
@@ -85,80 +62,72 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
 {
     VideoEncoder* enc = static_cast<VideoEncoder*>(userdata);
     if (param == NULL || id != SPA_PARAM_Format)
-    {
-        if (id == SPA_PARAM_Format)
-            LOG_I("[PipeWire] Format param cleared by server.");
         return;
-    }
 
     struct spa_video_info_raw info;
-    int parse_res = spa_format_video_raw_parse(param, &info);
-    if (parse_res < 0)
+    if (spa_format_video_raw_parse(param, &info) >= 0)
     {
-        LOG_E("[PipeWire] CRITICAL: Failed to parse raw video format from Mutter. Code: " << parse_res);
-        return;
-    }
+        LOG_I("[PipeWire] Native Format negotiated! Size: " << info.size.width << "x" << info.size.height
+                                                            << ", SPA ID: " << info.format);
 
-    LOG_I("[PipeWire] Native Format negotiated! Size: " << info.size.width << "x" << info.size.height
-                                                        << ", SPA ID: " << info.format);
-
-    {
-        std::lock_guard<std::mutex> lock(enc->frame_mutex);
-        enc->pw_w = info.size.width;
-        enc->pw_h = info.size.height;
-
-        switch (info.format)
         {
-            case SPA_VIDEO_FORMAT_RGBx:
-            case SPA_VIDEO_FORMAT_RGBA:
-                enc->pw_fmt = AV_PIX_FMT_RGB0;
-                break;
-            case SPA_VIDEO_FORMAT_BGRx:
-            case SPA_VIDEO_FORMAT_BGRA:
-                enc->pw_fmt = AV_PIX_FMT_BGR0;
-                break;
-            case SPA_VIDEO_FORMAT_xBGR:
-            case SPA_VIDEO_FORMAT_ABGR:
-                enc->pw_fmt = AV_PIX_FMT_0BGR;
-                break;
-            case SPA_VIDEO_FORMAT_xRGB:
-            case SPA_VIDEO_FORMAT_ARGB:
-                enc->pw_fmt = AV_PIX_FMT_0RGB;
-                break;
-            case SPA_VIDEO_FORMAT_RGB:
-                enc->pw_fmt = AV_PIX_FMT_RGB24;
-                break;
-            case SPA_VIDEO_FORMAT_BGR:
-                enc->pw_fmt = AV_PIX_FMT_BGR24;
-                break;
-            default:
-                enc->pw_fmt = AV_PIX_FMT_BGRA;
-                break;
+            std::lock_guard<std::mutex> lock(enc->frame_mutex);
+            enc->pw_w = info.size.width;
+            enc->pw_h = info.size.height;
+
+            switch (info.format)
+            {
+                case SPA_VIDEO_FORMAT_RGBx:
+                case SPA_VIDEO_FORMAT_RGBA:
+                    enc->pw_fmt = AV_PIX_FMT_RGB0;
+                    break;
+                case SPA_VIDEO_FORMAT_BGRx:
+                case SPA_VIDEO_FORMAT_BGRA:
+                    enc->pw_fmt = AV_PIX_FMT_BGR0;
+                    break;
+                case SPA_VIDEO_FORMAT_xBGR:
+                case SPA_VIDEO_FORMAT_ABGR:
+                    enc->pw_fmt = AV_PIX_FMT_0BGR;
+                    break;
+                case SPA_VIDEO_FORMAT_xRGB:
+                case SPA_VIDEO_FORMAT_ARGB:
+                    enc->pw_fmt = AV_PIX_FMT_0RGB;
+                    break;
+                case SPA_VIDEO_FORMAT_RGB:
+                    enc->pw_fmt = AV_PIX_FMT_RGB24;
+                    break;
+                case SPA_VIDEO_FORMAT_BGR:
+                    enc->pw_fmt = AV_PIX_FMT_BGR24;
+                    break;
+                default:
+                    enc->pw_fmt = AV_PIX_FMT_BGRA;
+                    break;
+            }
+            enc->latest_frame_buffer.clear();
         }
-        enc->latest_frame_buffer.clear();
+
+        enc->update_sws();
+
+        uint32_t stride = (info.size.width * 4 + 3) & ~3;
+        if (info.format == SPA_VIDEO_FORMAT_RGB || info.format == SPA_VIDEO_FORMAT_BGR)
+        {
+            stride = (info.size.width * 3 + 3) & ~3;
+        }
+
+        uint32_t size = stride * info.size.height;
+        uint8_t buffer[1024];
+        struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+        const struct spa_pod* params[1];
+
+        // FORCED MemFd: Prevents DmaBuf modifiers from silently breaking the stream
+        params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
+            &b, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers, SPA_PARAM_BUFFERS_buffers,
+            SPA_POD_CHOICE_RANGE_Int(4, 2, 8), SPA_PARAM_BUFFERS_blocks, SPA_POD_Int(1), SPA_PARAM_BUFFERS_size,
+            SPA_POD_Int(size), SPA_PARAM_BUFFERS_stride, SPA_POD_Int(stride), SPA_PARAM_BUFFERS_align, SPA_POD_Int(16),
+            SPA_PARAM_BUFFERS_dataType, SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr)));
+
+        pw_stream_update_params(enc->pw_stream, params, 1);
     }
-
-    enc->update_sws();
-
-    uint32_t stride = (info.size.width * 4 + 3) & ~3;
-    if (info.format == SPA_VIDEO_FORMAT_RGB || info.format == SPA_VIDEO_FORMAT_BGR)
-    {
-        stride = (info.size.width * 3 + 3) & ~3;
-    }
-
-    uint32_t size = stride * info.size.height;
-    uint8_t buffer[1024];
-    struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
-    const struct spa_pod* params[1];
-
-    params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
-        &b, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers, SPA_PARAM_BUFFERS_buffers,
-        SPA_POD_CHOICE_RANGE_Int(4, 2, 8), SPA_PARAM_BUFFERS_blocks, SPA_POD_Int(1), SPA_PARAM_BUFFERS_size,
-        SPA_POD_Int(size), SPA_PARAM_BUFFERS_stride, SPA_POD_Int(stride), SPA_PARAM_BUFFERS_align, SPA_POD_Int(16),
-        SPA_PARAM_BUFFERS_dataType,
-        SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr) | (1 << SPA_DATA_DmaBuf)));
-
-    pw_stream_update_params(enc->pw_stream, params, 1);
 }
 
 static void on_state_changed(void* userdata, enum pw_stream_state old, enum pw_stream_state state, const char* error)
@@ -183,6 +152,7 @@ static const struct pw_stream_events stream_events = []()
 
 bool VideoEncoder::init_pipewire(uint32_t node_id)
 {
+    LOG_I("[PipeWire] Connecting to Node ID: " << node_id);
     pw_loop = pw_main_loop_new(NULL);
     if (!pw_loop)
         return false;
@@ -205,19 +175,18 @@ bool VideoEncoder::init_pipewire(uint32_t node_id)
     struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
     const struct spa_pod* params[2];
 
-    // CRITICAL FIX: Forces Mutter to provide LINEAR un-tiled memory by explicitly rejecting Broadcom DRM Modifiers
     params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
         &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
         SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), SPA_FORMAT_VIDEO_format,
         SPA_POD_CHOICE_ENUM_Id(11, SPA_VIDEO_FORMAT_RGBx, SPA_VIDEO_FORMAT_RGBx, SPA_VIDEO_FORMAT_RGBA,
                                SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_xRGB,
                                SPA_VIDEO_FORMAT_ARGB, SPA_VIDEO_FORMAT_xBGR, SPA_VIDEO_FORMAT_ABGR,
-                               SPA_VIDEO_FORMAT_RGB, SPA_VIDEO_FORMAT_BGR),
-        SPA_FORMAT_VIDEO_modifier, SPA_POD_CHOICE_ENUM_Long(2, 0, 0)); // 0 = DRM_FORMAT_MOD_LINEAR
+                               SPA_VIDEO_FORMAT_RGB, SPA_VIDEO_FORMAT_BGR));
 
+    // FORCED MemFd: Strictly rejecting SPA_DATA_DmaBuf
     params[1] = (const struct spa_pod*)spa_pod_builder_add_object(
         &b, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers, SPA_PARAM_BUFFERS_dataType,
-        SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr) | (1 << SPA_DATA_DmaBuf)));
+        SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr)));
 
     int res = pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, PW_ID_ANY,
                                 (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 2);

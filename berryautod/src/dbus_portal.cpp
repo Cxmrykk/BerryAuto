@@ -10,19 +10,14 @@
 static uint32_t negotiated_node_id = 0;
 static GMainLoop* dbus_loop = nullptr;
 
-// Helper to determine the persistent path for the token
 static std::string get_token_storage_path()
 {
     const char* home_env = getenv("HOME");
     if (home_env)
-    {
         return std::string(home_env) + "/.config/berryauto_portal_token.txt";
-    }
-    // Fallback if HOME is not set for some reason
     return "/tmp/berryauto_portal_token.txt";
 }
 
-// Helper to load the saved portal token from ~/.config/
 static std::string get_portal_token()
 {
     std::string path = get_token_storage_path();
@@ -36,7 +31,6 @@ static std::string get_portal_token()
     return "";
 }
 
-// Helper to save the portal token to ~/.config/
 static void save_portal_token(const char* t)
 {
     std::string path = get_token_storage_path();
@@ -45,10 +39,6 @@ static void save_portal_token(const char* t)
     {
         f << t;
         LOG_I("[Portal] Token saved to persistent storage: " << path);
-    }
-    else
-    {
-        LOG_E("[Portal] Failed to open " << path << " for writing!");
     }
 }
 
@@ -78,7 +68,6 @@ static void on_signal_response(GDBusConnection* conn, const gchar* sender, const
 
     if (step == 3)
     {
-        // Capture the restore token from GNOME
         GVariant* token_var = g_variant_lookup_value(results, "restore_token", G_VARIANT_TYPE_STRING);
         if (token_var)
         {
@@ -98,6 +87,7 @@ static void on_signal_response(GDBusConnection* conn, const gchar* sender, const
             if (g_variant_iter_next(&iter, "(u@a{sv})", &node_id, &stream_props))
             {
                 negotiated_node_id = node_id;
+                LOG_I("[Portal] Successfully negotiated PipeWire Node ID: " << negotiated_node_id);
                 g_variant_unref(stream_props);
             }
             g_variant_unref(streams);
@@ -164,7 +154,6 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id)
     g_variant_builder_add(&b2, "{sv}", "types", g_variant_new_uint32(1)); // 1 = monitor
     g_variant_builder_add(&b2, "{sv}", "handle_token", g_variant_new_string("req2"));
 
-    // Persistence logic: Try to bypass the popup using a saved token
     g_variant_builder_add(&b2, "{sv}", "persist_mode", g_variant_new_uint32(2)); // 2 = Persist
     std::string token = get_portal_token();
     if (!token.empty())
@@ -195,6 +184,8 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id)
     GVariantBuilder b3;
     g_variant_builder_init(&b3, G_VARIANT_TYPE_VARDICT);
     g_variant_builder_add(&b3, "{sv}", "handle_token", g_variant_new_string("req3"));
+
+    LOG_I("[Portal] Finalizing Screencast Session...");
 
     GVariant* res3 = g_dbus_connection_call_sync(conn, "org.freedesktop.portal.Desktop",
                                                  "/org/freedesktop/portal/desktop", "org.freedesktop.portal.ScreenCast",
