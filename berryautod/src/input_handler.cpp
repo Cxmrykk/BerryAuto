@@ -28,6 +28,10 @@ void init_uinput()
     ioctl(uinput_fd, UI_SET_ABSBIT, ABS_X);
     ioctl(uinput_fd, UI_SET_ABSBIT, ABS_Y);
 
+    ioctl(uinput_fd, UI_SET_EVBIT, EV_REL);
+    ioctl(uinput_fd, UI_SET_RELBIT, REL_X);
+    ioctl(uinput_fd, UI_SET_RELBIT, REL_Y);
+
     ioctl(uinput_fd, UI_SET_ABSBIT, ABS_MT_SLOT);
     ioctl(uinput_fd, UI_SET_ABSBIT, ABS_MT_TRACKING_ID);
     ioctl(uinput_fd, UI_SET_ABSBIT, ABS_MT_POSITION_X);
@@ -85,7 +89,7 @@ void reset_input_state()
     }
 }
 
-// CRITICAL FIX: Simulate a screen tap to guarantee Wayland recalculates the screen and pushes a frame
+// CRITICAL FIX: Simulate a screen tap/movement to guarantee Wayland recalculates the screen and pushes a frame
 void wake_up_display()
 {
     if (uinput_fd < 0)
@@ -97,13 +101,12 @@ void wake_up_display()
         emit_uinput(EV_KEY, KEY_WAKEUP, 0);
         emit_uinput(EV_SYN, SYN_REPORT, 0);
 
-        static int wiggle = 0;
-        wiggle = (wiggle == 0) ? 1 : 0;
-        emit_uinput(EV_ABS, ABS_X, wiggle);
-        emit_uinput(EV_ABS, ABS_Y, wiggle);
-        emit_uinput(EV_KEY, BTN_TOUCH, 1);
-        emit_uinput(EV_SYN, SYN_REPORT, 0);
-        emit_uinput(EV_KEY, BTN_TOUCH, 0);
+        static int wiggle = 1;
+        wiggle = -wiggle;
+
+        // Simulate a physical mouse moving back and forth
+        emit_uinput(EV_REL, REL_X, wiggle);
+        emit_uinput(EV_REL, REL_Y, wiggle);
         emit_uinput(EV_SYN, SYN_REPORT, 0);
     }
 }
