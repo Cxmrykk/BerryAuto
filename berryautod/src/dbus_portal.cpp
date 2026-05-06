@@ -10,6 +10,10 @@
 static uint32_t negotiated_node_id = 0;
 static GMainLoop* dbus_loop = nullptr;
 
+// CRITICAL FIX: Keep the DBus connection alive globally.
+// If this connection drops, GNOME immediately destroys the PipeWire Node!
+static GDBusConnection* portal_conn = nullptr;
+
 static std::string get_token_storage_path()
 {
     const char* home_env = getenv("HOME");
@@ -101,16 +105,19 @@ static void on_signal_response(GDBusConnection* conn, const gchar* sender, const
 
 bool negotiate_wayland_screencast(uint32_t& out_node_id)
 {
-    GError* error = nullptr;
-    GDBusConnection* conn = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, &error);
-    if (!conn)
+    if (!portal_conn)
     {
-        LOG_E("[Portal] Failed to connect to D-Bus Session: " << error->message);
-        g_error_free(error);
-        return false;
+        GError* error = nullptr;
+        portal_conn = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, &error);
+        if (!portal_conn)
+        {
+            LOG_E("[Portal] Failed to connect to D-Bus Session: " << error->message);
+            g_error_free(error);
+            return false;
+        }
     }
 
-    std::string sender = g_dbus_connection_get_unique_name(conn);
+    std::string sender = g_dbus_connection_get_unique_name(portal_conn);
     sender.erase(std::remove(sender.begin(), sender.end(), ':'), sender.end());
     std::replace(sender.begin(), sender.end(), '.', '_');
 
@@ -120,19 +127,21 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id)
     dbus_loop = g_main_loop_new(nullptr, FALSE);
 
     // STEP 1: CreateSession
-    guint sub1 =
-        g_dbus_connection_signal_subscribe(conn, "org.freedesktop.portal.Desktop", "org.freedesktop.portal.Request",
-                                           "Response", (request_path + "/req1").c_str(), nullptr,
-                                           G_DBUS_SIGNAL_FLAGS_NONE, on_signal_response, GINT_TO_POINTER(1), nullptr);
+    guint sub1 = g_dbus_connection_signal_subscribe(portal_conn, "org.freedesktop.portal.Desktop",
+                                                    "org.freedesktop.portal.Request", "Response",
+                                                    (request_path + "/req1").c_str(), nullptr, G_DBUS_SIGNAL_FLAGS_NONE,
+                                                    on_signal_response, GINT_TO_POINTER(1), nullptr);
 
     GVariantBuilder b1;
     g_variant_builder_init(&b1, G_VARIANT_TYPE_VARDICT);
     g_variant_builder_add(&b1, "{sv}", "session_handle_token", g_variant_new_string("berryauto"));
     g_variant_builder_add(&b1, "{sv}", "handle_token", g_variant_new_string("req1"));
 
-    GVariant* res1 = g_dbus_connection_call_sync(
-        conn, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop", "org.freedesktop.portal.ScreenCast",
-        "CreateSession", g_variant_new("(a{sv})", &b1), nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, &error);
+    GError* error = nullptr;
+    GVariant* res1 =
+        g_dbus_connection_call_sync(portal_conn, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
+                                    "org.freedesktop.portal.ScreenCast", "CreateSession", g_variant_new("(a{sv})", &b1),
+                                    nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, &error);
     if (error)
     {
         LOG_E("[Portal] CreateSession failed: " << error->message);
@@ -140,13 +149,13 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id)
     }
     g_variant_unref(res1);
     g_main_loop_run(dbus_loop);
-    g_dbus_connection_signal_unsubscribe(conn, sub1);
+    g_dbus_connection_signal_unsubscribe(portal_conn, sub1);
 
     // STEP 2: SelectSources
-    guint sub2 =
-        g_dbus_connection_signal_subscribe(conn, "org.freedesktop.portal.Desktop", "org.freedesktop.portal.Request",
-                                           "Response", (request_path + "/req2").c_str(), nullptr,
-                                           G_DBUS_SIGNAL_FLAGS_NONE, on_signal_response, GINT_TO_POINTER(2), nullptr);
+    guint sub2 = g_dbus_connection_signal_subscribe(portal_conn, "org.freedesktop.portal.Desktop",
+                                                    "org.freedesktop.portal.Request", "Response",
+                                                    (request_path + "/req2").c_str(), nullptr, G_DBUS_SIGNAL_FLAGS_NONE,
+                                                    on_signal_response, GINT_TO_POINTER(2), nullptr);
 
     GVariantBuilder b2;
     g_variant_builder_init(&b2, G_VARIANT_TYPE_VARDICT);
@@ -154,7 +163,7 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id)
     g_variant_builder_add(&b2, "{sv}", "types", g_variant_new_uint32(1)); // 1 = monitor
     g_variant_builder_add(&b2, "{sv}", "handle_token", g_variant_new_string("req2"));
 
-    g_variant_builder_add(&b2, "{sv}", "persist_mode", g_variant_new_uint32(2)); // 2 = Persist
+    g_variant_builder_add(&b2, "{sv}", "persist_mode", g_variant_new_uint32(2));
     std::string token = get_portal_token();
     if (!token.empty())
     {
@@ -162,7 +171,7 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id)
         g_variant_builder_add(&b2, "{sv}", "restore_token", g_variant_new_string(token.c_str()));
     }
 
-    GVariant* res2 = g_dbus_connection_call_sync(conn, "org.freedesktop.portal.Desktop",
+    GVariant* res2 = g_dbus_connection_call_sync(portal_conn, "org.freedesktop.portal.Desktop",
                                                  "/org/freedesktop/portal/desktop", "org.freedesktop.portal.ScreenCast",
                                                  "SelectSources", g_variant_new("(oa{sv})", session_path.c_str(), &b2),
                                                  nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, &error);
@@ -173,13 +182,13 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id)
     }
     g_variant_unref(res2);
     g_main_loop_run(dbus_loop);
-    g_dbus_connection_signal_unsubscribe(conn, sub2);
+    g_dbus_connection_signal_unsubscribe(portal_conn, sub2);
 
     // STEP 3: Start
-    guint sub3 =
-        g_dbus_connection_signal_subscribe(conn, "org.freedesktop.portal.Desktop", "org.freedesktop.portal.Request",
-                                           "Response", (request_path + "/req3").c_str(), nullptr,
-                                           G_DBUS_SIGNAL_FLAGS_NONE, on_signal_response, GINT_TO_POINTER(3), nullptr);
+    guint sub3 = g_dbus_connection_signal_subscribe(portal_conn, "org.freedesktop.portal.Desktop",
+                                                    "org.freedesktop.portal.Request", "Response",
+                                                    (request_path + "/req3").c_str(), nullptr, G_DBUS_SIGNAL_FLAGS_NONE,
+                                                    on_signal_response, GINT_TO_POINTER(3), nullptr);
 
     GVariantBuilder b3;
     g_variant_builder_init(&b3, G_VARIANT_TYPE_VARDICT);
@@ -187,7 +196,7 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id)
 
     LOG_I("[Portal] Finalizing Screencast Session...");
 
-    GVariant* res3 = g_dbus_connection_call_sync(conn, "org.freedesktop.portal.Desktop",
+    GVariant* res3 = g_dbus_connection_call_sync(portal_conn, "org.freedesktop.portal.Desktop",
                                                  "/org/freedesktop/portal/desktop", "org.freedesktop.portal.ScreenCast",
                                                  "Start", g_variant_new("(osa{sv})", session_path.c_str(), "", &b3),
                                                  nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, &error);
@@ -198,10 +207,11 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id)
     }
     g_variant_unref(res3);
     g_main_loop_run(dbus_loop);
-    g_dbus_connection_signal_unsubscribe(conn, sub3);
+    g_dbus_connection_signal_unsubscribe(portal_conn, sub3);
 
     g_main_loop_unref(dbus_loop);
-    g_object_unref(conn);
+
+    // WE NO LONGER CALL g_object_unref(portal_conn) HERE!
 
     if (negotiated_node_id > 0)
     {
