@@ -48,7 +48,7 @@ sudo apt install build-essential cmake pkg-config \
     libssl-dev libprotobuf-dev protobuf-compiler \
     libavcodec-dev libavutil-dev libswscale-dev \
     libx11-dev libxext-dev libwayland-dev wayland-protocols \
-    libpipewire-0.3-dev libglib2.0-dev
+    libpipewire-0.3-dev libglib2.0-dev wlr-randr \
 ```
 
 ## Building
@@ -56,7 +56,9 @@ sudo apt install build-essential cmake pkg-config \
 Clone the repository and build the daemon:
 
 ```sh
-cd berryautod
+cd ~
+git clone https://github.com/Cxmrykk/BerryAuto.git
+cd BerryAuto/berryautod
 mkdir build
 cd build
 cmake ..
@@ -69,8 +71,14 @@ The daemon relies on helper scripts to configure the USB gadget and handle displ
 
 ```sh
 # From the project root
-sudo cp scripts/setup_opengal_gadget.sh /usr/local/bin/
-sudo cp scripts/resize_desktop.sh /usr/local/bin/
+cd ~/BerryAuto
+sudo ln -sf "$(pwd)/scripts/setup_opengal_gadget.sh" /usr/local/bin/
+sudo ln -sf "$(pwd)/scripts/resize_desktop.sh" /usr/local/bin/
+```
+
+Make sure that the helper scripts are executable:
+
+```sh
 sudo chmod +x /usr/local/bin/setup_opengal_gadget.sh
 sudo chmod +x /usr/local/bin/resize_desktop.sh
 ```
@@ -78,7 +86,7 @@ sudo chmod +x /usr/local/bin/resize_desktop.sh
 Ensure your user is in the `video` group to access hardware encoders:
 
 ```sh
-sudo usermod -aG video $USER
+sudo usermod -aG video $(whoami)
 ```
 
 ## Running BerryAuto

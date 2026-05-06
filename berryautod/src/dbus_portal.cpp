@@ -1,12 +1,34 @@
 #include "dbus_portal.hpp"
 #include "globals.hpp"
 #include <algorithm>
+#include <fstream>
 #include <gio/gio.h>
 #include <iostream>
 #include <string>
 
 static uint32_t negotiated_node_id = 0;
 static GMainLoop* dbus_loop = nullptr;
+
+// Helper to load the saved portal token
+static std::string get_portal_token()
+{
+    std::ifstream f("/tmp/berryauto_portal_token.txt");
+    if (f.is_open())
+    {
+        std::string t;
+        std::getline(f, t);
+        return t;
+    }
+    return "";
+}
+
+// Helper to save the portal token
+static void save_portal_token(const char* t)
+{
+    std::ofstream f("/tmp/berryauto_portal_token.txt", std::ios::trunc);
+    if (f.is_open())
+        f << t;
+}
 
 static void on_signal_response(GDBusConnection* conn, const gchar* sender, const gchar* path, const gchar* iface,
                                const gchar* signal, GVariant* params, gpointer user_data)
@@ -24,8 +46,8 @@ static void on_signal_response(GDBusConnection* conn, const gchar* sender, const
 
     if (response != 0)
     {
-        LOG_E("[Portal] Request failed or cancelled (response=" << response
-                                                                << "). Ensure chooser_type=none is set in config!");
+        LOG_E("[Portal] Request failed or cancelled (response="
+              << response << "). Ensure chooser_type=none is set in config or click 'Share'!");
         if (results)
             g_variant_unref(results);
         g_main_loop_quit(dbus_loop);
@@ -34,6 +56,18 @@ static void on_signal_response(GDBusConnection* conn, const gchar* sender, const
 
     if (step == 3)
     {
+        // ----------------------------------------------------------------------
+        // NEW: Check for the restore token from GNOME and save it to disk
+        // ----------------------------------------------------------------------
+        GVariant* token_var = g_variant_lookup_value(results, "restore_token", G_VARIANT_TYPE_STRING);
+        if (token_var)
+        {
+            const char* t_str = g_variant_get_string(token_var, nullptr);
+            LOG_I("[Portal] Saved Restore Token for future auto-connects: " << t_str);
+            save_portal_token(t_str);
+            g_variant_unref(token_var);
+        }
+
         GVariant* streams = g_variant_lookup_value(results, "streams", G_VARIANT_TYPE("a(ua{sv})"));
         if (streams)
         {
@@ -109,6 +143,17 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id)
     g_variant_builder_add(&b2, "{sv}", "multiple", g_variant_new_boolean(FALSE));
     g_variant_builder_add(&b2, "{sv}", "types", g_variant_new_uint32(1)); // 1 = monitor
     g_variant_builder_add(&b2, "{sv}", "handle_token", g_variant_new_string("req2"));
+
+    // ----------------------------------------------------------------------
+    // NEW: Request Persistence and inject the token if we have it
+    // ----------------------------------------------------------------------
+    g_variant_builder_add(&b2, "{sv}", "persist_mode", g_variant_new_uint32(2)); // 2 = Persist indefinitely
+    std::string token = get_portal_token();
+    if (!token.empty())
+    {
+        LOG_I("[Portal] Injecting saved restore_token to bypass permission prompt...");
+        g_variant_builder_add(&b2, "{sv}", "restore_token", g_variant_new_string(token.c_str()));
+    }
 
     GVariant* res2 = g_dbus_connection_call_sync(conn, "org.freedesktop.portal.Desktop",
                                                  "/org/freedesktop/portal/desktop", "org.freedesktop.portal.ScreenCast",
