@@ -1,6 +1,7 @@
 #include "dbus_portal.hpp"
 #include "globals.hpp"
 #include <algorithm>
+#include <cstdlib>
 #include <fstream>
 #include <gio/gio.h>
 #include <iostream>
@@ -9,10 +10,23 @@
 static uint32_t negotiated_node_id = 0;
 static GMainLoop* dbus_loop = nullptr;
 
-// Helper to load the saved portal token
+// Helper to determine the persistent path for the token
+static std::string get_token_storage_path()
+{
+    const char* home_env = getenv("HOME");
+    if (home_env)
+    {
+        return std::string(home_env) + "/.config/berryauto_portal_token.txt";
+    }
+    // Fallback if HOME is not set for some reason
+    return "/tmp/berryauto_portal_token.txt";
+}
+
+// Helper to load the saved portal token from ~/.config/
 static std::string get_portal_token()
 {
-    std::ifstream f("/tmp/berryauto_portal_token.txt");
+    std::string path = get_token_storage_path();
+    std::ifstream f(path);
     if (f.is_open())
     {
         std::string t;
@@ -22,12 +36,20 @@ static std::string get_portal_token()
     return "";
 }
 
-// Helper to save the portal token
+// Helper to save the portal token to ~/.config/
 static void save_portal_token(const char* t)
 {
-    std::ofstream f("/tmp/berryauto_portal_token.txt", std::ios::trunc);
+    std::string path = get_token_storage_path();
+    std::ofstream f(path, std::ios::trunc);
     if (f.is_open())
+    {
         f << t;
+        LOG_I("[Portal] Token saved to persistent storage: " << path);
+    }
+    else
+    {
+        LOG_E("[Portal] Failed to open " << path << " for writing!");
+    }
 }
 
 static void on_signal_response(GDBusConnection* conn, const gchar* sender, const gchar* path, const gchar* iface,
@@ -47,7 +69,7 @@ static void on_signal_response(GDBusConnection* conn, const gchar* sender, const
     if (response != 0)
     {
         LOG_E("[Portal] Request failed or cancelled (response="
-              << response << "). Ensure chooser_type=none is set in config or click 'Share'!");
+              << response << "). If this is the first run, you MUST click 'Share' on the Pi's screen!");
         if (results)
             g_variant_unref(results);
         g_main_loop_quit(dbus_loop);
@@ -56,14 +78,12 @@ static void on_signal_response(GDBusConnection* conn, const gchar* sender, const
 
     if (step == 3)
     {
-        // ----------------------------------------------------------------------
-        // NEW: Check for the restore token from GNOME and save it to disk
-        // ----------------------------------------------------------------------
+        // Capture the restore token from GNOME
         GVariant* token_var = g_variant_lookup_value(results, "restore_token", G_VARIANT_TYPE_STRING);
         if (token_var)
         {
             const char* t_str = g_variant_get_string(token_var, nullptr);
-            LOG_I("[Portal] Saved Restore Token for future auto-connects: " << t_str);
+            LOG_I("[Portal] Received Restore Token from GNOME: " << t_str);
             save_portal_token(t_str);
             g_variant_unref(token_var);
         }
@@ -144,14 +164,12 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id)
     g_variant_builder_add(&b2, "{sv}", "types", g_variant_new_uint32(1)); // 1 = monitor
     g_variant_builder_add(&b2, "{sv}", "handle_token", g_variant_new_string("req2"));
 
-    // ----------------------------------------------------------------------
-    // NEW: Request Persistence and inject the token if we have it
-    // ----------------------------------------------------------------------
-    g_variant_builder_add(&b2, "{sv}", "persist_mode", g_variant_new_uint32(2)); // 2 = Persist indefinitely
+    // Persistence logic: Try to bypass the popup using a saved token
+    g_variant_builder_add(&b2, "{sv}", "persist_mode", g_variant_new_uint32(2)); // 2 = Persist
     std::string token = get_portal_token();
     if (!token.empty())
     {
-        LOG_I("[Portal] Injecting saved restore_token to bypass permission prompt...");
+        LOG_I("[Portal] Found saved token. Bypassing permission prompt...");
         g_variant_builder_add(&b2, "{sv}", "restore_token", g_variant_new_string(token.c_str()));
     }
 
