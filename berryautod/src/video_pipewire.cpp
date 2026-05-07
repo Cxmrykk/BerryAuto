@@ -187,7 +187,7 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
                                SPA_VIDEO_FORMAT_RGB, SPA_VIDEO_FORMAT_BGR, SPA_VIDEO_FORMAT_NV12, SPA_VIDEO_FORMAT_YUY2,
                                SPA_VIDEO_FORMAT_I420, SPA_VIDEO_FORMAT_YV12));
 
-    int res = pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, node_id,
+    int res = pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, PW_ID_ANY,
                                 (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 1);
 
     return res >= 0;
