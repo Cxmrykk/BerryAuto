@@ -7,6 +7,7 @@
 #include <linux/dma-buf.h>
 #include <spa/param/buffers.h>
 #include <spa/param/video/format-utils.h>
+#include <string>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -68,18 +69,12 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
     }
 
     if (id == SPA_PARAM_EnumFormat)
-    {
-        // EnumFormat is expected during initial handshake probing.
         return;
-    }
 
     if (id != SPA_PARAM_Format)
-    {
-        LOG_I("[PipeWire] Ignoring unhandled param change ID: " << id);
         return;
-    }
 
-    LOG_I("[PipeWire] on_param_changed fired with SPA_PARAM_Format! Attempting to parse...");
+    LOG_I("[PipeWire] on_param_changed fired with SPA_PARAM_Format! Parsing Layout...");
 
     struct spa_video_info_raw info;
     int parse_res = spa_format_video_raw_parse(param, &info);
@@ -146,8 +141,6 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
     }
     else
     {
-        // If Mutter forces DMA-BUF modifiers, spa_format_video_raw_parse will return < 0.
-        // This explicitly catches silent format failures that would leave the stream permanently paused.
         LOG_E("[PipeWire] CRITICAL: spa_format_video_raw_parse failed with code "
               << parse_res << ". Format contains unsupported modifiers!");
     }
@@ -191,9 +184,15 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
     if (!pw_core)
         return false;
 
-    pw_stream = pw_stream_new(pw_core, "OpenGAL Capture",
-                              pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture",
-                                                PW_KEY_MEDIA_ROLE, "Screen", NULL));
+    // Convert node_id to a string so it survives passing into the properties map natively
+    std::string node_id_str = std::to_string(node_id);
+
+    // CRITICAL: We MUST explicitly tell WirePlumber the node target object to evaluate our linking permissions inside
+    // the sandbox.
+    pw_stream =
+        pw_stream_new(pw_core, "OpenGAL Capture",
+                      pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture", PW_KEY_MEDIA_ROLE,
+                                        "Screen", PW_KEY_TARGET_OBJECT, node_id_str.c_str(), NULL));
 
     if (!pw_stream)
         return false;
@@ -206,16 +205,28 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
 
     const struct spa_pod* params[1];
 
-    // Explicitly omitting SPA_FORMAT_VIDEO_size and SPA_FORMAT_VIDEO_framerate.
-    // This allows Mutter complete control over resolution and framing negotiation, guaranteeing intersection.
+    struct spa_rectangle def_rect =
+        SPA_RECTANGLE(static_cast<uint32_t>(target_width), static_cast<uint32_t>(target_height));
+    struct spa_rectangle min_rect = SPA_RECTANGLE(1, 1);
+    struct spa_rectangle max_rect = SPA_RECTANGLE(16384, 16384);
+
+    struct spa_fraction def_frac = SPA_FRACTION(static_cast<uint32_t>(target_fps), 1);
+    struct spa_fraction min_frac = SPA_FRACTION(0, 1);
+    struct spa_fraction max_frac = SPA_FRACTION(1000, 1);
+
+    // Provide complete EnumFormat bounds so Mutter properly falls back from DMA-BUFs to native memory buffers
     params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
         &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
         SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), SPA_FORMAT_VIDEO_format,
-        SPA_POD_CHOICE_ENUM_Id(5, SPA_VIDEO_FORMAT_RGBx, SPA_VIDEO_FORMAT_RGBx, SPA_VIDEO_FORMAT_BGRx,
-                               SPA_VIDEO_FORMAT_RGBA, SPA_VIDEO_FORMAT_BGRA));
+        SPA_POD_CHOICE_ENUM_Id(7, SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_RGBA,
+                               SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_RGBx, SPA_VIDEO_FORMAT_BGR,
+                               SPA_VIDEO_FORMAT_RGB),
+        SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(&def_rect, &min_rect, &max_rect),
+        SPA_FORMAT_VIDEO_framerate, SPA_POD_CHOICE_RANGE_Fraction(&def_frac, &min_frac, &max_frac));
 
-    // Connect to the specific Node ID.
-    int res = pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, node_id,
+    // CRITICAL: We MUST request PW_ID_ANY as the connection point to allow WirePlumber to auto-route the portal node
+    // seamlessly.
+    int res = pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, PW_ID_ANY,
                                 (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 1);
 
     return res >= 0;
