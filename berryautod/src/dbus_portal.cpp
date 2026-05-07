@@ -7,6 +7,7 @@
 #include <gio/gunixfdlist.h> // Required to extract the file descriptor
 #include <iostream>
 #include <string>
+#include <sys/stat.h>
 
 static uint32_t negotiated_node_id = 0;
 static GDBusConnection* portal_conn = nullptr;
@@ -17,6 +18,29 @@ struct PortalStepState
     bool completed;
     uint32_t response_code;
 };
+
+// CRITICAL FIX: Generates a dummy .desktop file to anchor the App ID for token persistence
+static void ensure_desktop_file()
+{
+    const char* home_env = getenv("HOME");
+    if (!home_env)
+        return;
+    std::string dir = std::string(home_env) + "/.local/share/applications";
+    mkdir(dir.c_str(), 0755);
+
+    std::string path = dir + "/com.berryauto.screencast.desktop";
+    std::ifstream check(path);
+    if (!check.is_open())
+    {
+        std::ofstream f(path);
+        f << "[Desktop Entry]\n"
+             "Name=BerryAuto\n"
+             "Exec=false\n"
+             "Type=Application\n"
+             "NoDisplay=true\n";
+        LOG_I("[Portal] Created persistent desktop file for App-ID anchoring.");
+    }
+}
 
 static std::string get_token_storage_path()
 {
@@ -54,7 +78,7 @@ static gboolean on_portal_timeout(gpointer user_data)
 {
     PortalStepState* state = static_cast<PortalStepState*>(user_data);
     LOG_E("[Portal] CRITICAL: D-Bus request timed out!");
-    LOG_E("[Portal] GNOME likely rejected the token and is waiting for a mouse click on the Pi!");
+    LOG_E("[Portal] GNOME rejected the token and is waiting for a mouse click on the Pi!");
     state->response_code = 999;
     state->completed = true;
     if (g_main_loop_is_running(state->loop))
@@ -122,6 +146,9 @@ static void on_signal_response(GDBusConnection* conn, const gchar* sender, const
 
 bool negotiate_wayland_screencast(uint32_t& out_node_id, int& out_fd)
 {
+    // 1. Ensure the desktop file exists so xdg-desktop-portal binds the App ID
+    ensure_desktop_file();
+
     if (!portal_conn)
     {
         GError* error = nullptr;
@@ -132,8 +159,17 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id, int& out_fd)
             g_error_free(error);
             return false;
         }
+
+        // 2. Claim the well-known D-Bus name to anchor the application identity
+        GVariant* name_res = g_dbus_connection_call_sync(portal_conn, "org.freedesktop.DBus", "/org/freedesktop/DBus",
+                                                         "org.freedesktop.DBus", "RequestName",
+                                                         g_variant_new("(su)", "com.berryauto.screencast", 0), nullptr,
+                                                         G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr);
+        if (name_res)
+            g_variant_unref(name_res);
     }
 
+    // 3. Compute sender path
     std::string sender = g_dbus_connection_get_unique_name(portal_conn);
     sender.erase(std::remove(sender.begin(), sender.end(), ':'), sender.end());
     std::replace(sender.begin(), sender.end(), '.', '_');
@@ -211,7 +247,6 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id, int& out_fd)
         g_variant_builder_add(&b2, "{sv}", "restore_token", g_variant_new_string(token.c_str()));
     }
 
-    // High timeout for Step 2 incase the prompt actually pops up and requires interaction
     if (!run_portal_step("SelectSources", "req2", g_variant_new("(oa{sv})", session_path.c_str(), &b2), 60))
         return false;
 
@@ -220,7 +255,7 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id, int& out_fd)
     g_variant_builder_init(&b3, G_VARIANT_TYPE_VARDICT);
     g_variant_builder_add(&b3, "{sv}", "handle_token", g_variant_new_string("req3"));
 
-    if (!run_portal_step("Start", "req3", g_variant_new("(osa{sv})", session_path.c_str(), "", &b3), 15))
+    if (!run_portal_step("Start", "req3", g_variant_new("(osa{sv})", session_path.c_str(), "", &b3), 20))
         return false;
 
     // STEP 4: Extract Node & Auth FD
