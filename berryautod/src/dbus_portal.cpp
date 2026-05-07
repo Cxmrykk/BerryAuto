@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <gio/gio.h>
+#include <gio/gunixfdlist.h> // Required to extract the file descriptor
 #include <iostream>
 #include <string>
 
@@ -103,7 +104,7 @@ static void on_signal_response(GDBusConnection* conn, const gchar* sender, const
     g_main_loop_quit(dbus_loop);
 }
 
-bool negotiate_wayland_screencast(uint32_t& out_node_id)
+bool negotiate_wayland_screencast(uint32_t& out_node_id, int& out_fd)
 {
     if (!portal_conn)
     {
@@ -215,6 +216,35 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id)
 
     if (negotiated_node_id > 0)
     {
+        LOG_I("[Portal] Extracting authenticated PipeWire FD...");
+
+        GVariantBuilder b_fd;
+        g_variant_builder_init(&b_fd, G_VARIANT_TYPE_VARDICT);
+
+        GUnixFDList* fd_list = nullptr;
+        GError* fd_error = nullptr;
+        GVariant* res_fd = g_dbus_connection_call_with_unix_fd_list_sync(
+            portal_conn, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.ScreenCast", "OpenPipeWireRemote",
+            g_variant_new("(oa{sv})", session_path.c_str(), &b_fd), G_VARIANT_TYPE("(h)"), G_DBUS_CALL_FLAGS_NONE, -1,
+            nullptr, &fd_list, nullptr, &fd_error);
+
+        if (fd_error)
+        {
+            LOG_E("[Portal] OpenPipeWireRemote failed: " << fd_error->message);
+            g_error_free(fd_error);
+            return false;
+        }
+
+        if (res_fd && fd_list)
+        {
+            int32_t handle = -1;
+            g_variant_get(res_fd, "(h)", &handle);
+            out_fd = g_unix_fd_list_get(fd_list, handle, nullptr);
+            g_object_unref(fd_list);
+            g_variant_unref(res_fd);
+        }
+
         out_node_id = negotiated_node_id;
         return true;
     }
