@@ -81,7 +81,7 @@ private:
     // Backend Execution Loops
     void run_x11_loop();
     void run_wlr_loop();
-    void run_pipewire_loop(uint32_t node_id, int pw_fd);
+    void run_pipewire_loop(uint32_t node_id);
 
     // --- X11 ---
     Display* dpy = nullptr;
@@ -98,7 +98,7 @@ private:
     void cleanup_wlr_registry();
 
     // --- PipeWire ---
-    bool init_pipewire(uint32_t node_id, int pw_fd);
+    bool init_pipewire(uint32_t node_id);
     void cleanup_pipewire();
 
     // --- FFmpeg ---

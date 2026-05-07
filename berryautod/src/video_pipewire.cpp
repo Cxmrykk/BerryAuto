@@ -146,21 +146,15 @@ static const struct pw_stream_events stream_events = []()
     return ev;
 }();
 
-bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
+bool VideoEncoder::init_pipewire(uint32_t node_id)
 {
-    LOG_I("[PipeWire] Connecting to Node ID: " << node_id << " with FD: " << pw_fd);
+    LOG_I("[PipeWire] Connecting to Node ID: " << node_id);
     pw_loop = pw_main_loop_new(NULL);
     if (!pw_loop)
         return false;
 
     pw_ctx = pw_context_new(pw_main_loop_get_loop(pw_loop), NULL, 0);
-
-    // Connect to GNOME's isolated PipeWire session utilizing the extracted FD
-    if (pw_fd >= 0)
-        pw_core = pw_context_connect_fd(pw_ctx, pw_fd, NULL, 0);
-    else
-        pw_core = pw_context_connect(pw_ctx, NULL, 0);
-
+    pw_core = pw_context_connect(pw_ctx, NULL, 0);
     if (!pw_core)
         return false;
 
@@ -174,21 +168,24 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
 
     alignas(8) uint8_t buffer[2048];
     struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
-
-    // We only pass 1 Parameter (Format) during connection. Buffer constraints are sent later in `on_param_changed`.
-    const struct spa_pod* params[1];
+    const struct spa_pod* params[2];
 
     params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
         &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
         SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), SPA_FORMAT_VIDEO_format,
-        SPA_POD_CHOICE_ENUM_Id(15, SPA_VIDEO_FORMAT_RGBx, SPA_VIDEO_FORMAT_RGBx, SPA_VIDEO_FORMAT_RGBA,
-                               SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_xRGB,
-                               SPA_VIDEO_FORMAT_ARGB, SPA_VIDEO_FORMAT_xBGR, SPA_VIDEO_FORMAT_ABGR,
-                               SPA_VIDEO_FORMAT_RGB, SPA_VIDEO_FORMAT_BGR, SPA_VIDEO_FORMAT_NV12, SPA_VIDEO_FORMAT_YUY2,
-                               SPA_VIDEO_FORMAT_I420, SPA_VIDEO_FORMAT_YV12));
+        SPA_POD_CHOICE_ENUM_Id(14, SPA_VIDEO_FORMAT_RGBx, SPA_VIDEO_FORMAT_RGBA, SPA_VIDEO_FORMAT_BGRx,
+                               SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_xRGB, SPA_VIDEO_FORMAT_ARGB,
+                               SPA_VIDEO_FORMAT_xBGR, SPA_VIDEO_FORMAT_ABGR, SPA_VIDEO_FORMAT_RGB, SPA_VIDEO_FORMAT_BGR,
+                               SPA_VIDEO_FORMAT_NV12, SPA_VIDEO_FORMAT_YUY2, SPA_VIDEO_FORMAT_I420,
+                               SPA_VIDEO_FORMAT_YV12));
+
+    // STRICTLY force MemFd linear mapping to avoid Broadcom tiling bugs
+    params[1] = (const struct spa_pod*)spa_pod_builder_add_object(
+        &b, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers, SPA_PARAM_BUFFERS_dataType,
+        SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr)));
 
     int res = pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, PW_ID_ANY,
-                                (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 1);
+                                (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 2);
 
     return res >= 0;
 }
@@ -209,10 +206,10 @@ void VideoEncoder::cleanup_pipewire()
     pw_loop = nullptr;
 }
 
-void VideoEncoder::run_pipewire_loop(uint32_t node_id, int pw_fd)
+void VideoEncoder::run_pipewire_loop(uint32_t node_id)
 {
     pw_init(NULL, NULL);
-    if (!init_pipewire(node_id, pw_fd))
+    if (!init_pipewire(node_id))
     {
         pw_deinit();
         return;

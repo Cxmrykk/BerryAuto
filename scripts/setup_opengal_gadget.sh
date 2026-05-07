@@ -1,16 +1,6 @@
 #!/bin/bash
 modprobe libcomposite
 
-# Unbind any existing configfs gadgets created by the OS
-for g in /sys/kernel/config/usb_gadget/*; do
-    if [ -d "$g" ]; then
-        echo "" > "$g/UDC" 2>/dev/null || true
-    fi
-done
-
-# Remove legacy kernel gadgets that occupy the UDC directly
-rmmod g_serial g_ether g_mass_storage g_multi 2>/dev/null || true
-
 REAL_USER=${SUDO_USER:-$USER}
 USER_UID=$(id -u "$REAL_USER")
 USER_GID=$(id -g "$REAL_USER")

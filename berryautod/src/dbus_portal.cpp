@@ -4,19 +4,15 @@
 #include <cstdlib>
 #include <fstream>
 #include <gio/gio.h>
-#include <gio/gunixfdlist.h>
 #include <iostream>
 #include <string>
 
 static uint32_t negotiated_node_id = 0;
-static GDBusConnection* portal_conn = nullptr;
+static GMainLoop* dbus_loop = nullptr;
 
-struct PortalStepState
-{
-    GMainLoop* loop;
-    bool completed;
-    uint32_t response_code;
-};
+// CRITICAL FIX: Keep the DBus connection alive globally.
+// If this connection drops, GNOME immediately destroys the PipeWire Node!
+static GDBusConnection* portal_conn = nullptr;
 
 static std::string get_token_storage_path()
 {
@@ -50,16 +46,6 @@ static void save_portal_token(const char* t)
     }
 }
 
-static gboolean on_portal_timeout(gpointer user_data)
-{
-    PortalStepState* state = static_cast<PortalStepState*>(user_data);
-    LOG_E("[Portal] CRITICAL: D-Bus request timed out! GNOME failed to respond.");
-    state->response_code = 999; // Custom timeout code
-    state->completed = true;
-    g_main_loop_quit(state->loop);
-    return G_SOURCE_REMOVE;
-}
-
 static void on_signal_response(GDBusConnection* conn, const gchar* sender, const gchar* path, const gchar* iface,
                                const gchar* signal, GVariant* params, gpointer user_data)
 {
@@ -68,28 +54,29 @@ static void on_signal_response(GDBusConnection* conn, const gchar* sender, const
     (void)path;
     (void)iface;
     (void)signal;
-
-    PortalStepState* state = static_cast<PortalStepState*>(user_data);
+    int step = GPOINTER_TO_INT(user_data);
     uint32_t response = 0;
     GVariant* results = nullptr;
 
     g_variant_get(params, "(u@a{sv})", &response, &results);
-    state->response_code = response;
-    state->completed = true;
-
-    LOG_I("[Portal] Portal Signal Received! Response Code: " << response);
 
     if (response != 0)
     {
-        LOG_E("[Portal] Request failed or cancelled by Desktop Environment.");
+        LOG_E("[Portal] Request failed or cancelled (response="
+              << response << "). If this is the first run, you MUST click 'Share' on the Pi's screen!");
+        if (results)
+            g_variant_unref(results);
+        g_main_loop_quit(dbus_loop);
+        return;
     }
-    else
+
+    if (step == 3)
     {
         GVariant* token_var = g_variant_lookup_value(results, "restore_token", G_VARIANT_TYPE_STRING);
         if (token_var)
         {
             const char* t_str = g_variant_get_string(token_var, nullptr);
-            LOG_I("[Portal] Received valid Restore Token from GNOME: " << t_str);
+            LOG_I("[Portal] Received Restore Token from GNOME: " << t_str);
             save_portal_token(t_str);
             g_variant_unref(token_var);
         }
@@ -113,11 +100,10 @@ static void on_signal_response(GDBusConnection* conn, const gchar* sender, const
 
     if (results)
         g_variant_unref(results);
-
-    g_main_loop_quit(state->loop);
+    g_main_loop_quit(dbus_loop);
 }
 
-bool negotiate_wayland_screencast(uint32_t& out_node_id, int& out_fd)
+bool negotiate_wayland_screencast(uint32_t& out_node_id)
 {
     if (!portal_conn)
     {
@@ -138,75 +124,46 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id, int& out_fd)
     std::string session_path = "/org/freedesktop/portal/desktop/session/" + sender + "/berryauto";
     std::string request_path = "/org/freedesktop/portal/desktop/request/" + sender;
 
-    // Secure, thread-isolated helper to execute a DBus call and wait for its signal safely
-    auto run_portal_step = [&](const std::string& method, const std::string& req_token, GVariant* args,
-                               int timeout_sec) -> bool
-    {
-        GMainContext* ctx = g_main_context_new();
-        g_main_context_push_thread_default(ctx);
-        GMainLoop* loop = g_main_loop_new(ctx, FALSE);
-
-        PortalStepState state = {loop, false, 0};
-
-        guint sub = g_dbus_connection_signal_subscribe(portal_conn, "org.freedesktop.portal.Desktop",
-                                                       "org.freedesktop.portal.Request", "Response",
-                                                       (request_path + "/" + req_token).c_str(), nullptr,
-                                                       G_DBUS_SIGNAL_FLAGS_NONE, on_signal_response, &state, nullptr);
-
-        GError* error = nullptr;
-        GVariant* res =
-            g_dbus_connection_call_sync(portal_conn, "org.freedesktop.portal.Desktop",
-                                        "/org/freedesktop/portal/desktop", "org.freedesktop.portal.ScreenCast",
-                                        method.c_str(), args, nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, &error);
-        if (error)
-        {
-            LOG_E("[Portal] " << method << " failed synchronously: " << error->message);
-            g_error_free(error);
-            g_dbus_connection_signal_unsubscribe(portal_conn, sub);
-            g_main_loop_unref(loop);
-            g_main_context_pop_thread_default(ctx);
-            g_main_context_unref(ctx);
-            return false;
-        }
-        g_variant_unref(res);
-
-        guint timeout_id = 0;
-        if (timeout_sec > 0)
-            timeout_id = g_timeout_add_seconds(timeout_sec, on_portal_timeout, &state);
-
-        if (!state.completed)
-            g_main_loop_run(loop);
-
-        if (timeout_id > 0)
-            g_source_remove(timeout_id);
-
-        g_dbus_connection_signal_unsubscribe(portal_conn, sub);
-        g_main_loop_unref(loop);
-        g_main_context_pop_thread_default(ctx);
-        g_main_context_unref(ctx);
-
-        return state.response_code == 0;
-    };
+    dbus_loop = g_main_loop_new(nullptr, FALSE);
 
     // STEP 1: CreateSession
-    LOG_I("[Portal] Initiating CreateSession (Step 1)...");
+    guint sub1 = g_dbus_connection_signal_subscribe(portal_conn, "org.freedesktop.portal.Desktop",
+                                                    "org.freedesktop.portal.Request", "Response",
+                                                    (request_path + "/req1").c_str(), nullptr, G_DBUS_SIGNAL_FLAGS_NONE,
+                                                    on_signal_response, GINT_TO_POINTER(1), nullptr);
+
     GVariantBuilder b1;
     g_variant_builder_init(&b1, G_VARIANT_TYPE_VARDICT);
     g_variant_builder_add(&b1, "{sv}", "session_handle_token", g_variant_new_string("berryauto"));
     g_variant_builder_add(&b1, "{sv}", "handle_token", g_variant_new_string("req1"));
 
-    if (!run_portal_step("CreateSession", "req1", g_variant_new("(a{sv})", &b1), 10))
+    GError* error = nullptr;
+    GVariant* res1 =
+        g_dbus_connection_call_sync(portal_conn, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
+                                    "org.freedesktop.portal.ScreenCast", "CreateSession", g_variant_new("(a{sv})", &b1),
+                                    nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, &error);
+    if (error)
+    {
+        LOG_E("[Portal] CreateSession failed: " << error->message);
         return false;
+    }
+    g_variant_unref(res1);
+    g_main_loop_run(dbus_loop);
+    g_dbus_connection_signal_unsubscribe(portal_conn, sub1);
 
     // STEP 2: SelectSources
-    LOG_I("[Portal] Initiating SelectSources (Step 2)...");
+    guint sub2 = g_dbus_connection_signal_subscribe(portal_conn, "org.freedesktop.portal.Desktop",
+                                                    "org.freedesktop.portal.Request", "Response",
+                                                    (request_path + "/req2").c_str(), nullptr, G_DBUS_SIGNAL_FLAGS_NONE,
+                                                    on_signal_response, GINT_TO_POINTER(2), nullptr);
+
     GVariantBuilder b2;
     g_variant_builder_init(&b2, G_VARIANT_TYPE_VARDICT);
     g_variant_builder_add(&b2, "{sv}", "multiple", g_variant_new_boolean(FALSE));
-    g_variant_builder_add(&b2, "{sv}", "types", g_variant_new_uint32(1));
+    g_variant_builder_add(&b2, "{sv}", "types", g_variant_new_uint32(1)); // 1 = monitor
     g_variant_builder_add(&b2, "{sv}", "handle_token", g_variant_new_string("req2"));
-    g_variant_builder_add(&b2, "{sv}", "persist_mode", g_variant_new_uint32(2));
 
+    g_variant_builder_add(&b2, "{sv}", "persist_mode", g_variant_new_uint32(2));
     std::string token = get_portal_token();
     if (!token.empty())
     {
@@ -214,52 +171,52 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id, int& out_fd)
         g_variant_builder_add(&b2, "{sv}", "restore_token", g_variant_new_string(token.c_str()));
     }
 
-    if (!run_portal_step("SelectSources", "req2", g_variant_new("(oa{sv})", session_path.c_str(), &b2), 60))
+    GVariant* res2 = g_dbus_connection_call_sync(portal_conn, "org.freedesktop.portal.Desktop",
+                                                 "/org/freedesktop/portal/desktop", "org.freedesktop.portal.ScreenCast",
+                                                 "SelectSources", g_variant_new("(oa{sv})", session_path.c_str(), &b2),
+                                                 nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, &error);
+    if (error)
+    {
+        LOG_E("[Portal] SelectSources failed: " << error->message);
         return false;
+    }
+    g_variant_unref(res2);
+    g_main_loop_run(dbus_loop);
+    g_dbus_connection_signal_unsubscribe(portal_conn, sub2);
 
     // STEP 3: Start
-    LOG_I("[Portal] Initiating Start (Step 3)...");
+    guint sub3 = g_dbus_connection_signal_subscribe(portal_conn, "org.freedesktop.portal.Desktop",
+                                                    "org.freedesktop.portal.Request", "Response",
+                                                    (request_path + "/req3").c_str(), nullptr, G_DBUS_SIGNAL_FLAGS_NONE,
+                                                    on_signal_response, GINT_TO_POINTER(3), nullptr);
+
     GVariantBuilder b3;
     g_variant_builder_init(&b3, G_VARIANT_TYPE_VARDICT);
     g_variant_builder_add(&b3, "{sv}", "handle_token", g_variant_new_string("req3"));
 
-    if (!run_portal_step("Start", "req3", g_variant_new("(osa{sv})", session_path.c_str(), "", &b3), 10))
-        return false;
+    LOG_I("[Portal] Finalizing Screencast Session...");
 
-    // STEP 4: Extract Node & Auth FD
+    GVariant* res3 = g_dbus_connection_call_sync(portal_conn, "org.freedesktop.portal.Desktop",
+                                                 "/org/freedesktop/portal/desktop", "org.freedesktop.portal.ScreenCast",
+                                                 "Start", g_variant_new("(osa{sv})", session_path.c_str(), "", &b3),
+                                                 nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, &error);
+    if (error)
+    {
+        LOG_E("[Portal] Start failed: " << error->message);
+        return false;
+    }
+    g_variant_unref(res3);
+    g_main_loop_run(dbus_loop);
+    g_dbus_connection_signal_unsubscribe(portal_conn, sub3);
+
+    g_main_loop_unref(dbus_loop);
+
+    // WE NO LONGER CALL g_object_unref(portal_conn) HERE!
+
     if (negotiated_node_id > 0)
     {
-        LOG_I("[Portal] Extracting authenticated PipeWire FD...");
-        GVariantBuilder b_fd;
-        g_variant_builder_init(&b_fd, G_VARIANT_TYPE_VARDICT);
-
-        GUnixFDList* fd_list = nullptr;
-        GError* fd_error = nullptr;
-        GVariant* res_fd = g_dbus_connection_call_with_unix_fd_list_sync(
-            portal_conn, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
-            "org.freedesktop.portal.ScreenCast", "OpenPipeWireRemote",
-            g_variant_new("(oa{sv})", session_path.c_str(), &b_fd), G_VARIANT_TYPE("(h)"), G_DBUS_CALL_FLAGS_NONE, -1,
-            nullptr, &fd_list, nullptr, &fd_error);
-
-        if (fd_error)
-        {
-            LOG_E("[Portal] OpenPipeWireRemote failed: " << fd_error->message);
-            g_error_free(fd_error);
-            return false;
-        }
-
-        if (res_fd && fd_list)
-        {
-            int32_t handle = -1;
-            g_variant_get(res_fd, "(h)", &handle);
-            out_fd = g_unix_fd_list_get(fd_list, handle, nullptr);
-            g_object_unref(fd_list);
-            g_variant_unref(res_fd);
-
-            out_node_id = negotiated_node_id;
-            return true;
-        }
+        out_node_id = negotiated_node_id;
+        return true;
     }
-
     return false;
 }
