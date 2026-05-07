@@ -7,6 +7,7 @@
 #include <linux/dma-buf.h>
 #include <spa/param/buffers.h>
 #include <spa/param/video/format-utils.h>
+#include <string>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -175,10 +176,14 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
     if (!pw_core)
         return false;
 
-    // Stripped PW_KEY_TARGET_OBJECT. The XDG portal relies exclusively on the node_id passed in pw_stream_connect.
-    pw_stream = pw_stream_new(pw_core, "OpenGAL Capture",
-                              pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture",
-                                                PW_KEY_MEDIA_ROLE, "Screen", NULL));
+    // Explicitly scope the string memory so the property map persists safely
+    std::string node_id_str = std::to_string(node_id);
+
+    pw_stream =
+        pw_stream_new(pw_core, "OpenGAL Capture",
+                      pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture", PW_KEY_MEDIA_ROLE,
+                                        "Screen", PW_KEY_TARGET_OBJECT, node_id_str.c_str(), // Re-Added Target Object
+                                        NULL));
 
     spa_zero(stream_listener);
     pw_stream_add_listener(pw_stream, &stream_listener, &stream_events, this);
@@ -193,12 +198,10 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
     struct spa_rectangle min_rect = SPA_RECTANGLE(1, 1);
     struct spa_rectangle max_rect = SPA_RECTANGLE(16384, 16384);
 
-    // Relaxed framerate bounds (Matches OBS implementation flawlessly)
     struct spa_fraction def_frac = SPA_FRACTION(0, 1);
     struct spa_fraction min_frac = SPA_FRACTION(0, 1);
     struct spa_fraction max_frac = SPA_FRACTION(1000, 1);
 
-    // Trimmed EnumFormats strictly to standard RAW values to prevent unparseable Modifiers
     params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
         &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
         SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), SPA_FORMAT_VIDEO_format,
@@ -208,7 +211,9 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
         SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(&def_rect, &min_rect, &max_rect),
         SPA_FORMAT_VIDEO_framerate, SPA_POD_CHOICE_RANGE_Fraction(&def_frac, &min_frac, &max_frac));
 
-    int res = pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, node_id,
+    // CRITICAL FIX: Pass PW_ID_ANY instead of the explicit node_id!
+    // This allows WirePlumber to intercept the stream connection and safely apply the portal sandbox policies.
+    int res = pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, PW_ID_ANY,
                                 (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 1);
 
     return res >= 0;
