@@ -68,6 +68,9 @@ if [ -n "$UDC_NAME" ]; then
     # Claim the UDC for BerryAuto
     echo "$UDC_NAME" | sudo tee /sys/kernel/config/usb_gadget/opengal/UDC > /dev/null
 else
+    kill $EMITTER_PID
+    exit 1
+fi
 
 wait $EMITTER_PID
 EXIT_CODE=$?
