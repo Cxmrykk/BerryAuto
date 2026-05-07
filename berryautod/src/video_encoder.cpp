@@ -207,7 +207,6 @@ void VideoEncoder::capture_loop()
                 uint32_t node_id = 0;
                 int pw_fd = -1;
 
-                // Pass the new FD variable
                 if (negotiate_wayland_screencast(node_id, pw_fd))
                 {
                     run_pipewire_loop(node_id, pw_fd);
@@ -223,7 +222,7 @@ void VideoEncoder::capture_loop()
     else
     {
         LOG_I("[Capture] X11 detected. Initializing XShm engine...");
-        run_x11_loop(); // Relies on video_x11.cpp
+        run_x11_loop();
     }
 
     cleanup_encoder();

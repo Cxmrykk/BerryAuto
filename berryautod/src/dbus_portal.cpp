@@ -10,6 +10,7 @@
 
 static uint32_t negotiated_node_id = 0;
 static GMainLoop* dbus_loop = nullptr;
+static bool step_completed = false; // CRITICAL FIX: Prevent GLib synchronous race conditions
 
 // CRITICAL FIX: Keep the DBus connection alive globally.
 // If this connection drops, GNOME immediately destroys the PipeWire Node!
@@ -55,6 +56,9 @@ static void on_signal_response(GDBusConnection* conn, const gchar* sender, const
     (void)path;
     (void)iface;
     (void)signal;
+
+    step_completed = true; // Mark as done immediately
+
     int step = GPOINTER_TO_INT(user_data);
     uint32_t response = 0;
     GVariant* results = nullptr;
@@ -67,7 +71,8 @@ static void on_signal_response(GDBusConnection* conn, const gchar* sender, const
               << response << "). If this is the first run, you MUST click 'Share' on the Pi's screen!");
         if (results)
             g_variant_unref(results);
-        g_main_loop_quit(dbus_loop);
+        if (dbus_loop && g_main_loop_is_running(dbus_loop))
+            g_main_loop_quit(dbus_loop);
         return;
     }
 
@@ -101,7 +106,9 @@ static void on_signal_response(GDBusConnection* conn, const gchar* sender, const
 
     if (results)
         g_variant_unref(results);
-    g_main_loop_quit(dbus_loop);
+
+    if (dbus_loop && g_main_loop_is_running(dbus_loop))
+        g_main_loop_quit(dbus_loop);
 }
 
 bool negotiate_wayland_screencast(uint32_t& out_node_id, int& out_fd)
@@ -128,6 +135,7 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id, int& out_fd)
     dbus_loop = g_main_loop_new(nullptr, FALSE);
 
     // STEP 1: CreateSession
+    step_completed = false;
     guint sub1 = g_dbus_connection_signal_subscribe(portal_conn, "org.freedesktop.portal.Desktop",
                                                     "org.freedesktop.portal.Request", "Response",
                                                     (request_path + "/req1").c_str(), nullptr, G_DBUS_SIGNAL_FLAGS_NONE,
@@ -149,10 +157,13 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id, int& out_fd)
         return false;
     }
     g_variant_unref(res1);
-    g_main_loop_run(dbus_loop);
+
+    if (!step_completed)
+        g_main_loop_run(dbus_loop);
     g_dbus_connection_signal_unsubscribe(portal_conn, sub1);
 
     // STEP 2: SelectSources
+    step_completed = false;
     guint sub2 = g_dbus_connection_signal_subscribe(portal_conn, "org.freedesktop.portal.Desktop",
                                                     "org.freedesktop.portal.Request", "Response",
                                                     (request_path + "/req2").c_str(), nullptr, G_DBUS_SIGNAL_FLAGS_NONE,
@@ -182,10 +193,13 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id, int& out_fd)
         return false;
     }
     g_variant_unref(res2);
-    g_main_loop_run(dbus_loop);
+
+    if (!step_completed)
+        g_main_loop_run(dbus_loop);
     g_dbus_connection_signal_unsubscribe(portal_conn, sub2);
 
     // STEP 3: Start
+    step_completed = false;
     guint sub3 = g_dbus_connection_signal_subscribe(portal_conn, "org.freedesktop.portal.Desktop",
                                                     "org.freedesktop.portal.Request", "Response",
                                                     (request_path + "/req3").c_str(), nullptr, G_DBUS_SIGNAL_FLAGS_NONE,
@@ -207,12 +221,12 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id, int& out_fd)
         return false;
     }
     g_variant_unref(res3);
-    g_main_loop_run(dbus_loop);
+
+    if (!step_completed)
+        g_main_loop_run(dbus_loop);
     g_dbus_connection_signal_unsubscribe(portal_conn, sub3);
 
     g_main_loop_unref(dbus_loop);
-
-    // WE NO LONGER CALL g_object_unref(portal_conn) HERE!
 
     if (negotiated_node_id > 0)
     {
