@@ -4,7 +4,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <gio/gio.h>
-#include <gio/gunixfdlist.h> // Required to extract the file descriptor
+#include <gio/gunixfdlist.h>
 #include <iostream>
 #include <string>
 
@@ -53,12 +53,10 @@ static void save_portal_token(const char* t)
 static gboolean on_portal_timeout(gpointer user_data)
 {
     PortalStepState* state = static_cast<PortalStepState*>(user_data);
-    LOG_E("[Portal] CRITICAL: D-Bus request timed out!");
-    LOG_E("[Portal] GNOME likely rejected the token and is waiting for a mouse click on the Pi!");
-    state->response_code = 999;
+    LOG_E("[Portal] CRITICAL: D-Bus request timed out! GNOME failed to respond.");
+    state->response_code = 999; // Custom timeout code
     state->completed = true;
-    if (g_main_loop_is_running(state->loop))
-        g_main_loop_quit(state->loop);
+    g_main_loop_quit(state->loop);
     return G_SOURCE_REMOVE;
 }
 
@@ -116,8 +114,7 @@ static void on_signal_response(GDBusConnection* conn, const gchar* sender, const
     if (results)
         g_variant_unref(results);
 
-    if (g_main_loop_is_running(state->loop))
-        g_main_loop_quit(state->loop);
+    g_main_loop_quit(state->loop);
 }
 
 bool negotiate_wayland_screencast(uint32_t& out_node_id, int& out_fd)
@@ -141,18 +138,20 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id, int& out_fd)
     std::string session_path = "/org/freedesktop/portal/desktop/session/" + sender + "/berryauto";
     std::string request_path = "/org/freedesktop/portal/desktop/request/" + sender;
 
+    // Secure, thread-isolated helper to execute a DBus call and wait for its signal safely
     auto run_portal_step = [&](const std::string& method, const std::string& req_token, GVariant* args,
                                int timeout_sec) -> bool
     {
-        GMainLoop* loop = g_main_loop_new(nullptr, FALSE);
+        GMainContext* ctx = g_main_context_new();
+        g_main_context_push_thread_default(ctx);
+        GMainLoop* loop = g_main_loop_new(ctx, FALSE);
+
         PortalStepState state = {loop, false, 0};
 
         guint sub = g_dbus_connection_signal_subscribe(portal_conn, "org.freedesktop.portal.Desktop",
                                                        "org.freedesktop.portal.Request", "Response",
                                                        (request_path + "/" + req_token).c_str(), nullptr,
                                                        G_DBUS_SIGNAL_FLAGS_NONE, on_signal_response, &state, nullptr);
-
-        LOG_I("[Portal] Calling " << method << " (Token: " << req_token << ")...");
 
         GError* error = nullptr;
         GVariant* res =
@@ -165,29 +164,32 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id, int& out_fd)
             g_error_free(error);
             g_dbus_connection_signal_unsubscribe(portal_conn, sub);
             g_main_loop_unref(loop);
+            g_main_context_pop_thread_default(ctx);
+            g_main_context_unref(ctx);
             return false;
         }
         g_variant_unref(res);
 
         guint timeout_id = 0;
-        if (!state.completed)
-        {
-            if (timeout_sec > 0)
-                timeout_id = g_timeout_add_seconds(timeout_sec, on_portal_timeout, &state);
+        if (timeout_sec > 0)
+            timeout_id = g_timeout_add_seconds(timeout_sec, on_portal_timeout, &state);
 
+        if (!state.completed)
             g_main_loop_run(loop);
 
-            if (timeout_id > 0)
-                g_source_remove(timeout_id);
-        }
+        if (timeout_id > 0)
+            g_source_remove(timeout_id);
 
         g_dbus_connection_signal_unsubscribe(portal_conn, sub);
         g_main_loop_unref(loop);
+        g_main_context_pop_thread_default(ctx);
+        g_main_context_unref(ctx);
 
         return state.response_code == 0;
     };
 
     // STEP 1: CreateSession
+    LOG_I("[Portal] Initiating CreateSession (Step 1)...");
     GVariantBuilder b1;
     g_variant_builder_init(&b1, G_VARIANT_TYPE_VARDICT);
     g_variant_builder_add(&b1, "{sv}", "session_handle_token", g_variant_new_string("berryauto"));
@@ -197,6 +199,7 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id, int& out_fd)
         return false;
 
     // STEP 2: SelectSources
+    LOG_I("[Portal] Initiating SelectSources (Step 2)...");
     GVariantBuilder b2;
     g_variant_builder_init(&b2, G_VARIANT_TYPE_VARDICT);
     g_variant_builder_add(&b2, "{sv}", "multiple", g_variant_new_boolean(FALSE));
@@ -211,16 +214,16 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id, int& out_fd)
         g_variant_builder_add(&b2, "{sv}", "restore_token", g_variant_new_string(token.c_str()));
     }
 
-    // High timeout for Step 2 incase the prompt actually pops up and requires interaction
     if (!run_portal_step("SelectSources", "req2", g_variant_new("(oa{sv})", session_path.c_str(), &b2), 60))
         return false;
 
     // STEP 3: Start
+    LOG_I("[Portal] Initiating Start (Step 3)...");
     GVariantBuilder b3;
     g_variant_builder_init(&b3, G_VARIANT_TYPE_VARDICT);
     g_variant_builder_add(&b3, "{sv}", "handle_token", g_variant_new_string("req3"));
 
-    if (!run_portal_step("Start", "req3", g_variant_new("(osa{sv})", session_path.c_str(), "", &b3), 15))
+    if (!run_portal_step("Start", "req3", g_variant_new("(osa{sv})", session_path.c_str(), "", &b3), 10))
         return false;
 
     // STEP 4: Extract Node & Auth FD
