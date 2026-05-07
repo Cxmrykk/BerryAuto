@@ -60,7 +60,14 @@ static void on_process(void* userdata)
 static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* param)
 {
     VideoEncoder* enc = static_cast<VideoEncoder*>(userdata);
-    if (param == NULL || id != SPA_PARAM_Format)
+
+    if (param == NULL)
+    {
+        LOG_E("[PipeWire] Format cleared by server! (Negotiation Failed)");
+        return;
+    }
+
+    if (id != SPA_PARAM_Format)
         return;
 
     struct spa_video_info_raw info;
@@ -124,6 +131,10 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
 
         pw_stream_update_params(enc->pw_stream, params, 1);
     }
+    else
+    {
+        LOG_E("[PipeWire] CRITICAL: Failed to parse negotiated format from Server!");
+    }
 }
 
 static void on_state_changed(void* userdata, enum pw_stream_state old, enum pw_stream_state state, const char* error)
@@ -164,10 +175,10 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
     if (!pw_core)
         return false;
 
-    pw_stream =
-        pw_stream_new(pw_core, "OpenGAL Capture",
-                      pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture", PW_KEY_MEDIA_ROLE,
-                                        "Screen", PW_KEY_TARGET_OBJECT, std::to_string(node_id).c_str(), NULL));
+    // Stripped PW_KEY_TARGET_OBJECT. The XDG portal relies exclusively on the node_id passed in pw_stream_connect.
+    pw_stream = pw_stream_new(pw_core, "OpenGAL Capture",
+                              pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture",
+                                                PW_KEY_MEDIA_ROLE, "Screen", NULL));
 
     spa_zero(stream_listener);
     pw_stream_add_listener(pw_stream, &stream_listener, &stream_events, this);
@@ -175,27 +186,25 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
     alignas(8) uint8_t buffer[2048];
     struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
 
-    // We only pass 1 Parameter (Format) during connection. Buffer constraints are sent later in `on_param_changed`.
     const struct spa_pod* params[1];
 
-    // Mutter strictly requires size and framerate bounds to successfully negotiate format and escape the paused state.
     struct spa_rectangle def_rect =
         SPA_RECTANGLE(static_cast<uint32_t>(target_width), static_cast<uint32_t>(target_height));
     struct spa_rectangle min_rect = SPA_RECTANGLE(1, 1);
     struct spa_rectangle max_rect = SPA_RECTANGLE(16384, 16384);
 
-    struct spa_fraction def_frac = SPA_FRACTION(static_cast<uint32_t>(target_fps), 1);
+    // Relaxed framerate bounds (Matches OBS implementation flawlessly)
+    struct spa_fraction def_frac = SPA_FRACTION(0, 1);
     struct spa_fraction min_frac = SPA_FRACTION(0, 1);
     struct spa_fraction max_frac = SPA_FRACTION(1000, 1);
 
+    // Trimmed EnumFormats strictly to standard RAW values to prevent unparseable Modifiers
     params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
         &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
         SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), SPA_FORMAT_VIDEO_format,
-        SPA_POD_CHOICE_ENUM_Id(15, SPA_VIDEO_FORMAT_RGBx, SPA_VIDEO_FORMAT_RGBx, SPA_VIDEO_FORMAT_RGBA,
-                               SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_xRGB,
-                               SPA_VIDEO_FORMAT_ARGB, SPA_VIDEO_FORMAT_xBGR, SPA_VIDEO_FORMAT_ABGR,
-                               SPA_VIDEO_FORMAT_RGB, SPA_VIDEO_FORMAT_BGR, SPA_VIDEO_FORMAT_NV12, SPA_VIDEO_FORMAT_YUY2,
-                               SPA_VIDEO_FORMAT_I420, SPA_VIDEO_FORMAT_YV12),
+        SPA_POD_CHOICE_ENUM_Id(7, SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_RGBA,
+                               SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_RGBx, SPA_VIDEO_FORMAT_BGR,
+                               SPA_VIDEO_FORMAT_RGB),
         SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(&def_rect, &min_rect, &max_rect),
         SPA_FORMAT_VIDEO_framerate, SPA_POD_CHOICE_RANGE_Fraction(&def_frac, &min_frac, &max_frac));
 
