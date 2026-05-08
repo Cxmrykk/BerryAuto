@@ -22,11 +22,11 @@ void init_uinput()
 
     ioctl(uinput_fd, UI_SET_EVBIT, EV_KEY);
     ioctl(uinput_fd, UI_SET_KEYBIT, BTN_TOUCH);
-
-    // Libinput strictly requires BTN_LEFT to acknowledge a mouse device!
     ioctl(uinput_fd, UI_SET_KEYBIT, BTN_LEFT);
     ioctl(uinput_fd, UI_SET_KEYBIT, BTN_RIGHT);
     ioctl(uinput_fd, UI_SET_KEYBIT, BTN_MOUSE);
+
+    ioctl(uinput_fd, UI_SET_KEYBIT, KEY_LEFTSHIFT);
 
     ioctl(uinput_fd, UI_SET_EVBIT, EV_ABS);
     ioctl(uinput_fd, UI_SET_ABSBIT, ABS_X);
@@ -93,7 +93,6 @@ void reset_input_state()
     }
 }
 
-// Ensure the screen never turns off by violently moving the mouse back and forth
 void wake_up_display()
 {
     if (uinput_fd < 0)
@@ -105,6 +104,11 @@ void wake_up_display()
 
         emit_uinput(EV_REL, REL_X, wiggle);
         emit_uinput(EV_REL, REL_Y, wiggle);
+        emit_uinput(EV_SYN, SYN_REPORT, 0);
+
+        emit_uinput(EV_KEY, KEY_LEFTSHIFT, 1);
+        emit_uinput(EV_SYN, SYN_REPORT, 0);
+        emit_uinput(EV_KEY, KEY_LEFTSHIFT, 0);
         emit_uinput(EV_SYN, SYN_REPORT, 0);
     }
 }

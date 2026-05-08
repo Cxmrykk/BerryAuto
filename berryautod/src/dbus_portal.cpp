@@ -262,7 +262,8 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id, int& out_fd)
     g_variant_builder_add(&b2, "{sv}", "multiple", g_variant_new_boolean(FALSE));
     g_variant_builder_add(&b2, "{sv}", "types", g_variant_new_uint32(1));
 
-    // CRITICAL FIX: cursor_mode MUST be 1 (Embedded). 2 = Metadata (invisible rendering)
+    // CRITICAL: Force Embedded Cursor. Required to trigger DPMS damage events
+    // on Wayland when the physical screen is detached.
     g_variant_builder_add(&b2, "{sv}", "cursor_mode", g_variant_new_uint32(1));
 
     g_variant_builder_add(&b2, "{sv}", "handle_token", g_variant_new_string("req2"));

@@ -1,6 +1,7 @@
 #include "video_encoder.hpp"
 #include "dbus_portal.hpp"
 #include "globals.hpp"
+#include "input_handler.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
@@ -201,13 +202,13 @@ void VideoEncoder::capture_loop()
             }
             else
             {
-                LOG_I("[Capture] GNOME/Mutter detected. Falling back to GStreamer Portal.");
+                LOG_I("[Capture] GNOME/Mutter detected. Falling back to PipeWire Portal.");
                 uint32_t node_id = 0;
                 int pw_fd = -1;
 
                 if (negotiate_wayland_screencast(node_id, pw_fd))
                 {
-                    run_gstreamer_loop(node_id, pw_fd);
+                    run_pipewire_loop(node_id, pw_fd);
                 }
                 else
                 {
@@ -224,31 +225,4 @@ void VideoEncoder::capture_loop()
     }
 
     cleanup_encoder();
-}
-
-void VideoEncoder::run_x11_loop()
-{
-    if (init_x11())
-    {
-        uint64_t frame_interval_us = 1000000 / target_fps;
-        uint64_t next_frame_time = get_monotonic_usec() + frame_interval_us;
-
-        while (running.load())
-        {
-            XShmGetImage(dpy, root_window, img, 0, 0, AllPlanes);
-            process_raw_frame((uint8_t*)img->data, img->bytes_per_line, img->width, img->height);
-
-            uint64_t now = get_monotonic_usec();
-            if (now < next_frame_time)
-            {
-                usleep(next_frame_time - now);
-                next_frame_time += frame_interval_us;
-            }
-            else
-            {
-                next_frame_time = now + frame_interval_us;
-            }
-        }
-        cleanup_x11();
-    }
 }
