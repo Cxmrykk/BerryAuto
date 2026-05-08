@@ -60,7 +60,7 @@ static void on_process(void* userdata)
     }
     else
     {
-        LOG_E("[PipeWire Debug] on_process: Buffer data pointer is NULL! (Failed to map DMA-BUF?)");
+        LOG_E("[PipeWire Debug] on_process: Buffer data pointer is NULL! (DMA-BUF requested without mmap?)");
     }
 
     pw_stream_queue_buffer(enc->pw_stream, b);
@@ -149,14 +149,14 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
         struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
         const struct spa_pod* params[1];
 
-        // CRITICAL FIX: Add 0 terminator to spa_pod_builder_add_object to prevent reading garbage memory
+        // CRITICAL FIX: Removed SPA_DATA_DmaBuf. This forces PipeWire to grant CPU-accessible
+        // memory buffers (MemFd or MemPtr), avoiding null pointer crashes in on_process
+        // when interacting with the sws_scale pipeline.
         params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
             &b, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers, SPA_PARAM_BUFFERS_buffers,
             SPA_POD_CHOICE_RANGE_Int(4, 2, 8), SPA_PARAM_BUFFERS_blocks, SPA_POD_Int(1), SPA_PARAM_BUFFERS_size,
             SPA_POD_Int(size), SPA_PARAM_BUFFERS_stride, SPA_POD_Int(stride), SPA_PARAM_BUFFERS_align, SPA_POD_Int(16),
-            SPA_PARAM_BUFFERS_dataType,
-            SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr) | (1 << SPA_DATA_DmaBuf)),
-            0); // <--- TERMINATOR
+            SPA_PARAM_BUFFERS_dataType, SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr)), 0);
 
         int update_res = pw_stream_update_params(enc->pw_stream, params, 1);
         if (update_res < 0)
@@ -220,7 +220,6 @@ static const struct pw_stream_events stream_events = []()
     return ev;
 }();
 
-// --- Core Logging Handlers ---
 static void on_core_info(void* userdata, const struct pw_core_info* info)
 {
     (void)userdata;
@@ -279,9 +278,15 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
     spa_zero(core_listener);
     pw_core_add_listener(pw_core, &core_listener, &core_events, this);
 
-    // CRITICAL FIX: Do not set PW_KEY_TARGET_OBJECT. We will pass node_id to pw_stream_connect.
-    struct pw_properties* props = pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture",
-                                                    PW_KEY_MEDIA_ROLE, "Screen", NULL);
+    // CRITICAL FIX: We MUST announce our intent to attach to the node via PW_KEY_TARGET_OBJECT.
+    // If this is missing from the stream properties when utilizing a sandboxed portal FD, WirePlumber
+    // refuses to blindly link the stream, which causes pw_stream_connect to hang in 'paused'.
+    char target_node_str[32];
+    snprintf(target_node_str, sizeof(target_node_str), "%u", node_id);
+
+    struct pw_properties* props =
+        pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture", PW_KEY_MEDIA_ROLE, "Screen",
+                          PW_KEY_TARGET_OBJECT, target_node_str, NULL);
 
     pw_stream = pw_stream_new(pw_core, "BerryAuto Capture", props);
 
@@ -300,7 +305,6 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
 
     LOG_I("[PipeWire Debug] Formatting broad EnumFormat constraints to force a server reply...");
 
-    // CRITICAL FIX: Terminate with 0 and include all GNOME formats (xRGB/xBGR/ARGB/ABGR)
     params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
         &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
         SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), SPA_FORMAT_VIDEO_format,
@@ -311,7 +315,7 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
                                SPA_VIDEO_FORMAT_xRGB, SPA_VIDEO_FORMAT_ARGB, SPA_VIDEO_FORMAT_xBGR,
                                SPA_VIDEO_FORMAT_ABGR, SPA_VIDEO_FORMAT_RGB, SPA_VIDEO_FORMAT_BGR, SPA_VIDEO_FORMAT_NV12,
                                SPA_VIDEO_FORMAT_I420, SPA_VIDEO_FORMAT_YUY2),
-        0); // <--- TERMINATOR
+        0);
 
     if (!params[0])
     {
@@ -319,7 +323,10 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
         return false;
     }
 
-    int res = pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, node_id,
+    // CRITICAL FIX: Because we are already supplying PW_KEY_TARGET_OBJECT in the properties of a
+    // restricted FD mapping, we must use PW_ID_ANY here. Providing the node_id directly will conflict
+    // with WirePlumber's routing rules on portal-managed streams.
+    int res = pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, PW_ID_ANY,
                                 (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 1);
 
     if (res < 0)
