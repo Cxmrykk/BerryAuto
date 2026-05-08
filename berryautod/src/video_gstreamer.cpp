@@ -75,12 +75,12 @@ bool VideoEncoder::init_gstreamer(uint32_t node_id, int pw_fd)
     gst_init(nullptr, nullptr);
     first_frame_received = false;
 
-    // CRITICAL FIXES:
-    // 1. 'path' targets the node ID correctly for standard GStreamer versions.
-    // 2. 'always-copy=true' forces PipeWire to map Pi 4 DRM DMA-BUFs into CPU memory.
-    // 3. 'queue leaky=downstream' creates a thread boundary so videoconvert doesn't block the source.
-    std::string pipeline_str = "pipewiresrc fd=" + std::to_string(pw_fd) + " path=" + std::to_string(node_id) +
-                               " always-copy=true keepalive-time=1000 " +
+    // CRITICAL FIXES APPLIED:
+    // 1. target-object ensures GStreamer connects correctly to the numeric Node ID assigned by GNOME
+    // 2. always-copy=true forces PipeWire to map Pi 4 DRM DMA-BUFs into CPU memory.
+    // 3. queue leaky=downstream creates a thread boundary so videoconvert doesn't block the source.
+    std::string pipeline_str = "pipewiresrc fd=" + std::to_string(pw_fd) + " target-object=" + std::to_string(node_id) +
+                               " always-copy=true keepalive-time=1000 do-timestamp=true " +
                                "! queue max-size-buffers=2 leaky=downstream " + "! videoconvert " +
                                "! video/x-raw,format=BGRA " +
                                "! appsink name=mysink emit-signals=true sync=false drop=true max-buffers=2 async=false";

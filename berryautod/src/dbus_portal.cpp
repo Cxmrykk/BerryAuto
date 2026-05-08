@@ -4,7 +4,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <gio/gio.h>
-#include <gio/gunixfdlist.h> // Required to extract the file descriptor
+#include <gio/gunixfdlist.h>
 #include <iostream>
 #include <string>
 #include <sys/stat.h>
@@ -13,8 +13,6 @@
 static uint32_t negotiated_node_id = 0;
 static GDBusConnection* portal_conn = nullptr;
 
-// CRITICAL FIX: GNOME kills the Portal Session if it doesn't detect an active GLib event
-// loop to reply to Keep-Alives on the DBus Session socket. We must keep one running globally.
 static GMainLoop* global_dbus_bg_loop = nullptr;
 static std::thread global_dbus_thread;
 
@@ -105,7 +103,6 @@ static gboolean on_portal_timeout(gpointer user_data)
     LOG_E("[CRITICAL] manually click 'Share' ONE TIME to generate a valid headless token!");
     LOG_E("=======================================================================================\n");
 
-    // Delete stale token so the next run is clean
     remove(get_token_storage_path().c_str());
 
     state->response_code = 999;
@@ -176,7 +173,7 @@ static void on_signal_response(GDBusConnection* conn, const gchar* sender, const
 bool negotiate_wayland_screencast(uint32_t& out_node_id, int& out_fd)
 {
     ensure_desktop_file();
-    ensure_global_dbus_loop(); // Prevent Desktop Portal from killing our token session!
+    ensure_global_dbus_loop();
 
     if (!portal_conn)
     {
@@ -263,12 +260,8 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id, int& out_fd)
     GVariantBuilder b2;
     g_variant_builder_init(&b2, G_VARIANT_TYPE_VARDICT);
     g_variant_builder_add(&b2, "{sv}", "multiple", g_variant_new_boolean(FALSE));
-    g_variant_builder_add(&b2, "{sv}", "types", g_variant_new_uint32(1)); // 1 = Monitor
-
-    // CRITICAL FIX: Force Mutter to composite the cursor into the stream.
-    // When combined with wake_up_display(), this guarantees continuous frame generation.
-    g_variant_builder_add(&b2, "{sv}", "cursor_mode", g_variant_new_uint32(2)); // 2 = Embedded
-
+    g_variant_builder_add(&b2, "{sv}", "types", g_variant_new_uint32(1));
+    g_variant_builder_add(&b2, "{sv}", "cursor_mode", g_variant_new_uint32(2)); // Embed cursor to ensure screen damage
     g_variant_builder_add(&b2, "{sv}", "handle_token", g_variant_new_string("req2"));
     g_variant_builder_add(&b2, "{sv}", "persist_mode", g_variant_new_uint32(2));
 
@@ -280,6 +273,14 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id, int& out_fd)
     }
 
     if (!run_portal_step("SelectSources", "req2", g_variant_new("(oa{sv})", session_path.c_str(), &b2), 60))
+        return false;
+
+    // STEP 3: Start
+    GVariantBuilder b3;
+    g_variant_builder_init(&b3, G_VARIANT_TYPE_VARDICT);
+    g_variant_builder_add(&b3, "{sv}", "handle_token", g_variant_new_string("req3"));
+
+    if (!run_portal_step("Start", "req3", g_variant_new("(osa{sv})", session_path.c_str(), "", &b3), 15))
         return false;
 
     // STEP 4: Extract Node & Auth FD
