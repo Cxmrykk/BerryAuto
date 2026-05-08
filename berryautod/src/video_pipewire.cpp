@@ -7,6 +7,7 @@
 #include <linux/dma-buf.h>
 #include <spa/param/buffers.h>
 #include <spa/param/video/format-utils.h>
+#include <spa/pod/builder.h>
 #include <spa/utils/result.h>
 #include <string>
 #include <sys/ioctl.h>
@@ -30,7 +31,6 @@ static void on_process(void* userdata)
     struct spa_buffer* buf = b->buffer;
     void* src_data = buf->datas[0].data;
 
-    // PW_STREAM_FLAG_MAP_BUFFERS will automatically populate datas[0].data even for DmaBuf
     if (src_data)
     {
         std::lock_guard<std::mutex> lock(enc->frame_mutex);
@@ -61,7 +61,8 @@ static void on_process(void* userdata)
     }
     else
     {
-        LOG_E("[PipeWire Debug] on_process: Buffer data pointer is NULL! (Failed to map memory?)");
+        LOG_E("[PipeWire Debug] on_process: Buffer data pointer is NULL! (Did we receive a raw DMA-BUF without "
+              "mapping?)");
     }
 
     pw_stream_queue_buffer(enc->pw_stream, b);
@@ -152,8 +153,6 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
         struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
         const struct spa_pod* params[1];
 
-        // Explicitly accept DmaBuf alongside MemFd and MemPtr. Mutter strictly prefers DMA-BUFs.
-        // PW_STREAM_FLAG_MAP_BUFFERS ensures that PipeWire will perform the mmap for us!
         params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
             &b, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers, SPA_PARAM_BUFFERS_buffers,
             SPA_POD_CHOICE_RANGE_Int(4, 2, 8), SPA_PARAM_BUFFERS_blocks, SPA_POD_Int(1), SPA_PARAM_BUFFERS_size,
@@ -284,10 +283,10 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
     spa_zero(core_listener);
     pw_core_add_listener(pw_core, &core_listener, &core_events, this);
 
-    // Apply the Target Object property directly to ensure proper routing within the Node
+    // CRITICAL FIX 1: Do NOT set PW_KEY_TARGET_OBJECT.
+    // The Portal sandbox already locked this connection to the screen sharing node.
     struct pw_properties* props = pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture",
                                                     PW_KEY_MEDIA_ROLE, "Screen", NULL);
-    pw_properties_setf(props, PW_KEY_TARGET_OBJECT, "%u", node_id);
 
     pw_stream = pw_stream_new(pw_core, "BerryAuto Capture", props);
 
@@ -306,17 +305,9 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
 
     LOG_I("[PipeWire Debug] Formatting broad EnumFormat constraints to force a server reply...");
 
-    // Safe C++ instantiations to prevent the compound-literal pointer warning
-    struct spa_rectangle def_rect = {(uint32_t)target_width, (uint32_t)target_height};
-    struct spa_rectangle min_rect = {1, 1};
-    struct spa_rectangle max_rect = {16384, 16384};
-
-    struct spa_fraction def_frac = {(uint32_t)target_fps, 1};
-    struct spa_fraction min_frac = {0, 1};
-    struct spa_fraction max_frac = {1000, 1};
-
-    // Explicitly define accepted Size and Framerate boundaries.
-    // Omitting them causes an empty intersection in GNOME/Mutter, hanging the stream natively.
+    // CRITICAL FIX 2: Omit size and framerate boundaries entirely.
+    // Providing constraints that do not mathematically intersect with Mutter's private
+    // virtual display layout will result in an empty intersection and a permanent pause.
     params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
         &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
         SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), SPA_FORMAT_VIDEO_format,
@@ -324,9 +315,7 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
                                SPA_VIDEO_FORMAT_RGBx, // Default
                                SPA_VIDEO_FORMAT_RGBx, // Choices...
                                SPA_VIDEO_FORMAT_RGBA, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRA,
-                               SPA_VIDEO_FORMAT_RGB, SPA_VIDEO_FORMAT_BGR),
-        SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(&def_rect, &min_rect, &max_rect),
-        SPA_FORMAT_VIDEO_framerate, SPA_POD_CHOICE_RANGE_Fraction(&def_frac, &min_frac, &max_frac));
+                               SPA_VIDEO_FORMAT_RGB, SPA_VIDEO_FORMAT_BGR));
 
     if (!params[0])
     {
@@ -334,8 +323,10 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
         return false;
     }
 
-    // Connect using both node_id mapping and the PW_KEY_TARGET_OBJECT property above
-    int res = pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, node_id,
+    // CRITICAL FIX 3: Connect using PW_ID_ANY.
+    // Specifying the node_id explicitly on a sandboxed portal FD is an illegal graph mutation.
+    // WirePlumber will reject the format negotiation if you try to route it explicitly here.
+    int res = pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, PW_ID_ANY,
                                 (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 1);
 
     if (res < 0)

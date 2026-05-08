@@ -8,9 +8,25 @@
 #include <iostream>
 #include <string>
 #include <sys/stat.h>
+#include <thread>
 
 static uint32_t negotiated_node_id = 0;
 static GDBusConnection* portal_conn = nullptr;
+
+// CRITICAL FIX: GNOME kills the Portal Session if it doesn't detect an active GLib event
+// loop to reply to Keep-Alives on the DBus Session socket. We must keep one running globally.
+static GMainLoop* global_dbus_bg_loop = nullptr;
+static std::thread global_dbus_thread;
+
+static void ensure_global_dbus_loop()
+{
+    if (!global_dbus_bg_loop)
+    {
+        global_dbus_bg_loop = g_main_loop_new(nullptr, FALSE);
+        global_dbus_thread = std::thread([]() { g_main_loop_run(global_dbus_bg_loop); });
+        global_dbus_thread.detach();
+    }
+}
 
 struct PortalStepState
 {
@@ -19,7 +35,6 @@ struct PortalStepState
     uint32_t response_code;
 };
 
-// CRITICAL FIX: Generates a dummy .desktop file to anchor the App ID for token persistence
 static void ensure_desktop_file()
 {
     const char* home_env = getenv("HOME");
@@ -161,6 +176,7 @@ static void on_signal_response(GDBusConnection* conn, const gchar* sender, const
 bool negotiate_wayland_screencast(uint32_t& out_node_id, int& out_fd)
 {
     ensure_desktop_file();
+    ensure_global_dbus_loop(); // Prevent Desktop Portal from killing our token session!
 
     if (!portal_conn)
     {
