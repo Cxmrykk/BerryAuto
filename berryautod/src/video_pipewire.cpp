@@ -127,6 +127,18 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
                 case SPA_VIDEO_FORMAT_BGR:
                     enc->pw_fmt = AV_PIX_FMT_BGR24;
                     break;
+                case SPA_VIDEO_FORMAT_YUY2:
+                    enc->pw_fmt = AV_PIX_FMT_YUYV422;
+                    break;
+                case SPA_VIDEO_FORMAT_UYVY:
+                    enc->pw_fmt = AV_PIX_FMT_UYVY422;
+                    break;
+                case SPA_VIDEO_FORMAT_I420:
+                    enc->pw_fmt = AV_PIX_FMT_YUV420P;
+                    break;
+                case SPA_VIDEO_FORMAT_NV12:
+                    enc->pw_fmt = AV_PIX_FMT_NV12;
+                    break;
                 default:
                     enc->pw_fmt = AV_PIX_FMT_BGRA;
                     break;
@@ -139,6 +151,10 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
         uint32_t stride = (info.size.width * 4 + 3) & ~3;
         if (info.format == SPA_VIDEO_FORMAT_RGB || info.format == SPA_VIDEO_FORMAT_BGR)
             stride = (info.size.width * 3 + 3) & ~3;
+        else if (info.format == SPA_VIDEO_FORMAT_YUY2 || info.format == SPA_VIDEO_FORMAT_UYVY)
+            stride = (info.size.width * 2 + 3) & ~3;
+        else if (info.format == SPA_VIDEO_FORMAT_I420 || info.format == SPA_VIDEO_FORMAT_NV12)
+            stride = info.size.width; // For planar formats, stride is usually the Y plane width
 
         uint32_t size = stride * info.size.height;
 
@@ -149,14 +165,13 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
         struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
         const struct spa_pod* params[1];
 
-        // CRITICAL FIX: Removed SPA_DATA_DmaBuf. This forces PipeWire to grant CPU-accessible
-        // memory buffers (MemFd or MemPtr), avoiding null pointer crashes in on_process
-        // when interacting with the sws_scale pipeline.
+        // CRITICAL FIX: Retained CPU-accessible memory bounds (MemFd | MemPtr) only.
         params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
             &b, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers, SPA_PARAM_BUFFERS_buffers,
             SPA_POD_CHOICE_RANGE_Int(4, 2, 8), SPA_PARAM_BUFFERS_blocks, SPA_POD_Int(1), SPA_PARAM_BUFFERS_size,
             SPA_POD_Int(size), SPA_PARAM_BUFFERS_stride, SPA_POD_Int(stride), SPA_PARAM_BUFFERS_align, SPA_POD_Int(16),
-            SPA_PARAM_BUFFERS_dataType, SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr)), 0);
+            SPA_PARAM_BUFFERS_dataType, SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr)),
+            0); // <--- TERMINATOR
 
         int update_res = pw_stream_update_params(enc->pw_stream, params, 1);
         if (update_res < 0)
@@ -278,9 +293,6 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
     spa_zero(core_listener);
     pw_core_add_listener(pw_core, &core_listener, &core_events, this);
 
-    // CRITICAL FIX: We MUST announce our intent to attach to the node via PW_KEY_TARGET_OBJECT.
-    // If this is missing from the stream properties when utilizing a sandboxed portal FD, WirePlumber
-    // refuses to blindly link the stream, which causes pw_stream_connect to hang in 'paused'.
     char target_node_str[32];
     snprintf(target_node_str, sizeof(target_node_str), "%u", node_id);
 
@@ -305,17 +317,30 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
 
     LOG_I("[PipeWire Debug] Formatting broad EnumFormat constraints to force a server reply...");
 
+    // CRITICAL FIX: GNOME Mutter requires explicit Size and Framerate boundaries.
+    // Without these, the compositor throws out the offer because it can't intersect it
+    // against the physical screen dimensions, stalling the stream in 'paused'.
+    struct spa_rectangle req_size = {(uint32_t)target_width, (uint32_t)target_height};
+    struct spa_rectangle min_size = {1, 1};
+    struct spa_rectangle max_size = {4096, 4096};
+
+    struct spa_fraction req_framerate = {(uint32_t)target_fps, 1};
+    struct spa_fraction min_framerate = {0, 1};
+    struct spa_fraction max_framerate = {144, 1};
+
     params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
         &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
         SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), SPA_FORMAT_VIDEO_format,
         SPA_POD_CHOICE_ENUM_Id(14,
-                               SPA_VIDEO_FORMAT_RGBx, // Default
-                               SPA_VIDEO_FORMAT_RGBx, // Choices...
-                               SPA_VIDEO_FORMAT_RGBA, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRA,
-                               SPA_VIDEO_FORMAT_xRGB, SPA_VIDEO_FORMAT_ARGB, SPA_VIDEO_FORMAT_xBGR,
-                               SPA_VIDEO_FORMAT_ABGR, SPA_VIDEO_FORMAT_RGB, SPA_VIDEO_FORMAT_BGR, SPA_VIDEO_FORMAT_NV12,
-                               SPA_VIDEO_FORMAT_I420, SPA_VIDEO_FORMAT_YUY2),
-        0);
+                               SPA_VIDEO_FORMAT_BGRx, // Default
+                               SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_RGBx,
+                               SPA_VIDEO_FORMAT_RGBA, SPA_VIDEO_FORMAT_xBGR, SPA_VIDEO_FORMAT_ABGR,
+                               SPA_VIDEO_FORMAT_xRGB, SPA_VIDEO_FORMAT_ARGB, SPA_VIDEO_FORMAT_YUY2,
+                               SPA_VIDEO_FORMAT_UYVY, SPA_VIDEO_FORMAT_I420, SPA_VIDEO_FORMAT_NV12,
+                               SPA_VIDEO_FORMAT_YVYU),
+        SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(&req_size, &min_size, &max_size),
+        SPA_FORMAT_VIDEO_framerate, SPA_POD_CHOICE_RANGE_Fraction(&req_framerate, &min_framerate, &max_framerate),
+        0); // <--- TERMINATOR
 
     if (!params[0])
     {
@@ -323,9 +348,6 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
         return false;
     }
 
-    // CRITICAL FIX: Because we are already supplying PW_KEY_TARGET_OBJECT in the properties of a
-    // restricted FD mapping, we must use PW_ID_ANY here. Providing the node_id directly will conflict
-    // with WirePlumber's routing rules on portal-managed streams.
     int res = pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, PW_ID_ANY,
                                 (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 1);
 
