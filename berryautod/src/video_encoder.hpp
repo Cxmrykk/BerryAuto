@@ -69,7 +69,7 @@ public:
     struct pw_core* pw_core = nullptr;
     struct pw_stream* pw_stream = nullptr;
     struct spa_hook stream_listener;
-    struct spa_hook core_listener; // ADDED: Required to trace Core negotiation errors
+    struct spa_hook core_listener;
 
 private:
     int target_width, target_height, target_fps;

@@ -305,7 +305,8 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
         SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(&def_rect, &min_rect, &max_rect),
         SPA_FORMAT_VIDEO_framerate, SPA_POD_CHOICE_RANGE_Fraction(&def_frac, &min_frac, &max_frac));
 
-    int res = pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, PW_ID_ANY,
+    // CRITICAL FIX: Tell PipeWire to explicitly link directly to the isolated node ID provided by GNOME.
+    int res = pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, node_id,
                                 (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 1);
 
     if (res < 0)
@@ -314,8 +315,7 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
         return false;
     }
 
-    LOG_I("[PipeWire Debug] pw_stream_connect dispatched successfully (" << res
-                                                                         << "). Awaiting Server Node Response...");
+    LOG_I("[PipeWire Debug] pw_stream_connect dispatched successfully (" << res << ") for Node " << node_id << ".");
     return true;
 }
 
