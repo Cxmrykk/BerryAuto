@@ -7,6 +7,7 @@
 #include <linux/dma-buf.h>
 #include <spa/param/buffers.h>
 #include <spa/param/video/format-utils.h>
+#include <spa/utils/result.h>
 #include <string>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -21,7 +22,10 @@ static void on_process(void* userdata)
     VideoEncoder* enc = static_cast<VideoEncoder*>(userdata);
     struct pw_buffer* b = pw_stream_dequeue_buffer(enc->pw_stream);
     if (!b)
+    {
+        LOG_E("[PipeWire Debug] on_process: pw_stream_dequeue_buffer returned NULL!");
         return;
+    }
 
     struct spa_buffer* buf = b->buffer;
     void* src_data = buf->datas[0].data;
@@ -54,6 +58,10 @@ static void on_process(void* userdata)
             enc->latest_stride = stride;
         }
     }
+    else
+    {
+        LOG_E("[PipeWire Debug] on_process: Buffer data pointer is NULL!");
+    }
 
     pw_stream_queue_buffer(enc->pw_stream, b);
 }
@@ -64,17 +72,25 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
 
     if (param == NULL)
     {
-        LOG_E("[PipeWire] Format cleared by server! (Negotiation Failed or Node Disconnected)");
+        LOG_E("[PipeWire Debug] param_changed: FORMAT CLEARED! (id = "
+              << id << "). "
+              << "This means the Node rejected our format or disconnected!");
         return;
     }
 
     if (id == SPA_PARAM_EnumFormat)
+    {
+        LOG_I("[PipeWire Debug] param_changed: Server proposing SPA_PARAM_EnumFormat...");
         return;
+    }
 
     if (id != SPA_PARAM_Format)
+    {
+        LOG_I("[PipeWire Debug] param_changed: Unhandled param ID = " << id);
         return;
+    }
 
-    LOG_I("[PipeWire] on_param_changed fired with SPA_PARAM_Format! Parsing Layout...");
+    LOG_I("[PipeWire Debug] param_changed: Server accepted SPA_PARAM_Format! Parsing Layout...");
 
     struct spa_video_info_raw info;
     int parse_res = spa_format_video_raw_parse(param, &info);
@@ -127,6 +143,9 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
             stride = (info.size.width * 3 + 3) & ~3;
 
         uint32_t size = stride * info.size.height;
+
+        LOG_I("[PipeWire Debug] param_changed: Requesting Memory Buffers. Size: " << size << ", Stride: " << stride);
+
         uint8_t buffer[1024];
         struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
         const struct spa_pod* params[1];
@@ -137,23 +156,48 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
             SPA_POD_Int(size), SPA_PARAM_BUFFERS_stride, SPA_POD_Int(stride), SPA_PARAM_BUFFERS_align, SPA_POD_Int(16),
             SPA_PARAM_BUFFERS_dataType, SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr)));
 
-        pw_stream_update_params(enc->pw_stream, params, 1);
+        int update_res = pw_stream_update_params(enc->pw_stream, params, 1);
+        if (update_res < 0)
+        {
+            LOG_E("[PipeWire Debug] pw_stream_update_params failed: " << spa_strerror(update_res));
+        }
+        else
+        {
+            LOG_I("[PipeWire Debug] Memory Buffers requested successfully.");
+        }
     }
     else
     {
-        LOG_E("[PipeWire] CRITICAL: spa_format_video_raw_parse failed with code "
-              << parse_res << ". Format contains unsupported modifiers!");
+        LOG_E("[PipeWire Debug] CRITICAL: spa_format_video_raw_parse failed with code "
+              << parse_res << ". Format contains unsupported modifiers or DMA-BUF specifics we cannot handle!");
     }
 }
 
 static void on_state_changed(void* userdata, enum pw_stream_state old, enum pw_stream_state state, const char* error)
 {
     (void)userdata;
-    (void)old;
     if (error)
-        LOG_E("[PipeWire] Stream Error: " << error);
+        LOG_E("[PipeWire Debug] Stream Error! Transition: " << pw_stream_state_as_string(old) << " -> "
+                                                            << pw_stream_state_as_string(state)
+                                                            << " | Reason: " << error);
     else
-        LOG_I("[PipeWire] Stream State changed to: " << pw_stream_state_as_string(state));
+        LOG_I("[PipeWire Debug] Stream State changed: " << pw_stream_state_as_string(old) << " -> "
+                                                        << pw_stream_state_as_string(state));
+}
+
+static void on_add_buffer(void* userdata, struct pw_buffer* b)
+{
+    LOG_I("[PipeWire Debug] on_add_buffer: Server allocated buffer map.");
+}
+
+static void on_remove_buffer(void* userdata, struct pw_buffer* b)
+{
+    LOG_I("[PipeWire Debug] on_remove_buffer: Server destroyed buffer map.");
+}
+
+static void on_io_changed(void* userdata, uint32_t id, void* area, uint32_t size)
+{
+    LOG_I("[PipeWire Debug] on_io_changed: ID = " << id << " | Size = " << size);
 }
 
 static const struct pw_stream_events stream_events = []()
@@ -163,39 +207,75 @@ static const struct pw_stream_events stream_events = []()
     ev.process = on_process;
     ev.state_changed = on_state_changed;
     ev.param_changed = on_param_changed;
+    ev.add_buffer = on_add_buffer;
+    ev.remove_buffer = on_remove_buffer;
+    ev.io_changed = on_io_changed;
+    return ev;
+}();
+
+// --- Core Logging Handlers ---
+static void on_core_info(void* userdata, const struct pw_core_info* info)
+{
+    LOG_I("[PipeWire Debug] Core Info: Name=" << (info->name ? info->name : "Unknown")
+                                              << ", Version=" << (info->version ? info->version : "Unknown"));
+}
+
+static void on_core_error(void* userdata, uint32_t id, int seq, int res, const char* message)
+{
+    LOG_E("[PipeWire Debug] Core Error! ID: " << id << ", Seq: " << seq << ", Res: " << res << " (" << spa_strerror(res)
+                                              << "), Message: " << (message ? message : "None"));
+}
+
+static void on_core_done(void* userdata, uint32_t id, int seq)
+{
+    LOG_I("[PipeWire Debug] Core Done! ID: " << id << ", Seq: " << seq);
+}
+
+static const struct pw_core_events core_events = []()
+{
+    struct pw_core_events ev{};
+    ev.version = PW_VERSION_CORE_EVENTS;
+    ev.info = on_core_info;
+    ev.done = on_core_done;
+    ev.error = on_core_error;
     return ev;
 }();
 
 bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
 {
-    LOG_I("[PipeWire] Connecting to Node ID: " << node_id << " with FD: " << pw_fd);
+    LOG_I("[PipeWire Debug] Initializing... Connecting to Node ID: " << node_id << " with FD: " << pw_fd);
     pw_loop = pw_main_loop_new(NULL);
     if (!pw_loop)
         return false;
 
     pw_ctx = pw_context_new(pw_main_loop_get_loop(pw_loop), NULL, 0);
 
-    // Connect to GNOME's isolated PipeWire session utilizing the extracted FD
     if (pw_fd >= 0)
         pw_core = pw_context_connect_fd(pw_ctx, pw_fd, NULL, 0);
     else
         pw_core = pw_context_connect(pw_ctx, NULL, 0);
 
     if (!pw_core)
+    {
+        LOG_E("[PipeWire Debug] Failed to connect context to core server.");
         return false;
+    }
 
-    // Convert node_id to a string so it survives passing into the properties map natively
+    spa_zero(core_listener);
+    pw_core_add_listener(pw_core, &core_listener, &core_events, this);
+
     std::string node_id_str = std::to_string(node_id);
 
-    // CRITICAL: We MUST explicitly tell WirePlumber the node target object to evaluate our linking permissions inside
-    // the sandbox.
     pw_stream =
         pw_stream_new(pw_core, "OpenGAL Capture",
                       pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture", PW_KEY_MEDIA_ROLE,
                                         "Screen", PW_KEY_TARGET_OBJECT, node_id_str.c_str(), NULL));
 
     if (!pw_stream)
+    {
+        LOG_E("[PipeWire Debug] pw_stream_new failed.");
         return false;
+    }
 
     spa_zero(stream_listener);
     pw_stream_add_listener(pw_stream, &stream_listener, &stream_events, this);
@@ -214,7 +294,8 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
     struct spa_fraction min_frac = SPA_FRACTION(0, 1);
     struct spa_fraction max_frac = SPA_FRACTION(1000, 1);
 
-    // Provide complete EnumFormat bounds so Mutter properly falls back from DMA-BUFs to native memory buffers
+    LOG_I("[PipeWire Debug] Formatting EnumFormat constraints for negotiation...");
+
     params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
         &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
         SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), SPA_FORMAT_VIDEO_format,
@@ -224,12 +305,18 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
         SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(&def_rect, &min_rect, &max_rect),
         SPA_FORMAT_VIDEO_framerate, SPA_POD_CHOICE_RANGE_Fraction(&def_frac, &min_frac, &max_frac));
 
-    // CRITICAL: We MUST request PW_ID_ANY as the connection point to allow WirePlumber to auto-route the portal node
-    // seamlessly.
     int res = pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, PW_ID_ANY,
                                 (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 1);
 
-    return res >= 0;
+    if (res < 0)
+    {
+        LOG_E("[PipeWire Debug] pw_stream_connect failed! Error: " << spa_strerror(res));
+        return false;
+    }
+
+    LOG_I("[PipeWire Debug] pw_stream_connect dispatched successfully (" << res
+                                                                         << "). Awaiting Server Node Response...");
+    return true;
 }
 
 void VideoEncoder::cleanup_pipewire()
