@@ -55,6 +55,17 @@ EMITTER_PID=$!
 sleep 2
 UDC_NAME=$(ls /sys/class/udc | head -n 1)
 if [ -n "$UDC_NAME" ]; then
+    echo "[RUNNER] Evicting any system processes holding UDC: $UDC_NAME"
+    # Find whichever configfs gadget holds our UDC and terminate it
+    for u in /sys/kernel/config/usb_gadget/*/UDC; do
+        if [ "$(cat "$u" 2>/dev/null)" = "$UDC_NAME" ]; then
+            echo "" | sudo tee "$u" >/dev/null 2>&1
+        fi
+    done
+    # Strip out any legacy modules one last time
+    sudo modprobe -r g_serial g_ether g_mass_storage g_multi 2>/dev/null || true
+    
+    # Claim the UDC for BerryAuto
     echo "$UDC_NAME" | sudo tee /sys/kernel/config/usb_gadget/opengal/UDC > /dev/null
 else
     kill $EMITTER_PID
