@@ -76,11 +76,10 @@ bool VideoEncoder::init_gstreamer(uint32_t node_id, int pw_fd)
     gst_init(nullptr, nullptr);
     first_frame_received = false;
 
-    // CRITICAL FIX: Re-added `path=` to map to the target node_id.
-    // The FD authorizes us to access the portal session, but we still must specify
-    // which stream node to consume within that session!
-    std::string pipeline_str = "pipewiresrc fd=" + std::to_string(pw_fd) + " path=" + std::to_string(node_id) +
-                               " keepalive-time=1000 " + "! videoconvert " + "! video/x-raw,format=BGRA " +
+    // CRITICAL FIX: Replaced `path=` with `target-object=` to correctly target the numeric Node ID.
+    std::string pipeline_str = "pipewiresrc fd=" + std::to_string(pw_fd) + " target-object=" + std::to_string(node_id) +
+                               " keepalive-time=1000 do-timestamp=true " + "! videoconvert " +
+                               "! video/x-raw,format=BGRA " +
                                "! appsink name=mysink emit-signals=true sync=false drop=true max-buffers=2 async=false";
 
     GError* err = nullptr;
