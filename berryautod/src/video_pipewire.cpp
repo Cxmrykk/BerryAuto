@@ -60,7 +60,8 @@ static void on_process(void* userdata)
     }
     else
     {
-        LOG_E("[PipeWire Debug] on_process: Buffer data pointer is NULL!");
+        LOG_E("[PipeWire Debug] on_process: Buffer data pointer is NULL! (Did we receive a raw DMA-BUF without "
+              "mapping?)");
     }
 
     pw_stream_queue_buffer(enc->pw_stream, b);
@@ -74,13 +75,13 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
     {
         LOG_E("[PipeWire Debug] param_changed: FORMAT CLEARED! (id = "
               << id << "). "
-              << "This means the Node rejected our format or disconnected!");
+              << "The Server Node rejected our format intersection or abruptly disconnected!");
         return;
     }
 
     if (id == SPA_PARAM_EnumFormat)
     {
-        LOG_I("[PipeWire Debug] param_changed: Server proposing SPA_PARAM_EnumFormat...");
+        LOG_I("[PipeWire Debug] param_changed: Server sent an EnumFormat constraint check.");
         return;
     }
 
@@ -90,15 +91,15 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
         return;
     }
 
-    LOG_I("[PipeWire Debug] param_changed: Server accepted SPA_PARAM_Format! Parsing Layout...");
+    LOG_I("[PipeWire Debug] param_changed: Server ACCEPTED a Format! Parsing Layout...");
 
     struct spa_video_info_raw info;
     int parse_res = spa_format_video_raw_parse(param, &info);
 
     if (parse_res >= 0)
     {
-        LOG_I("[PipeWire] Native Format negotiated! Size: " << info.size.width << "x" << info.size.height
-                                                            << ", SPA ID: " << info.format);
+        LOG_I("[PipeWire] Negotiated Format -> Size: " << info.size.width << "x" << info.size.height
+                                                       << " | SPA ID: " << info.format);
 
         {
             std::lock_guard<std::mutex> lock(enc->frame_mutex);
@@ -144,12 +145,15 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
 
         uint32_t size = stride * info.size.height;
 
-        LOG_I("[PipeWire Debug] param_changed: Requesting Memory Buffers. Size: " << size << ", Stride: " << stride);
+        LOG_I("[PipeWire Debug] param_changed: Requesting Memory Buffers. Block Size: " << size
+                                                                                        << ", Stride: " << stride);
 
         uint8_t buffer[1024];
         struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
         const struct spa_pod* params[1];
 
+        // Explicitly request MemFd/MemPtr (system memory). We do NOT request DmaBuf here
+        // to force the compositor into CPU-mappable memory fallback!
         params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
             &b, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers, SPA_PARAM_BUFFERS_buffers,
             SPA_POD_CHOICE_RANGE_Int(4, 2, 8), SPA_PARAM_BUFFERS_blocks, SPA_POD_Int(1), SPA_PARAM_BUFFERS_size,
@@ -163,13 +167,14 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
         }
         else
         {
-            LOG_I("[PipeWire Debug] Memory Buffers requested successfully.");
+            LOG_I("[PipeWire Debug] Memory Buffers requested successfully. Awaiting streaming state...");
         }
     }
     else
     {
-        LOG_E("[PipeWire Debug] CRITICAL: spa_format_video_raw_parse failed with code "
-              << parse_res << ". Format contains unsupported modifiers or DMA-BUF specifics we cannot handle!");
+        LOG_E("[PipeWire Debug] CRITICAL: spa_format_video_raw_parse failed ("
+              << parse_res << "). "
+              << "The Server returned unsupported modifiers or a non-raw video layout.");
     }
 }
 
@@ -243,7 +248,13 @@ static const struct pw_core_events core_events = []()
 
 bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
 {
-    LOG_I("[PipeWire Debug] Initializing... Connecting to Node ID: " << node_id << " with FD: " << pw_fd);
+    // FORCE ENABLE INTENSE LOGGING INTERNALLY TO CATCH SESSION MANAGER REJECTIONS
+    setenv("PIPEWIRE_DEBUG", "4", 1);
+    setenv("WIREPLUMBER_DEBUG", "4", 1);
+    setenv("SPA_DEBUG", "4", 1);
+
+    LOG_I("[PipeWire Debug] Initializing... Connecting to target Node ID: " << node_id << " (FD: " << pw_fd << ")");
+
     pw_loop = pw_main_loop_new(NULL);
     if (!pw_loop)
         return false;
@@ -257,55 +268,46 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
 
     if (!pw_core)
     {
-        LOG_E("[PipeWire Debug] Failed to connect context to core server.");
+        LOG_E("[PipeWire Debug] Failed to connect Context to Core Server!");
         return false;
     }
 
     spa_zero(core_listener);
     pw_core_add_listener(pw_core, &core_listener, &core_events, this);
 
-    std::string node_id_str = std::to_string(node_id);
-
-    pw_stream =
-        pw_stream_new(pw_core, "OpenGAL Capture",
-                      pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture", PW_KEY_MEDIA_ROLE,
-                                        "Screen", PW_KEY_TARGET_OBJECT, node_id_str.c_str(), NULL));
+    // CRITICAL FIX: DO NOT pass PW_KEY_TARGET_OBJECT if we are explicitly providing node_id below.
+    // Conflicting target directives cause WirePlumber to abandon the link graph inside the sandbox!
+    pw_stream = pw_stream_new(pw_core, "BerryAuto Capture",
+                              pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture",
+                                                PW_KEY_MEDIA_ROLE, "Screen", NULL));
 
     if (!pw_stream)
     {
-        LOG_E("[PipeWire Debug] pw_stream_new failed.");
+        LOG_E("[PipeWire Debug] pw_stream_new failed!");
         return false;
     }
 
     spa_zero(stream_listener);
     pw_stream_add_listener(pw_stream, &stream_listener, &stream_events, this);
 
-    uint8_t buffer[1024];
+    uint8_t buffer[2048];
     struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
-
     const struct spa_pod* params[1];
 
-    struct spa_rectangle def_rect =
-        SPA_RECTANGLE(static_cast<uint32_t>(target_width), static_cast<uint32_t>(target_height));
-    struct spa_rectangle min_rect = SPA_RECTANGLE(1, 1);
-    struct spa_rectangle max_rect = SPA_RECTANGLE(16384, 16384);
+    LOG_I("[PipeWire Debug] Formatting broad EnumFormat constraints to force a server reply...");
 
-    struct spa_fraction def_frac = SPA_FRACTION(static_cast<uint32_t>(target_fps), 1);
-    struct spa_fraction min_frac = SPA_FRACTION(0, 1);
-    struct spa_fraction max_frac = SPA_FRACTION(1000, 1);
-
-    LOG_I("[PipeWire Debug] Formatting EnumFormat constraints for negotiation...");
-
+    // CRITICAL FIX: Omit size & framerate entirely. This tells the server "We will accept ANYTHING you send".
+    // If the server was rejecting our specific target_width/height, it will now pass and fallback to native.
     params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
         &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
         SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), SPA_FORMAT_VIDEO_format,
-        SPA_POD_CHOICE_ENUM_Id(7, SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_RGBA,
-                               SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_RGBx, SPA_VIDEO_FORMAT_BGR,
-                               SPA_VIDEO_FORMAT_RGB),
-        SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(&def_rect, &min_rect, &max_rect),
-        SPA_FORMAT_VIDEO_framerate, SPA_POD_CHOICE_RANGE_Fraction(&def_frac, &min_frac, &max_frac));
+        SPA_POD_CHOICE_ENUM_Id(14, SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_RGBA, SPA_VIDEO_FORMAT_RGBx,
+                               SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_ARGB, SPA_VIDEO_FORMAT_ABGR,
+                               SPA_VIDEO_FORMAT_xRGB, SPA_VIDEO_FORMAT_xBGR, SPA_VIDEO_FORMAT_RGB, SPA_VIDEO_FORMAT_BGR,
+                               SPA_VIDEO_FORMAT_I420, SPA_VIDEO_FORMAT_YV12, SPA_VIDEO_FORMAT_NV12,
+                               SPA_VIDEO_FORMAT_NV21));
 
-    // CRITICAL FIX: Tell PipeWire to explicitly link directly to the isolated node ID provided by GNOME.
+    // Tell the Stream to explicitly target the portal-authorized node_id, autoconnect, and map system buffers
     int res = pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, node_id,
                                 (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 1);
 
@@ -315,7 +317,7 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
         return false;
     }
 
-    LOG_I("[PipeWire Debug] pw_stream_connect dispatched successfully (" << res << ") for Node " << node_id << ".");
+    LOG_I("[PipeWire Debug] pw_stream_connect dispatched successfully (" << res << ") to Target Node " << node_id);
     return true;
 }
 
