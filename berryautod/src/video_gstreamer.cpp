@@ -53,7 +53,7 @@ static GstFlowReturn on_new_sample_callback(GstElement* sink, gpointer user_data
                 enc->latest_frame_buffer.resize(map.size);
 
             memcpy(enc->latest_frame_buffer.data(), map.data, map.size);
-            enc->latest_stride = w * 4; // BGRA stride is exactly width * 4
+            enc->latest_stride = w * 4;
         }
 
         if (size_changed)
@@ -75,13 +75,13 @@ bool VideoEncoder::init_gstreamer(uint32_t node_id, int pw_fd)
     gst_init(nullptr, nullptr);
     first_frame_received = false;
 
-    // CRITICAL FIXES APPLIED:
-    // 1. target-object ensures GStreamer connects correctly to the numeric Node ID assigned by GNOME
-    // 2. always-copy=true forces PipeWire to map Pi 4 DRM DMA-BUFs into CPU memory.
-    // 3. queue leaky=downstream creates a thread boundary so videoconvert doesn't block the source.
-    std::string pipeline_str = "pipewiresrc fd=" + std::to_string(pw_fd) + " target-object=" + std::to_string(node_id) +
-                               " always-copy=true keepalive-time=1000 do-timestamp=true " +
-                               "! queue max-size-buffers=2 leaky=downstream " + "! videoconvert " +
+    // CRITICAL FIXES:
+    // 1. We provide BOTH `path` and `target-object` to cover all Pi GStreamer versions.
+    // 2. We use `! video/x-raw` before the queue to explicitly accept any raw buffer type Mutter outputs.
+    // 3. `queue` isolates Mutter's push thread from the videoconvert process.
+    std::string pipeline_str = "pipewiresrc fd=" + std::to_string(pw_fd) + " path=" + std::to_string(node_id) +
+                               " target-object=" + std::to_string(node_id) + " keepalive-time=1000 " +
+                               "! video/x-raw " + "! queue max-size-buffers=2 leaky=downstream " + "! videoconvert " +
                                "! video/x-raw,format=BGRA " +
                                "! appsink name=mysink emit-signals=true sync=false drop=true max-buffers=2 async=false";
 
