@@ -75,13 +75,10 @@ bool VideoEncoder::init_gstreamer(uint32_t node_id, int pw_fd)
     gst_init(nullptr, nullptr);
     first_frame_received = false;
 
-    // CRITICAL FIXES:
-    // 1. We provide BOTH `path` and `target-object` to cover all Pi GStreamer versions.
-    // 2. We use `! video/x-raw` before the queue to explicitly accept any raw buffer type Mutter outputs.
-    // 3. `queue` isolates Mutter's push thread from the videoconvert process.
+    // CRITICAL FIX: Removed intermediate caps constraints that clash with Pi 4 DMA-BUFs.
+    // Removed duplicate target-object/path properties that confuse older GStreamer versions.
     std::string pipeline_str = "pipewiresrc fd=" + std::to_string(pw_fd) + " path=" + std::to_string(node_id) +
-                               " target-object=" + std::to_string(node_id) + " keepalive-time=1000 " +
-                               "! video/x-raw " + "! queue max-size-buffers=2 leaky=downstream " + "! videoconvert " +
+                               " ! queue max-size-buffers=2 leaky=downstream " + "! videoconvert " +
                                "! video/x-raw,format=BGRA " +
                                "! appsink name=mysink emit-signals=true sync=false drop=true max-buffers=2 async=false";
 
@@ -108,6 +105,20 @@ bool VideoEncoder::init_gstreamer(uint32_t node_id, int pw_fd)
     GstStateChangeReturn ret = gst_element_set_state(pipeline, GST_STATE_PLAYING);
     if (ret == GST_STATE_CHANGE_FAILURE)
     {
+        // NEW: Fetch the EXACT reason the transition failed from the message bus
+        GstMessage* msg = gst_bus_poll(gst_element_get_bus(pipeline), GST_MESSAGE_ERROR, 0);
+        if (msg)
+        {
+            GError* err_bus = nullptr;
+            gchar* debug_info = nullptr;
+            gst_message_parse_error(msg, &err_bus, &debug_info);
+            LOG_E("[GStreamer] PLAYING failed details: " << err_bus->message);
+            if (debug_info)
+                LOG_E("[GStreamer] Debug info: " << debug_info);
+            g_error_free(err_bus);
+            g_free(debug_info);
+            gst_message_unref(msg);
+        }
         LOG_E("[GStreamer] Failed to set pipeline to PLAYING state.");
         return false;
     }
