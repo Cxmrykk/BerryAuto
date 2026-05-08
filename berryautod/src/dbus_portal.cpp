@@ -48,16 +48,26 @@ static void ensure_desktop_file()
     mkdir(app_dir.c_str(), 0755);
 
     std::string path = app_dir + "/com.berryauto.screencast.desktop";
-    std::ifstream check(path);
-    if (!check.is_open())
+
+    // CRITICAL FIX: Always overwrite to ensure the file strictly conforms to the FreeDesktop spec.
+    // If the Exec line is invalid, GNOME silently ignores the file and issues a temporary token.
+    std::ofstream f(path, std::ios::trunc);
+    if (f.is_open())
     {
-        std::ofstream f(path);
         f << "[Desktop Entry]\n"
              "Name=BerryAuto\n"
-             "Exec=false\n"
+             "Exec=/bin/true\n"
+             "Icon=video-display\n"
              "Type=Application\n"
              "NoDisplay=true\n";
-        LOG_I("[Portal] Created persistent desktop file for App-ID anchoring.");
+        f.close();
+
+        // Nudge the desktop database so GNOME indexes the App-ID immediately
+        std::string cmd = "update-desktop-database " + app_dir + " >/dev/null 2>&1";
+        int ret = system(cmd.c_str());
+        (void)ret;
+
+        LOG_I("[Portal] Verified persistent desktop file for App-ID anchoring.");
     }
 }
 
@@ -261,11 +271,7 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id, int& out_fd)
     g_variant_builder_init(&b2, G_VARIANT_TYPE_VARDICT);
     g_variant_builder_add(&b2, "{sv}", "multiple", g_variant_new_boolean(FALSE));
     g_variant_builder_add(&b2, "{sv}", "types", g_variant_new_uint32(1));
-
-    // CRITICAL: Force Embedded Cursor. Required to trigger DPMS damage events
-    // on Wayland when the physical screen is detached.
     g_variant_builder_add(&b2, "{sv}", "cursor_mode", g_variant_new_uint32(1));
-
     g_variant_builder_add(&b2, "{sv}", "handle_token", g_variant_new_string("req2"));
     g_variant_builder_add(&b2, "{sv}", "persist_mode", g_variant_new_uint32(2));
 
