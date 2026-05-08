@@ -1,11 +1,14 @@
 #include "globals.hpp"
 #include "input_handler.hpp"
 #include "video_encoder.hpp"
+#include <gst/gst.h>
 #include <iostream>
 #include <string>
 #include <unistd.h>
 
 extern uint64_t get_monotonic_usec();
+
+static std::atomic<bool> first_frame_received{false};
 
 static GstFlowReturn on_new_sample_callback(GstElement* sink, gpointer user_data)
 {
@@ -13,6 +16,11 @@ static GstFlowReturn on_new_sample_callback(GstElement* sink, gpointer user_data
     GstSample* sample = gst_app_sink_pull_sample(GST_APP_SINK(sink));
     if (!sample)
         return GST_FLOW_ERROR;
+
+    if (!first_frame_received.exchange(true))
+    {
+        LOG_I("[GStreamer] SUCCESS! First frame received from GNOME Portal.");
+    }
 
     GstBuffer* buffer = gst_sample_get_buffer(sample);
     GstCaps* caps = gst_sample_get_caps(sample);
@@ -48,7 +56,7 @@ static GstFlowReturn on_new_sample_callback(GstElement* sink, gpointer user_data
             enc->latest_stride = w * 4; // BGRA stride is exactly width * 4
         }
 
-        // Must update sws strictly outside the frame lock to prevent deadlocks with process_raw_frame!
+        // Must update sws strictly outside the frame lock to prevent deadlocks
         if (size_changed)
         {
             enc->update_sws();
@@ -66,17 +74,13 @@ bool VideoEncoder::init_gstreamer(uint32_t node_id, int pw_fd)
     LOG_I("[GStreamer] Initializing pipeline for Node ID: " << node_id << " (FD: " << pw_fd << ")");
 
     gst_init(nullptr, nullptr);
+    first_frame_received = false;
 
-    // GStreamer safely handles the WirePlumber negotiation, converts whatever absurd
-    // memory formats Mutter attempts to send, and pushes safe contiguous BGRA memory chunks
-    // via appsink straight to our waiting h264 encoder.
-
-    // CRITICAL BUGFIX:
-    // 1. Omit "path=" property. The portal restricts lookup capabilities. Rely solely on the FD.
-    // 2. Set "async=false" on appsink. This prevents the state transition from blocking infinitely
-    //    waiting for preroll on completely idle desktops where GNOME refuses to send frames.
-    std::string pipeline_str = "pipewiresrc fd=" + std::to_string(pw_fd) + " keepalive-time=1000 " + "! videoconvert " +
-                               "! video/x-raw,format=BGRA " +
+    // CRITICAL FIX: Re-added `path=` to map to the target node_id.
+    // The FD authorizes us to access the portal session, but we still must specify
+    // which stream node to consume within that session!
+    std::string pipeline_str = "pipewiresrc fd=" + std::to_string(pw_fd) + " path=" + std::to_string(node_id) +
+                               " keepalive-time=1000 " + "! videoconvert " + "! video/x-raw,format=BGRA " +
                                "! appsink name=mysink emit-signals=true sync=false drop=true max-buffers=2 async=false";
 
     GError* err = nullptr;
@@ -150,6 +154,30 @@ void VideoEncoder::run_gstreamer_loop(uint32_t node_id, int pw_fd)
             wake_timer = 0;
         }
 
+        // Catch and print any asynchronous GStreamer errors (e.g. missing plugins)
+        GstBus* bus = gst_element_get_bus(pipeline);
+        if (bus)
+        {
+            GstMessage* msg = gst_bus_pop(bus);
+            while (msg != nullptr)
+            {
+                if (GST_MESSAGE_TYPE(msg) == GST_MESSAGE_ERROR)
+                {
+                    GError* err = nullptr;
+                    gchar* debug_info = nullptr;
+                    gst_message_parse_error(msg, &err, &debug_info);
+                    LOG_E("[GStreamer] PIPELINE ERROR: " << err->message);
+                    if (debug_info)
+                        LOG_E("[GStreamer] DEBUG INFO: " << debug_info);
+                    g_error_free(err);
+                    g_free(debug_info);
+                }
+                gst_message_unref(msg);
+                msg = gst_bus_pop(bus);
+            }
+            gst_object_unref(bus);
+        }
+
         std::vector<uint8_t> frame_copy;
         int current_stride = 0;
         int current_w = 0;
@@ -163,8 +191,8 @@ void VideoEncoder::run_gstreamer_loop(uint32_t node_id, int pw_fd)
             current_stride = latest_stride;
         }
 
-        // Continually push frames to AAP even if they are duplicate "stale" buffers from GNOME
-        // Android Auto disconnects if it doesn't receive a steady H264 bitstream!
+        // Continually push frames to AAP.
+        // Android Auto disconnects if it doesn't receive a steady bitstream!
         if (!frame_copy.empty() && current_w > 0 && current_h > 0)
         {
             process_raw_frame(frame_copy.data(), current_stride, current_w, current_h);
