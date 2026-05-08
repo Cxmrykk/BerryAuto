@@ -284,9 +284,15 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
     spa_zero(core_listener);
     pw_core_add_listener(pw_core, &core_listener, &core_events, this);
 
-    pw_stream = pw_stream_new(pw_core, "BerryAuto Capture",
-                              pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture",
-                                                PW_KEY_MEDIA_ROLE, "Screen", NULL));
+    pw_properties_t* props = pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture",
+                                               PW_KEY_MEDIA_ROLE, "Screen", NULL);
+
+    // CRITICAL FIX: The XDG Desktop Portal strictly requires the target node ID
+    // to be set as a stream property. Without this, WirePlumber refuses to authorize
+    // the restricted link!
+    pw_properties_setf(props, PW_KEY_TARGET_OBJECT, "%u", node_id);
+
+    pw_stream = pw_stream_new(pw_core, "BerryAuto Capture", props);
 
     if (!pw_stream)
     {
@@ -325,8 +331,9 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
         SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(&default_rect, &min_rect, &max_rect),
         SPA_FORMAT_VIDEO_framerate, SPA_POD_CHOICE_RANGE_Fraction(&default_fps, &min_fps, &max_fps));
 
-    // Tell the Stream to explicitly target the portal-authorized node_id, autoconnect, and map system buffers
-    int res = pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, node_id,
+    // CRITICAL FIX: Pass PW_ID_ANY here. WirePlumber will automatically route it to the `PW_KEY_TARGET_OBJECT` property
+    // set earlier.
+    int res = pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, PW_ID_ANY,
                                 (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 1);
 
     if (res < 0)
@@ -335,7 +342,7 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
         return false;
     }
 
-    LOG_I("[PipeWire Debug] pw_stream_connect dispatched successfully (" << res << ") to Target Node " << node_id);
+    LOG_I("[PipeWire Debug] pw_stream_connect dispatched successfully (" << res << ") for Target Node " << node_id);
     return true;
 }
 
