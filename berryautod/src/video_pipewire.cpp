@@ -30,6 +30,7 @@ static void on_process(void* userdata)
     struct spa_buffer* buf = b->buffer;
     void* src_data = buf->datas[0].data;
 
+    // PW_STREAM_FLAG_MAP_BUFFERS will automatically populate datas[0].data even for DmaBuf
     if (src_data)
     {
         std::lock_guard<std::mutex> lock(enc->frame_mutex);
@@ -60,8 +61,7 @@ static void on_process(void* userdata)
     }
     else
     {
-        LOG_E("[PipeWire Debug] on_process: Buffer data pointer is NULL! (Did we receive a raw DMA-BUF without "
-              "mapping?)");
+        LOG_E("[PipeWire Debug] on_process: Buffer data pointer is NULL! (Failed to map memory?)");
     }
 
     pw_stream_queue_buffer(enc->pw_stream, b);
@@ -152,13 +152,14 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
         struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
         const struct spa_pod* params[1];
 
-        // Explicitly request MemFd/MemPtr (system memory). We do NOT request DmaBuf here
-        // to force the compositor into CPU-mappable memory fallback!
+        // Explicitly accept DmaBuf alongside MemFd and MemPtr. Mutter strictly prefers DMA-BUFs.
+        // PW_STREAM_FLAG_MAP_BUFFERS ensures that PipeWire will perform the mmap for us!
         params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
             &b, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers, SPA_PARAM_BUFFERS_buffers,
             SPA_POD_CHOICE_RANGE_Int(4, 2, 8), SPA_PARAM_BUFFERS_blocks, SPA_POD_Int(1), SPA_PARAM_BUFFERS_size,
             SPA_POD_Int(size), SPA_PARAM_BUFFERS_stride, SPA_POD_Int(stride), SPA_PARAM_BUFFERS_align, SPA_POD_Int(16),
-            SPA_PARAM_BUFFERS_dataType, SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr)));
+            SPA_PARAM_BUFFERS_dataType,
+            SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr) | (1 << SPA_DATA_DmaBuf)));
 
         int update_res = pw_stream_update_params(enc->pw_stream, params, 1);
         if (update_res < 0)
@@ -283,13 +284,12 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
     spa_zero(core_listener);
     pw_core_add_listener(pw_core, &core_listener, &core_events, this);
 
-    // CRITICAL FIX: Removed the PW_KEY_TARGET_OBJECT property!
-    // XDG Desktop Portal requires you to pass the node_id directly as the 3rd argument
-    // to pw_stream_connect(). Applying it as a property can cause sandboxed wireplumber
-    // graphs to reject the node link.
-    pw_stream = pw_stream_new(pw_core, "BerryAuto Capture",
-                              pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture",
-                                                PW_KEY_MEDIA_ROLE, "Screen", NULL));
+    // Apply the Target Object property directly to ensure proper routing within the Node
+    struct pw_properties* props = pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture",
+                                                    PW_KEY_MEDIA_ROLE, "Screen", NULL);
+    pw_properties_setf(props, PW_KEY_TARGET_OBJECT, "%u", node_id);
+
+    pw_stream = pw_stream_new(pw_core, "BerryAuto Capture", props);
 
     if (!pw_stream)
     {
@@ -306,9 +306,17 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
 
     LOG_I("[PipeWire Debug] Formatting broad EnumFormat constraints to force a server reply...");
 
-    // CRITICAL FIX: The WebRTC / OBS Studio proven approach!
-    // Do NOT specify size or framerate bounds. We explicitly tell Mutter:
-    // "We support these raw color formats. We accept ANY size and ANY framerate."
+    // Safe C++ instantiations to prevent the compound-literal pointer warning
+    struct spa_rectangle def_rect = {(uint32_t)target_width, (uint32_t)target_height};
+    struct spa_rectangle min_rect = {1, 1};
+    struct spa_rectangle max_rect = {16384, 16384};
+
+    struct spa_fraction def_frac = {(uint32_t)target_fps, 1};
+    struct spa_fraction min_frac = {0, 1};
+    struct spa_fraction max_frac = {1000, 1};
+
+    // Explicitly define accepted Size and Framerate boundaries.
+    // Omitting them causes an empty intersection in GNOME/Mutter, hanging the stream natively.
     params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
         &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
         SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), SPA_FORMAT_VIDEO_format,
@@ -316,7 +324,9 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
                                SPA_VIDEO_FORMAT_RGBx, // Default
                                SPA_VIDEO_FORMAT_RGBx, // Choices...
                                SPA_VIDEO_FORMAT_RGBA, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRA,
-                               SPA_VIDEO_FORMAT_RGB, SPA_VIDEO_FORMAT_BGR));
+                               SPA_VIDEO_FORMAT_RGB, SPA_VIDEO_FORMAT_BGR),
+        SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(&def_rect, &min_rect, &max_rect),
+        SPA_FORMAT_VIDEO_framerate, SPA_POD_CHOICE_RANGE_Fraction(&def_frac, &min_frac, &max_frac));
 
     if (!params[0])
     {
@@ -324,7 +334,7 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
         return false;
     }
 
-    // Connect using node_id directly
+    // Connect using both node_id mapping and the PW_KEY_TARGET_OBJECT property above
     int res = pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, node_id,
                                 (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 1);
 
