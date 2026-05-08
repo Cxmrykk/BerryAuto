@@ -192,16 +192,22 @@ static void on_state_changed(void* userdata, enum pw_stream_state old, enum pw_s
 
 static void on_add_buffer(void* userdata, struct pw_buffer* b)
 {
+    (void)userdata;
+    (void)b;
     LOG_I("[PipeWire Debug] on_add_buffer: Server allocated buffer map.");
 }
 
 static void on_remove_buffer(void* userdata, struct pw_buffer* b)
 {
+    (void)userdata;
+    (void)b;
     LOG_I("[PipeWire Debug] on_remove_buffer: Server destroyed buffer map.");
 }
 
 static void on_io_changed(void* userdata, uint32_t id, void* area, uint32_t size)
 {
+    (void)userdata;
+    (void)area;
     LOG_I("[PipeWire Debug] on_io_changed: ID = " << id << " | Size = " << size);
 }
 
@@ -221,18 +227,21 @@ static const struct pw_stream_events stream_events = []()
 // --- Core Logging Handlers ---
 static void on_core_info(void* userdata, const struct pw_core_info* info)
 {
+    (void)userdata;
     LOG_I("[PipeWire Debug] Core Info: Name=" << (info->name ? info->name : "Unknown")
                                               << ", Version=" << (info->version ? info->version : "Unknown"));
 }
 
 static void on_core_error(void* userdata, uint32_t id, int seq, int res, const char* message)
 {
+    (void)userdata;
     LOG_E("[PipeWire Debug] Core Error! ID: " << id << ", Seq: " << seq << ", Res: " << res << " (" << spa_strerror(res)
                                               << "), Message: " << (message ? message : "None"));
 }
 
 static void on_core_done(void* userdata, uint32_t id, int seq)
 {
+    (void)userdata;
     LOG_I("[PipeWire Debug] Core Done! ID: " << id << ", Seq: " << seq);
 }
 
@@ -275,8 +284,6 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
     spa_zero(core_listener);
     pw_core_add_listener(pw_core, &core_listener, &core_events, this);
 
-    // CRITICAL FIX: DO NOT pass PW_KEY_TARGET_OBJECT if we are explicitly providing node_id below.
-    // Conflicting target directives cause WirePlumber to abandon the link graph inside the sandbox!
     pw_stream = pw_stream_new(pw_core, "BerryAuto Capture",
                               pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture",
                                                 PW_KEY_MEDIA_ROLE, "Screen", NULL));
@@ -296,10 +303,15 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
 
     LOG_I("[PipeWire Debug] Formatting broad EnumFormat constraints to force a server reply...");
 
-    // CRITICAL FIX: GNOME/Mutter STRICTLY requires size and framerate bounds to successfully intersect a format!
-    // Furthermore, SPA_POD_CHOICE_ENUM_Id requires the first value to be the DEFAULT, and then ALL valid choices.
-    // The previous code passed 14 formats but set n_vals to 14, meaning the first format was the default and NOT in the
-    // choice list!
+    // C++ Lvalues required for SPA macros taking memory addresses
+    struct spa_rectangle default_rect = SPA_RECTANGLE((uint32_t)target_width, (uint32_t)target_height);
+    struct spa_rectangle min_rect = SPA_RECTANGLE(1, 1);
+    struct spa_rectangle max_rect = SPA_RECTANGLE(4096, 4096);
+
+    struct spa_fraction default_fps = SPA_FRACTION((uint32_t)target_fps, 1);
+    struct spa_fraction min_fps = SPA_FRACTION(0, 1);
+    struct spa_fraction max_fps = SPA_FRACTION(1000, 1);
+
     params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
         &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
         SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), SPA_FORMAT_VIDEO_format,
@@ -310,12 +322,8 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
                                SPA_VIDEO_FORMAT_ARGB, SPA_VIDEO_FORMAT_ABGR, SPA_VIDEO_FORMAT_xRGB,
                                SPA_VIDEO_FORMAT_xBGR, SPA_VIDEO_FORMAT_RGB, SPA_VIDEO_FORMAT_BGR, SPA_VIDEO_FORMAT_I420,
                                SPA_VIDEO_FORMAT_YV12, SPA_VIDEO_FORMAT_NV12, SPA_VIDEO_FORMAT_NV21),
-        SPA_FORMAT_VIDEO_size,
-        SPA_POD_CHOICE_RANGE_Rectangle(&SPA_RECTANGLE((uint32_t)target_width, (uint32_t)target_height),
-                                       &SPA_RECTANGLE(1, 1), &SPA_RECTANGLE(4096, 4096)),
-        SPA_FORMAT_VIDEO_framerate,
-        SPA_POD_CHOICE_RANGE_Fraction(&SPA_FRACTION((uint32_t)target_fps, 1), &SPA_FRACTION(0, 1),
-                                      &SPA_FRACTION(1000, 1)));
+        SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(&default_rect, &min_rect, &max_rect),
+        SPA_FORMAT_VIDEO_framerate, SPA_POD_CHOICE_RANGE_Fraction(&default_fps, &min_fps, &max_fps));
 
     // Tell the Stream to explicitly target the portal-authorized node_id, autoconnect, and map system buffers
     int res = pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, node_id,
