@@ -7,7 +7,6 @@
 #include <linux/dma-buf.h>
 #include <spa/param/buffers.h>
 #include <spa/param/video/format-utils.h>
-#include <spa/pod/builder.h>
 #include <spa/utils/result.h>
 #include <string>
 #include <sys/ioctl.h>
@@ -61,8 +60,7 @@ static void on_process(void* userdata)
     }
     else
     {
-        LOG_E("[PipeWire Debug] on_process: Buffer data pointer is NULL! (Did we receive a raw DMA-BUF without "
-              "mapping?)");
+        LOG_E("[PipeWire Debug] on_process: Buffer data pointer is NULL! (Failed to map DMA-BUF?)");
     }
 
     pw_stream_queue_buffer(enc->pw_stream, b);
@@ -74,9 +72,7 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
 
     if (param == NULL)
     {
-        LOG_E("[PipeWire Debug] param_changed: FORMAT CLEARED! (id = "
-              << id << "). "
-              << "The Server Node rejected our format intersection or abruptly disconnected!");
+        LOG_E("[PipeWire Debug] param_changed: FORMAT CLEARED! (id = " << id << "). The Server rejected the format!");
         return;
     }
 
@@ -153,12 +149,14 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
         struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
         const struct spa_pod* params[1];
 
+        // CRITICAL FIX: Add 0 terminator to spa_pod_builder_add_object to prevent reading garbage memory
         params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
             &b, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers, SPA_PARAM_BUFFERS_buffers,
             SPA_POD_CHOICE_RANGE_Int(4, 2, 8), SPA_PARAM_BUFFERS_blocks, SPA_POD_Int(1), SPA_PARAM_BUFFERS_size,
             SPA_POD_Int(size), SPA_PARAM_BUFFERS_stride, SPA_POD_Int(stride), SPA_PARAM_BUFFERS_align, SPA_POD_Int(16),
             SPA_PARAM_BUFFERS_dataType,
-            SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr) | (1 << SPA_DATA_DmaBuf)));
+            SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr) | (1 << SPA_DATA_DmaBuf)),
+            0); // <--- TERMINATOR
 
         int update_res = pw_stream_update_params(enc->pw_stream, params, 1);
         if (update_res < 0)
@@ -172,9 +170,7 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
     }
     else
     {
-        LOG_E("[PipeWire Debug] CRITICAL: spa_format_video_raw_parse failed ("
-              << parse_res << "). "
-              << "The Server returned unsupported modifiers or a non-raw video layout.");
+        LOG_E("[PipeWire Debug] CRITICAL: spa_format_video_raw_parse failed (" << parse_res << ").");
     }
 }
 
@@ -283,8 +279,7 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
     spa_zero(core_listener);
     pw_core_add_listener(pw_core, &core_listener, &core_events, this);
 
-    // CRITICAL FIX 1: Do NOT set PW_KEY_TARGET_OBJECT.
-    // The Portal sandbox already locked this connection to the screen sharing node.
+    // CRITICAL FIX: Do not set PW_KEY_TARGET_OBJECT. We will pass node_id to pw_stream_connect.
     struct pw_properties* props = pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture",
                                                     PW_KEY_MEDIA_ROLE, "Screen", NULL);
 
@@ -305,17 +300,18 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
 
     LOG_I("[PipeWire Debug] Formatting broad EnumFormat constraints to force a server reply...");
 
-    // CRITICAL FIX 2: Omit size and framerate boundaries entirely.
-    // Providing constraints that do not mathematically intersect with Mutter's private
-    // virtual display layout will result in an empty intersection and a permanent pause.
+    // CRITICAL FIX: Terminate with 0 and include all GNOME formats (xRGB/xBGR/ARGB/ABGR)
     params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
         &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
         SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), SPA_FORMAT_VIDEO_format,
-        SPA_POD_CHOICE_ENUM_Id(7,
+        SPA_POD_CHOICE_ENUM_Id(14,
                                SPA_VIDEO_FORMAT_RGBx, // Default
                                SPA_VIDEO_FORMAT_RGBx, // Choices...
                                SPA_VIDEO_FORMAT_RGBA, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRA,
-                               SPA_VIDEO_FORMAT_RGB, SPA_VIDEO_FORMAT_BGR));
+                               SPA_VIDEO_FORMAT_xRGB, SPA_VIDEO_FORMAT_ARGB, SPA_VIDEO_FORMAT_xBGR,
+                               SPA_VIDEO_FORMAT_ABGR, SPA_VIDEO_FORMAT_RGB, SPA_VIDEO_FORMAT_BGR, SPA_VIDEO_FORMAT_NV12,
+                               SPA_VIDEO_FORMAT_I420, SPA_VIDEO_FORMAT_YUY2),
+        0); // <--- TERMINATOR
 
     if (!params[0])
     {
@@ -323,10 +319,7 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
         return false;
     }
 
-    // CRITICAL FIX 3: Connect using PW_ID_ANY.
-    // Specifying the node_id explicitly on a sandboxed portal FD is an illegal graph mutation.
-    // WirePlumber will reject the format negotiation if you try to route it explicitly here.
-    int res = pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, PW_ID_ANY,
+    int res = pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, node_id,
                                 (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 1);
 
     if (res < 0)
