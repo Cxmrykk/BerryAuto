@@ -263,7 +263,12 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id, int& out_fd)
     GVariantBuilder b2;
     g_variant_builder_init(&b2, G_VARIANT_TYPE_VARDICT);
     g_variant_builder_add(&b2, "{sv}", "multiple", g_variant_new_boolean(FALSE));
-    g_variant_builder_add(&b2, "{sv}", "types", g_variant_new_uint32(1));
+    g_variant_builder_add(&b2, "{sv}", "types", g_variant_new_uint32(1)); // 1 = Monitor
+
+    // CRITICAL FIX: Force Mutter to composite the cursor into the stream.
+    // When combined with wake_up_display(), this guarantees continuous frame generation.
+    g_variant_builder_add(&b2, "{sv}", "cursor_mode", g_variant_new_uint32(2)); // 2 = Embedded
+
     g_variant_builder_add(&b2, "{sv}", "handle_token", g_variant_new_string("req2"));
     g_variant_builder_add(&b2, "{sv}", "persist_mode", g_variant_new_uint32(2));
 
@@ -275,15 +280,6 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id, int& out_fd)
     }
 
     if (!run_portal_step("SelectSources", "req2", g_variant_new("(oa{sv})", session_path.c_str(), &b2), 60))
-        return false;
-
-    // STEP 3: Start
-    GVariantBuilder b3;
-    g_variant_builder_init(&b3, G_VARIANT_TYPE_VARDICT);
-    g_variant_builder_add(&b3, "{sv}", "handle_token", g_variant_new_string("req3"));
-
-    // 15 Second timeout to fail gracefully if the prompt pops up
-    if (!run_portal_step("Start", "req3", g_variant_new("(osa{sv})", session_path.c_str(), "", &b3), 15))
         return false;
 
     // STEP 4: Extract Node & Auth FD

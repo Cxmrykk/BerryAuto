@@ -56,7 +56,6 @@ static GstFlowReturn on_new_sample_callback(GstElement* sink, gpointer user_data
             enc->latest_stride = w * 4; // BGRA stride is exactly width * 4
         }
 
-        // Must update sws strictly outside the frame lock to prevent deadlocks
         if (size_changed)
         {
             enc->update_sws();
@@ -76,9 +75,13 @@ bool VideoEncoder::init_gstreamer(uint32_t node_id, int pw_fd)
     gst_init(nullptr, nullptr);
     first_frame_received = false;
 
-    // CRITICAL FIX: Replaced `path=` with `target-object=` to correctly target the numeric Node ID.
-    std::string pipeline_str = "pipewiresrc fd=" + std::to_string(pw_fd) + " target-object=" + std::to_string(node_id) +
-                               " keepalive-time=1000 do-timestamp=true " + "! videoconvert " +
+    // CRITICAL FIXES:
+    // 1. 'path' targets the node ID correctly for standard GStreamer versions.
+    // 2. 'always-copy=true' forces PipeWire to map Pi 4 DRM DMA-BUFs into CPU memory.
+    // 3. 'queue leaky=downstream' creates a thread boundary so videoconvert doesn't block the source.
+    std::string pipeline_str = "pipewiresrc fd=" + std::to_string(pw_fd) + " path=" + std::to_string(node_id) +
+                               " always-copy=true keepalive-time=1000 " +
+                               "! queue max-size-buffers=2 leaky=downstream " + "! videoconvert " +
                                "! video/x-raw,format=BGRA " +
                                "! appsink name=mysink emit-signals=true sync=false drop=true max-buffers=2 async=false";
 
@@ -140,7 +143,6 @@ void VideoEncoder::run_gstreamer_loop(uint32_t node_id, int pw_fd)
     uint64_t next_frame_time = get_monotonic_usec() + frame_interval_us;
     int wake_timer = 0;
 
-    // Wake the display immediately so Mutter sends the very first preroll frame
     wake_up_display();
 
     while (running.load())
@@ -148,12 +150,10 @@ void VideoEncoder::run_gstreamer_loop(uint32_t node_id, int pw_fd)
         wake_timer++;
         if (wake_timer >= target_fps)
         {
-            // Continuously nudge GNOME every second so the stream doesn't flatline
             wake_up_display();
             wake_timer = 0;
         }
 
-        // Catch and print any asynchronous GStreamer errors (e.g. missing plugins)
         GstBus* bus = gst_element_get_bus(pipeline);
         if (bus)
         {
@@ -190,8 +190,6 @@ void VideoEncoder::run_gstreamer_loop(uint32_t node_id, int pw_fd)
             current_stride = latest_stride;
         }
 
-        // Continually push frames to AAP.
-        // Android Auto disconnects if it doesn't receive a steady bitstream!
         if (!frame_copy.empty() && current_w > 0 && current_h > 0)
         {
             process_raw_frame(frame_copy.data(), current_stride, current_w, current_h);
