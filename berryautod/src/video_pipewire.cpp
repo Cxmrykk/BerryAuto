@@ -257,7 +257,6 @@ static const struct pw_core_events core_events = []()
 
 bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
 {
-    // FORCE ENABLE INTENSE LOGGING INTERNALLY TO CATCH SESSION MANAGER REJECTIONS
     setenv("PIPEWIRE_DEBUG", "4", 1);
     setenv("WIREPLUMBER_DEBUG", "4", 1);
     setenv("SPA_DEBUG", "4", 1);
@@ -284,15 +283,13 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
     spa_zero(core_listener);
     pw_core_add_listener(pw_core, &core_listener, &core_events, this);
 
-    struct pw_properties* props = pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture",
-                                                    PW_KEY_MEDIA_ROLE, "Screen", NULL);
-
-    // CRITICAL FIX: The XDG Desktop Portal strictly requires the target node ID
-    // to be set as a stream property. Without this, WirePlumber refuses to authorize
-    // the restricted link!
-    pw_properties_setf(props, PW_KEY_TARGET_OBJECT, "%u", node_id);
-
-    pw_stream = pw_stream_new(pw_core, "BerryAuto Capture", props);
+    // CRITICAL FIX: Removed the PW_KEY_TARGET_OBJECT property!
+    // XDG Desktop Portal requires you to pass the node_id directly as the 3rd argument
+    // to pw_stream_connect(). Applying it as a property can cause sandboxed wireplumber
+    // graphs to reject the node link.
+    pw_stream = pw_stream_new(pw_core, "BerryAuto Capture",
+                              pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture",
+                                                PW_KEY_MEDIA_ROLE, "Screen", NULL));
 
     if (!pw_stream)
     {
@@ -303,37 +300,32 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
     spa_zero(stream_listener);
     pw_stream_add_listener(pw_stream, &stream_listener, &stream_events, this);
 
-    uint8_t buffer[2048];
+    uint8_t buffer[1024];
     struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
     const struct spa_pod* params[1];
 
     LOG_I("[PipeWire Debug] Formatting broad EnumFormat constraints to force a server reply...");
 
-    // C++ Lvalues required for SPA macros taking memory addresses
-    struct spa_rectangle default_rect = SPA_RECTANGLE((uint32_t)target_width, (uint32_t)target_height);
-    struct spa_rectangle min_rect = SPA_RECTANGLE(1, 1);
-    struct spa_rectangle max_rect = SPA_RECTANGLE(4096, 4096);
-
-    struct spa_fraction default_fps = SPA_FRACTION((uint32_t)target_fps, 1);
-    struct spa_fraction min_fps = SPA_FRACTION(0, 1);
-    struct spa_fraction max_fps = SPA_FRACTION(1000, 1);
-
+    // CRITICAL FIX: The WebRTC / OBS Studio proven approach!
+    // Do NOT specify size or framerate bounds. We explicitly tell Mutter:
+    // "We support these raw color formats. We accept ANY size and ANY framerate."
     params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
         &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
         SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), SPA_FORMAT_VIDEO_format,
-        SPA_POD_CHOICE_ENUM_Id(15,
-                               SPA_VIDEO_FORMAT_BGRA, // default
-                               SPA_VIDEO_FORMAT_BGRA, // choices...
-                               SPA_VIDEO_FORMAT_RGBA, SPA_VIDEO_FORMAT_RGBx, SPA_VIDEO_FORMAT_BGRx,
-                               SPA_VIDEO_FORMAT_ARGB, SPA_VIDEO_FORMAT_ABGR, SPA_VIDEO_FORMAT_xRGB,
-                               SPA_VIDEO_FORMAT_xBGR, SPA_VIDEO_FORMAT_RGB, SPA_VIDEO_FORMAT_BGR, SPA_VIDEO_FORMAT_I420,
-                               SPA_VIDEO_FORMAT_YV12, SPA_VIDEO_FORMAT_NV12, SPA_VIDEO_FORMAT_NV21),
-        SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(&default_rect, &min_rect, &max_rect),
-        SPA_FORMAT_VIDEO_framerate, SPA_POD_CHOICE_RANGE_Fraction(&default_fps, &min_fps, &max_fps));
+        SPA_POD_CHOICE_ENUM_Id(7,
+                               SPA_VIDEO_FORMAT_RGBx, // Default
+                               SPA_VIDEO_FORMAT_RGBx, // Choices...
+                               SPA_VIDEO_FORMAT_RGBA, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRA,
+                               SPA_VIDEO_FORMAT_RGB, SPA_VIDEO_FORMAT_BGR));
 
-    // CRITICAL FIX: Pass PW_ID_ANY here. WirePlumber will automatically route it to the `PW_KEY_TARGET_OBJECT` property
-    // set earlier.
-    int res = pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, PW_ID_ANY,
+    if (!params[0])
+    {
+        LOG_E("[PipeWire Debug] CRITICAL: spa_pod_builder_add_object failed to allocate EnumFormat!");
+        return false;
+    }
+
+    // Connect using node_id directly
+    int res = pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, node_id,
                                 (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 1);
 
     if (res < 0)
