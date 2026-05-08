@@ -284,8 +284,8 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
     spa_zero(core_listener);
     pw_core_add_listener(pw_core, &core_listener, &core_events, this);
 
-    pw_properties_t* props = pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture",
-                                               PW_KEY_MEDIA_ROLE, "Screen", NULL);
+    struct pw_properties* props = pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture",
+                                                    PW_KEY_MEDIA_ROLE, "Screen", NULL);
 
     // CRITICAL FIX: The XDG Desktop Portal strictly requires the target node ID
     // to be set as a stream property. Without this, WirePlumber refuses to authorize
