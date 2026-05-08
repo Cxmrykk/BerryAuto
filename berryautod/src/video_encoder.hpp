@@ -12,11 +12,12 @@ extern "C"
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/extensions/XShm.h>
+#include <gst/app/gstappsink.h>
+#include <gst/gst.h>
 #include <libavcodec/avcodec.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/opt.h>
 #include <libswscale/swscale.h>
-#include <pipewire/pipewire.h>
 #include <sys/ipc.h>
 #include <sys/shm.h>
 #include <wayland-client.h>
@@ -63,13 +64,9 @@ public:
     zwlr_screencopy_manager_v1* wlr_screencopy = nullptr;
     void request_wayland_frame_sync();
 
-    // --- PipeWire State ---
-    struct pw_main_loop* pw_loop = nullptr;
-    struct pw_context* pw_ctx = nullptr;
-    struct pw_core* pw_core = nullptr;
-    struct pw_stream* pw_stream = nullptr;
-    struct spa_hook stream_listener;
-    struct spa_hook core_listener;
+    // --- GStreamer State ---
+    GstElement* pipeline = nullptr;
+    GstElement* appsink = nullptr;
 
 private:
     int target_width, target_height, target_fps;
@@ -82,7 +79,7 @@ private:
     // Backend Execution Loops
     void run_x11_loop();
     void run_wlr_loop();
-    void run_pipewire_loop(uint32_t node_id, int pw_fd);
+    void run_gstreamer_loop(uint32_t node_id, int pw_fd);
 
     // --- X11 ---
     Display* dpy = nullptr;
@@ -98,9 +95,9 @@ private:
     bool init_wlr_registry();
     void cleanup_wlr_registry();
 
-    // --- PipeWire ---
-    bool init_pipewire(uint32_t node_id, int pw_fd);
-    void cleanup_pipewire();
+    // --- GStreamer ---
+    bool init_gstreamer(uint32_t node_id, int pw_fd);
+    void cleanup_gstreamer();
 
     // --- FFmpeg ---
     const AVCodec* codec = nullptr;

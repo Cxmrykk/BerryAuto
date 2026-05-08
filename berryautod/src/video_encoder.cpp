@@ -39,8 +39,6 @@ void VideoEncoder::stop()
     if (!running.load())
         return;
     running = false;
-    if (pw_loop)
-        pw_main_loop_quit(pw_loop);
     if (worker_thread.joinable())
         worker_thread.join();
 }
@@ -203,13 +201,13 @@ void VideoEncoder::capture_loop()
             }
             else
             {
-                LOG_I("[Capture] GNOME/Mutter detected. Falling back to PipeWire Portal.");
+                LOG_I("[Capture] GNOME/Mutter detected. Falling back to GStreamer Portal.");
                 uint32_t node_id = 0;
                 int pw_fd = -1;
 
                 if (negotiate_wayland_screencast(node_id, pw_fd))
                 {
-                    run_pipewire_loop(node_id, pw_fd);
+                    run_gstreamer_loop(node_id, pw_fd);
                 }
                 else
                 {
