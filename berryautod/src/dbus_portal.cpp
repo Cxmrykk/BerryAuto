@@ -47,22 +47,20 @@ static void ensure_desktop_file()
     mkdir(share_dir.c_str(), 0755);
     mkdir(app_dir.c_str(), 0755);
 
-    std::string path = app_dir + "/com.berryauto.screencast.desktop";
+    // CRITICAL FIX: Changed App ID to bypass any cached "Deny" rules in GNOME's permission store.
+    std::string path = app_dir + "/com.berryauto.receiver.desktop";
 
-    // CRITICAL FIX: Always overwrite to ensure the file strictly conforms to the FreeDesktop spec.
-    // If the Exec line is invalid, GNOME silently ignores the file and issues a temporary token.
     std::ofstream f(path, std::ios::trunc);
     if (f.is_open())
     {
+        // CRITICAL FIX: Removed NoDisplay=true. GNOME auto-denies screen sharing for hidden apps!
         f << "[Desktop Entry]\n"
              "Name=BerryAuto\n"
-             "Exec=/bin/true\n"
+             "Exec=berryauto\n"
              "Icon=video-display\n"
-             "Type=Application\n"
-             "NoDisplay=true\n";
+             "Type=Application\n";
         f.close();
 
-        // Nudge the desktop database so GNOME indexes the App-ID immediately
         std::string cmd = "update-desktop-database " + app_dir + " >/dev/null 2>&1";
         int ret = system(cmd.c_str());
         (void)ret;
@@ -196,10 +194,10 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id, int& out_fd)
             return false;
         }
 
-        GVariant* name_res = g_dbus_connection_call_sync(portal_conn, "org.freedesktop.DBus", "/org/freedesktop/DBus",
-                                                         "org.freedesktop.DBus", "RequestName",
-                                                         g_variant_new("(su)", "com.berryauto.screencast", 0), nullptr,
-                                                         G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr);
+        // Updated RequestName to match new App ID
+        GVariant* name_res = g_dbus_connection_call_sync(
+            portal_conn, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "RequestName",
+            g_variant_new("(su)", "com.berryauto.receiver", 0), nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr);
         if (name_res)
             g_variant_unref(name_res);
     }
