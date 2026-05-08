@@ -49,7 +49,9 @@ echo "HU-AAAAAA001" | sudo tee /sys/kernel/config/usb_gadget/opengal/strings/0x4
 echo "[RUNNER] Environment: WAYLAND=$WAYLAND_DISPLAY DBUS=$DBUS_SESSION_BUS_ADDRESS DESKTOP=$XDG_CURRENT_DESKTOP"
 
 # Run the Universal Hybrid Emitter
-./berryautod/build/opengal_emitter &
+# CRITICAL FIX: Wrap in a systemd user scope so the GNOME DBus Portal maps the process
+# to our com.berryauto.screencast.desktop file, unlocking permanent token persistence.
+systemd-run --quiet --user --scope --unit="app-com.berryauto.screencast-$$" "$PWD/berryautod/build/opengal_emitter" &
 EMITTER_PID=$!
 
 sleep 2
@@ -86,7 +88,8 @@ if [ $EXIT_CODE -eq 42 ]; then
     echo "Android Auto" | sudo tee /sys/kernel/config/usb_gadget/opengal/strings/0x409/product > /dev/null
     
     echo "[RUNNER] Restarting for AAP Stream..."
-    ./berryautod/build/opengal_emitter &
+    # Apply the same CGroup spoofing to the morph restart!
+    systemd-run --quiet --user --scope --unit="app-com.berryauto.screencast-morph-$$" "$PWD/berryautod/build/opengal_emitter" &
     PID2=$!
     
     sleep 2 
