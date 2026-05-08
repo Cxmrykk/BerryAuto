@@ -70,9 +70,14 @@ bool VideoEncoder::init_gstreamer(uint32_t node_id, int pw_fd)
     // GStreamer safely handles the WirePlumber negotiation, converts whatever absurd
     // memory formats Mutter attempts to send, and pushes safe contiguous BGRA memory chunks
     // via appsink straight to our waiting h264 encoder.
-    std::string pipeline_str = "pipewiresrc fd=" + std::to_string(pw_fd) + " path=" + std::to_string(node_id) +
-                               " keepalive-time=1000 " + "! videoconvert " + "! video/x-raw,format=BGRA " +
-                               "! appsink name=mysink emit-signals=true sync=false drop=true max-buffers=2";
+
+    // CRITICAL BUGFIX:
+    // 1. Omit "path=" property. The portal restricts lookup capabilities. Rely solely on the FD.
+    // 2. Set "async=false" on appsink. This prevents the state transition from blocking infinitely
+    //    waiting for preroll on completely idle desktops where GNOME refuses to send frames.
+    std::string pipeline_str = "pipewiresrc fd=" + std::to_string(pw_fd) + " keepalive-time=1000 " + "! videoconvert " +
+                               "! video/x-raw,format=BGRA " +
+                               "! appsink name=mysink emit-signals=true sync=false drop=true max-buffers=2 async=false";
 
     GError* err = nullptr;
     pipeline = gst_parse_launch(pipeline_str.c_str(), &err);
@@ -93,6 +98,7 @@ bool VideoEncoder::init_gstreamer(uint32_t node_id, int pw_fd)
 
     g_signal_connect(appsink, "new-sample", G_CALLBACK(on_new_sample_callback), this);
 
+    LOG_I("[GStreamer] Setting pipeline to PLAYING state...");
     GstStateChangeReturn ret = gst_element_set_state(pipeline, GST_STATE_PLAYING);
     if (ret == GST_STATE_CHANGE_FAILURE)
     {
@@ -131,6 +137,7 @@ void VideoEncoder::run_gstreamer_loop(uint32_t node_id, int pw_fd)
     uint64_t next_frame_time = get_monotonic_usec() + frame_interval_us;
     int wake_timer = 0;
 
+    // Wake the display immediately so Mutter sends the very first preroll frame
     wake_up_display();
 
     while (running.load())
@@ -138,6 +145,7 @@ void VideoEncoder::run_gstreamer_loop(uint32_t node_id, int pw_fd)
         wake_timer++;
         if (wake_timer >= target_fps)
         {
+            // Continuously nudge GNOME every second so the stream doesn't flatline
             wake_up_display();
             wake_timer = 0;
         }
@@ -155,6 +163,8 @@ void VideoEncoder::run_gstreamer_loop(uint32_t node_id, int pw_fd)
             current_stride = latest_stride;
         }
 
+        // Continually push frames to AAP even if they are duplicate "stale" buffers from GNOME
+        // Android Auto disconnects if it doesn't receive a steady H264 bitstream!
         if (!frame_copy.empty() && current_w > 0 && current_h > 0)
         {
             process_raw_frame(frame_copy.data(), current_stride, current_w, current_h);
