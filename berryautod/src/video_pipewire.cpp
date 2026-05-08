@@ -333,19 +333,12 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
     struct spa_fraction min_framerate = {0, 1};
     struct spa_fraction max_framerate = {144, 1};
 
-    // 15 Arguments total: 1 Default + 14 Options
+    // CRITICAL FIX: Do NOT specify SPA_FORMAT_VIDEO_format, size, or framerate here!
+    // Providing strict constraints causes WirePlumber to silently drop the link in a portal sandbox.
+    // By providing only the Media Type, Mutter is forced to emit its native layout to on_param_changed.
     params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
         &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
-        SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), SPA_FORMAT_VIDEO_format,
-        SPA_POD_CHOICE_ENUM_Id(15,
-                               SPA_VIDEO_FORMAT_BGRx, // Default
-                               SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_RGBx,
-                               SPA_VIDEO_FORMAT_RGBA, SPA_VIDEO_FORMAT_xBGR, SPA_VIDEO_FORMAT_ABGR,
-                               SPA_VIDEO_FORMAT_xRGB, SPA_VIDEO_FORMAT_ARGB, SPA_VIDEO_FORMAT_YUY2,
-                               SPA_VIDEO_FORMAT_UYVY, SPA_VIDEO_FORMAT_I420, SPA_VIDEO_FORMAT_NV12,
-                               SPA_VIDEO_FORMAT_YVYU, SPA_VIDEO_FORMAT_NV21),
-        SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(&req_size, &min_size, &max_size),
-        SPA_FORMAT_VIDEO_framerate, SPA_POD_CHOICE_RANGE_Fraction(&req_framerate, &min_framerate, &max_framerate),
+        SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
         0); // <-- TERMINATOR
 
     if (!params[0])
@@ -354,11 +347,9 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
         return false;
     }
 
-    // CRITICAL FIX: Direct link to `node_id` bypassing absent session manager.
-    // PW_STREAM_FLAG_AUTOCONNECT instructs PipeWire core to physically complete the graph link.
+    // Connect the stream. Pass node_id as the target.
     int res = pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, node_id,
                                 (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 1);
-
     if (res < 0)
     {
         LOG_E("[PipeWire Debug] pw_stream_connect failed! Error: " << spa_strerror(res));
