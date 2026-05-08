@@ -296,16 +296,26 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
 
     LOG_I("[PipeWire Debug] Formatting broad EnumFormat constraints to force a server reply...");
 
-    // CRITICAL FIX: Omit size & framerate entirely. This tells the server "We will accept ANYTHING you send".
-    // If the server was rejecting our specific target_width/height, it will now pass and fallback to native.
+    // CRITICAL FIX: GNOME/Mutter STRICTLY requires size and framerate bounds to successfully intersect a format!
+    // Furthermore, SPA_POD_CHOICE_ENUM_Id requires the first value to be the DEFAULT, and then ALL valid choices.
+    // The previous code passed 14 formats but set n_vals to 14, meaning the first format was the default and NOT in the
+    // choice list!
     params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
         &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
         SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), SPA_FORMAT_VIDEO_format,
-        SPA_POD_CHOICE_ENUM_Id(14, SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_RGBA, SPA_VIDEO_FORMAT_RGBx,
-                               SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_ARGB, SPA_VIDEO_FORMAT_ABGR,
-                               SPA_VIDEO_FORMAT_xRGB, SPA_VIDEO_FORMAT_xBGR, SPA_VIDEO_FORMAT_RGB, SPA_VIDEO_FORMAT_BGR,
-                               SPA_VIDEO_FORMAT_I420, SPA_VIDEO_FORMAT_YV12, SPA_VIDEO_FORMAT_NV12,
-                               SPA_VIDEO_FORMAT_NV21));
+        SPA_POD_CHOICE_ENUM_Id(15,
+                               SPA_VIDEO_FORMAT_BGRA, // default
+                               SPA_VIDEO_FORMAT_BGRA, // choices...
+                               SPA_VIDEO_FORMAT_RGBA, SPA_VIDEO_FORMAT_RGBx, SPA_VIDEO_FORMAT_BGRx,
+                               SPA_VIDEO_FORMAT_ARGB, SPA_VIDEO_FORMAT_ABGR, SPA_VIDEO_FORMAT_xRGB,
+                               SPA_VIDEO_FORMAT_xBGR, SPA_VIDEO_FORMAT_RGB, SPA_VIDEO_FORMAT_BGR, SPA_VIDEO_FORMAT_I420,
+                               SPA_VIDEO_FORMAT_YV12, SPA_VIDEO_FORMAT_NV12, SPA_VIDEO_FORMAT_NV21),
+        SPA_FORMAT_VIDEO_size,
+        SPA_POD_CHOICE_RANGE_Rectangle(&SPA_RECTANGLE((uint32_t)target_width, (uint32_t)target_height),
+                                       &SPA_RECTANGLE(1, 1), &SPA_RECTANGLE(4096, 4096)),
+        SPA_FORMAT_VIDEO_framerate,
+        SPA_POD_CHOICE_RANGE_Fraction(&SPA_FRACTION((uint32_t)target_fps, 1), &SPA_FRACTION(0, 1),
+                                      &SPA_FRACTION(1000, 1)));
 
     // Tell the Stream to explicitly target the portal-authorized node_id, autoconnect, and map system buffers
     int res = pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, node_id,
