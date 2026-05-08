@@ -20,7 +20,7 @@ static int pw_frame_count = 0;
 static void on_process(void* userdata)
 {
     VideoEncoder* enc = static_cast<VideoEncoder*>(userdata);
-    struct pw_buffer* b = pw_stream_dequeue_buffer(enc->pw_stream);
+    struct pw_buffer* b = pw_stream_dequeue_buffer(enc->pw_stream_inst);
     if (!b)
         return;
 
@@ -58,7 +58,7 @@ static void on_process(void* userdata)
         LOG_E("[PipeWire] Buffer data pointer is NULL!");
     }
 
-    pw_stream_queue_buffer(enc->pw_stream, b);
+    pw_stream_queue_buffer(enc->pw_stream_inst, b);
 }
 
 static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* param)
@@ -113,16 +113,14 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
         struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
         const struct spa_pod* params[1];
 
-        // CRITICAL FIX: Restrict to `SPA_DATA_MemPtr` ONLY.
-        // This forces Mutter to detile DRM modifiers and send us pure linear CPU memory,
-        // instantly fixing horizontal slanting and DMA-BUF memory mapping failures.
+        // Ensure MemPtr is forced so Mutter unpacks the DMA-BUFs into linear memory
         params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
             &b, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers, SPA_PARAM_BUFFERS_buffers,
             SPA_POD_CHOICE_RANGE_Int(4, 2, 8), SPA_PARAM_BUFFERS_blocks, SPA_POD_Int(1), SPA_PARAM_BUFFERS_size,
             SPA_POD_Int(size), SPA_PARAM_BUFFERS_stride, SPA_POD_Int(stride), SPA_PARAM_BUFFERS_align, SPA_POD_Int(16),
             SPA_PARAM_BUFFERS_dataType, SPA_POD_CHOICE_FLAGS_Int(1 << SPA_DATA_MemPtr), 0);
 
-        pw_stream_update_params(enc->pw_stream, params, 1);
+        pw_stream_update_params(enc->pw_stream_inst, params, 1);
     }
 }
 
@@ -153,19 +151,19 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
         return false;
 
     pw_ctx = pw_context_new(pw_main_loop_get_loop(pw_loop), NULL, 0);
-    pw_core = (pw_fd >= 0) ? pw_context_connect_fd(pw_ctx, pw_fd, NULL, 0) : pw_context_connect(pw_ctx, NULL, 0);
+    pw_core_inst = (pw_fd >= 0) ? pw_context_connect_fd(pw_ctx, pw_fd, NULL, 0) : pw_context_connect(pw_ctx, NULL, 0);
 
-    if (!pw_core)
+    if (!pw_core_inst)
         return false;
 
     struct pw_properties* props = pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture",
                                                     PW_KEY_MEDIA_ROLE, "Screen", NULL);
 
-    pw_stream = pw_stream_new(pw_core, "BerryAuto Capture", props);
-    if (!pw_stream)
+    pw_stream_inst = pw_stream_new(pw_core_inst, "BerryAuto Capture", props);
+    if (!pw_stream_inst)
         return false;
 
-    pw_stream_add_listener(pw_stream, &stream_listener, &stream_events, this);
+    pw_stream_add_listener(pw_stream_inst, &stream_listener, &stream_events, this);
 
     uint8_t buffer[1024];
     struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
@@ -175,7 +173,7 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
         &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
         SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), 0);
 
-    int res = pw_stream_connect(pw_stream, PW_DIRECTION_INPUT, node_id,
+    int res = pw_stream_connect(pw_stream_inst, PW_DIRECTION_INPUT, node_id,
                                 (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 1);
 
     return (res >= 0);
@@ -183,16 +181,16 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
 
 void VideoEncoder::cleanup_pipewire()
 {
-    if (pw_stream)
-        pw_stream_destroy(pw_stream);
-    if (pw_core)
-        pw_core_disconnect(pw_core);
+    if (pw_stream_inst)
+        pw_stream_destroy(pw_stream_inst);
+    if (pw_core_inst)
+        pw_core_disconnect(pw_core_inst);
     if (pw_ctx)
         pw_context_destroy(pw_ctx);
     if (pw_loop)
         pw_main_loop_destroy(pw_loop);
-    pw_stream = nullptr;
-    pw_core = nullptr;
+    pw_stream_inst = nullptr;
+    pw_core_inst = nullptr;
     pw_ctx = nullptr;
     pw_loop = nullptr;
 }

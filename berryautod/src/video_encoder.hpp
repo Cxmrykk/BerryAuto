@@ -65,10 +65,11 @@ public:
     void request_wayland_frame_sync();
 
     // --- PipeWire State ---
+    // CRITICAL FIX: Appended '_inst' to avoid C++ struct namespace collisions
     pw_main_loop* pw_loop = nullptr;
     pw_context* pw_ctx = nullptr;
-    pw_core* pw_core = nullptr;
-    pw_stream* pw_stream = nullptr;
+    pw_core* pw_core_inst = nullptr;
+    pw_stream* pw_stream_inst = nullptr;
     spa_hook core_listener;
     spa_hook stream_listener;
 
