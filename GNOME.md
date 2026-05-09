@@ -74,5 +74,6 @@ sudo nano /boot/firmware/cmdline.txt
 
 ```sh
 # Change 800x480 to your head unit screen resolution
-video=HDMI-A-1:800x480@60D
+# We absolutely need `e` and not `d`, otherwise pipewire doesn't send frames
+video=HDMI-A-1:800x480@60e
 ```

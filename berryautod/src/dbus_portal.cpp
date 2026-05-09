@@ -47,13 +47,11 @@ static void ensure_desktop_file()
     mkdir(share_dir.c_str(), 0755);
     mkdir(app_dir.c_str(), 0755);
 
-    // CRITICAL FIX: Changed App ID to bypass any cached "Deny" rules in GNOME's permission store.
     std::string path = app_dir + "/com.berryauto.receiver.desktop";
 
     std::ofstream f(path, std::ios::trunc);
     if (f.is_open())
     {
-        // CRITICAL FIX: Removed NoDisplay=true. GNOME auto-denies screen sharing for hidden apps!
         f << "[Desktop Entry]\n"
              "Name=BerryAuto\n"
              "Exec=berryauto\n"
@@ -106,9 +104,10 @@ static gboolean on_portal_timeout(gpointer user_data)
     PortalStepState* state = static_cast<PortalStepState*>(user_data);
     LOG_E("\n=======================================================================================");
     LOG_E("[CRITICAL] GNOME Desktop Portal timed out waiting for a response!");
-    LOG_E("[CRITICAL] GNOME rejected your token and is displaying the 'Share your screen' GUI prompt.");
-    LOG_E("[CRITICAL] You MUST connect a monitor and mouse to the Pi, run the script again, and");
-    LOG_E("[CRITICAL] manually click 'Share' ONE TIME to generate a valid headless token!");
+    LOG_E("[CRITICAL] GNOME rejected your token (likely due to EDID/headless hardware changes).");
+    LOG_E("[CRITICAL] The 'Share your screen' GUI prompt is currently hidden on the headless desktop.");
+    LOG_E("[CRITICAL] You MUST connect via RDP/VNC to the Pi, trigger BerryAuto, and manually");
+    LOG_E("[CRITICAL] click 'Share' ONE TIME to generate and save a valid headless token!");
     LOG_E("=======================================================================================\n");
 
     remove(get_token_storage_path().c_str());
@@ -194,7 +193,6 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id, int& out_fd)
             return false;
         }
 
-        // Updated RequestName to match new App ID
         GVariant* name_res = g_dbus_connection_call_sync(
             portal_conn, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "RequestName",
             g_variant_new("(su)", "com.berryauto.receiver", 0), nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr);
@@ -264,7 +262,7 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id, int& out_fd)
     if (!run_portal_step("CreateSession", "req1", g_variant_new("(a{sv})", &b1), 10))
         return false;
 
-    // STEP 2: SelectSources
+    // STEP 2: SelectSources (This triggers the GUI prompt! Increased to 120s for RDP/VNC)
     GVariantBuilder b2;
     g_variant_builder_init(&b2, G_VARIANT_TYPE_VARDICT);
     g_variant_builder_add(&b2, "{sv}", "multiple", g_variant_new_boolean(FALSE));
@@ -280,15 +278,15 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id, int& out_fd)
         g_variant_builder_add(&b2, "{sv}", "restore_token", g_variant_new_string(token.c_str()));
     }
 
-    if (!run_portal_step("SelectSources", "req2", g_variant_new("(oa{sv})", session_path.c_str(), &b2), 60))
+    if (!run_portal_step("SelectSources", "req2", g_variant_new("(oa{sv})", session_path.c_str(), &b2), 120))
         return false;
 
-    // STEP 3: Start
+    // STEP 3: Start (Increased to 120s for RDP/VNC)
     GVariantBuilder b3;
     g_variant_builder_init(&b3, G_VARIANT_TYPE_VARDICT);
     g_variant_builder_add(&b3, "{sv}", "handle_token", g_variant_new_string("req3"));
 
-    if (!run_portal_step("Start", "req3", g_variant_new("(osa{sv})", session_path.c_str(), "", &b3), 15))
+    if (!run_portal_step("Start", "req3", g_variant_new("(osa{sv})", session_path.c_str(), "", &b3), 120))
         return false;
 
     // STEP 4: Extract Node & Auth FD
