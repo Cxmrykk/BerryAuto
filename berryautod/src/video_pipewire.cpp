@@ -169,12 +169,15 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
     struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
     const struct spa_pod* params[1];
 
+    // CRITICAL FIX: Add `SPA_FORMAT_VIDEO_modifier` enforced to `0ULL` (DRM_FORMAT_MOD_LINEAR).
+    // This absolutely forbids PipeWire/Mutter from giving us a Broadcom VC4_T_TILED DMA-BUF!
+    // Mutter is forced to run an OpenGL blit pass to detile the hardware frame into linear memory for us.
     params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
         &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
         SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), SPA_FORMAT_VIDEO_format,
         SPA_POD_CHOICE_ENUM_Id(5, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRA,
                                SPA_VIDEO_FORMAT_RGBx, SPA_VIDEO_FORMAT_RGBA),
-        0);
+        SPA_FORMAT_VIDEO_modifier, SPA_POD_CHOICE_ENUM_Long(2, 0ULL, 0ULL), 0);
 
     int res = pw_stream_connect(pw_stream_inst, PW_DIRECTION_INPUT, node_id,
                                 (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 1);

@@ -267,10 +267,7 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id, int& out_fd)
     g_variant_builder_init(&b2, G_VARIANT_TYPE_VARDICT);
     g_variant_builder_add(&b2, "{sv}", "multiple", g_variant_new_boolean(FALSE));
     g_variant_builder_add(&b2, "{sv}", "types", g_variant_new_uint32(1));
-    // CRITICAL FIX: cursor_mode = 2 (Embedded).
-    // This forcibly prevents hardware direct-scanout (tiled memory) by requiring the compositor to render the cursor
-    // via OpenGL!
-    g_variant_builder_add(&b2, "{sv}", "cursor_mode", g_variant_new_uint32(2));
+    g_variant_builder_add(&b2, "{sv}", "cursor_mode", g_variant_new_uint32(1)); // Reverted to 1 (Hidden)
     g_variant_builder_add(&b2, "{sv}", "handle_token", g_variant_new_string("req2"));
     g_variant_builder_add(&b2, "{sv}", "persist_mode", g_variant_new_uint32(2));
 
