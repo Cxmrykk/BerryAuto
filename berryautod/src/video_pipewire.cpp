@@ -36,7 +36,13 @@ static void on_process(void* userdata)
         if (size == 0)
             size = buf->datas[0].maxsize;
         if (stride == 0)
-            stride = enc->pw_w * 4;
+        {
+            int req = av_image_get_buffer_size(enc->pw_fmt, enc->pw_w, enc->pw_h, 1);
+            if (req > 0 && enc->pw_h > 0)
+                stride = req / enc->pw_h;
+            else
+                stride = enc->pw_w * 4;
+        }
         if (size > buf->datas[0].maxsize)
             size = buf->datas[0].maxsize;
 
@@ -169,9 +175,16 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
     struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
     const struct spa_pod* params[1];
 
+    // CRITICAL FIX: Explicitly enforce supported single-planar RGB formats.
+    // If Mutter's internal hardware buffer is NV12 (which it handles via direct scanout),
+    // PipeWire will automatically insert a videoconvert node to supply us with clean BGRA.
     params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
         &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
-        SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), 0);
+        SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), SPA_FORMAT_format,
+        SPA_POD_CHOICE_ENUM_Id(7, SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_RGBA,
+                               SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_RGBx, SPA_VIDEO_FORMAT_BGR,
+                               SPA_VIDEO_FORMAT_RGB),
+        0);
 
     int res = pw_stream_connect(pw_stream_inst, PW_DIRECTION_INPUT, node_id,
                                 (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 1);
@@ -235,7 +248,8 @@ void VideoEncoder::run_pipewire_loop(uint32_t node_id, int pw_fd)
                         if (req > 0)
                         {
                             latest_frame_buffer.resize(req, 0);
-                            latest_stride = current_w * 4;
+                            latest_stride =
+                                req / current_h; // CRITICAL FIX: Safe dynamic stride for uninitialized buffers
                         }
                     }
                     frame_copy = latest_frame_buffer;
