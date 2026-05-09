@@ -162,35 +162,11 @@ void VideoEncoder::process_raw_frame(void* raw_data, int stride, int pw_w, int p
     const uint8_t* in_data[4] = {nullptr};
     int in_linesize[4] = {0};
 
-    // Calculate plane offsets properly using the provided padded `stride`
-    if (pw_fmt == AV_PIX_FMT_NV12)
-    {
-        in_data[0] = (const uint8_t*)raw_data;
-        in_linesize[0] = stride;
+    av_image_fill_arrays((uint8_t**)in_data, in_linesize, (const uint8_t*)raw_data, pw_fmt, pw_w, pw_h, 1);
 
-        // UV plane starts exactly after the Y plane
-        in_data[1] = (const uint8_t*)raw_data + (stride * pw_h);
-        // In NV12, U and V are interleaved (2 bytes per pair of pixels), so the byte stride matches Y
-        in_linesize[1] = stride;
-    }
-    else if (pw_fmt == AV_PIX_FMT_YUV420P)
-    {
-        in_data[0] = (const uint8_t*)raw_data;
+    // Safely override line size if the compositor padded the width
+    if (stride > in_linesize[0])
         in_linesize[0] = stride;
-        in_data[1] = (const uint8_t*)raw_data + (stride * pw_h);
-        in_linesize[1] = stride / 2;
-        in_data[2] = in_data[1] + (in_linesize[1] * (pw_h / 2));
-        in_linesize[2] = stride / 2;
-    }
-    else
-    {
-        // For Packed formats (BGRA, RGBA, RGB24, YUYV422), use ffmpeg's native handler
-        av_image_fill_arrays((uint8_t**)in_data, in_linesize, (const uint8_t*)raw_data, pw_fmt, pw_w, pw_h, 1);
-
-        // Override line size for packed formats if the hardware stride is padded wider
-        if (stride > in_linesize[0])
-            in_linesize[0] = stride;
-    }
 
     sws_scale(sws_ctx, in_data, in_linesize, 0, pw_h, frame->data, frame->linesize);
 

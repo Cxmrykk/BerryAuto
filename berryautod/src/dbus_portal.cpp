@@ -262,12 +262,15 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id, int& out_fd)
     if (!run_portal_step("CreateSession", "req1", g_variant_new("(a{sv})", &b1), 10))
         return false;
 
-    // STEP 2: SelectSources (This triggers the GUI prompt! Increased to 120s for RDP/VNC)
+    // STEP 2: SelectSources
     GVariantBuilder b2;
     g_variant_builder_init(&b2, G_VARIANT_TYPE_VARDICT);
     g_variant_builder_add(&b2, "{sv}", "multiple", g_variant_new_boolean(FALSE));
     g_variant_builder_add(&b2, "{sv}", "types", g_variant_new_uint32(1));
-    g_variant_builder_add(&b2, "{sv}", "cursor_mode", g_variant_new_uint32(1));
+    // CRITICAL FIX: cursor_mode = 2 (Embedded).
+    // This forcibly prevents hardware direct-scanout (tiled memory) by requiring the compositor to render the cursor
+    // via OpenGL!
+    g_variant_builder_add(&b2, "{sv}", "cursor_mode", g_variant_new_uint32(2));
     g_variant_builder_add(&b2, "{sv}", "handle_token", g_variant_new_string("req2"));
     g_variant_builder_add(&b2, "{sv}", "persist_mode", g_variant_new_uint32(2));
 
@@ -281,7 +284,7 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id, int& out_fd)
     if (!run_portal_step("SelectSources", "req2", g_variant_new("(oa{sv})", session_path.c_str(), &b2), 120))
         return false;
 
-    // STEP 3: Start (Increased to 120s for RDP/VNC)
+    // STEP 3: Start
     GVariantBuilder b3;
     g_variant_builder_init(&b3, G_VARIANT_TYPE_VARDICT);
     g_variant_builder_add(&b3, "{sv}", "handle_token", g_variant_new_string("req3"));

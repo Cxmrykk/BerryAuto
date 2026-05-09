@@ -33,21 +33,10 @@ static void on_process(void* userdata)
         uint32_t size = buf->datas[0].chunk->size;
         uint32_t stride = buf->datas[0].chunk->stride;
 
-        // Fallback stride calculation if PipeWire omits it
-        if (stride == 0)
-        {
-            if (enc->pw_fmt == AV_PIX_FMT_NV12 || enc->pw_fmt == AV_PIX_FMT_YUV420P)
-                stride = enc->pw_w;
-            else if (enc->pw_fmt == AV_PIX_FMT_RGB24 || enc->pw_fmt == AV_PIX_FMT_BGR24)
-                stride = enc->pw_w * 3;
-            else if (enc->pw_fmt == AV_PIX_FMT_YUYV422 || enc->pw_fmt == AV_PIX_FMT_UYVY422)
-                stride = enc->pw_w * 2;
-            else
-                stride = enc->pw_w * 4;
-        }
-
         if (size == 0)
             size = buf->datas[0].maxsize;
+        if (stride == 0)
+            stride = enc->pw_w * 4;
         if (size > buf->datas[0].maxsize)
             size = buf->datas[0].maxsize;
 
@@ -82,8 +71,7 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
     struct spa_video_info_raw info;
     if (spa_format_video_raw_parse(param, &info) >= 0)
     {
-        LOG_I("[PipeWire] Negotiated Format -> " << info.size.width << "x" << info.size.height
-                                                 << " (Format ID: " << info.format << ")");
+        LOG_I("[PipeWire] Negotiated Format -> " << info.size.width << "x" << info.size.height);
 
         {
             std::lock_guard<std::mutex> lock(enc->frame_mutex);
@@ -94,11 +82,11 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
             {
                 case SPA_VIDEO_FORMAT_RGBx:
                 case SPA_VIDEO_FORMAT_RGBA:
-                    enc->pw_fmt = AV_PIX_FMT_RGBA;
+                    enc->pw_fmt = AV_PIX_FMT_RGB0;
                     break;
                 case SPA_VIDEO_FORMAT_BGRx:
                 case SPA_VIDEO_FORMAT_BGRA:
-                    enc->pw_fmt = AV_PIX_FMT_BGRA;
+                    enc->pw_fmt = AV_PIX_FMT_BGR0;
                     break;
                 case SPA_VIDEO_FORMAT_RGB:
                     enc->pw_fmt = AV_PIX_FMT_RGB24;
@@ -106,20 +94,7 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
                 case SPA_VIDEO_FORMAT_BGR:
                     enc->pw_fmt = AV_PIX_FMT_BGR24;
                     break;
-                case SPA_VIDEO_FORMAT_NV12:
-                    enc->pw_fmt = AV_PIX_FMT_NV12;
-                    break;
-                case SPA_VIDEO_FORMAT_I420:
-                    enc->pw_fmt = AV_PIX_FMT_YUV420P;
-                    break;
-                case SPA_VIDEO_FORMAT_YUY2:
-                    enc->pw_fmt = AV_PIX_FMT_YUYV422;
-                    break;
-                case SPA_VIDEO_FORMAT_UYVY:
-                    enc->pw_fmt = AV_PIX_FMT_UYVY422;
-                    break;
                 default:
-                    LOG_E("[PipeWire] Unknown format. Falling back to BGRA");
                     enc->pw_fmt = AV_PIX_FMT_BGRA;
                     break;
             }
@@ -128,42 +103,21 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
 
         enc->update_sws();
 
-        uint32_t req_stride = 0;
-        uint32_t req_size = 0;
+        uint32_t stride = (info.size.width * 4 + 3) & ~3;
+        if (info.format == SPA_VIDEO_FORMAT_RGB || info.format == SPA_VIDEO_FORMAT_BGR)
+            stride = (info.size.width * 3 + 3) & ~3;
 
-        switch (info.format)
-        {
-            case SPA_VIDEO_FORMAT_NV12:
-            case SPA_VIDEO_FORMAT_I420:
-                req_stride = info.size.width;
-                req_size = req_stride * info.size.height * 3 / 2;
-                break;
-            case SPA_VIDEO_FORMAT_YUY2:
-            case SPA_VIDEO_FORMAT_UYVY:
-                req_stride = (info.size.width * 2 + 3) & ~3;
-                req_size = req_stride * info.size.height;
-                break;
-            case SPA_VIDEO_FORMAT_RGB:
-            case SPA_VIDEO_FORMAT_BGR:
-                req_stride = (info.size.width * 3 + 3) & ~3;
-                req_size = req_stride * info.size.height;
-                break;
-            default:
-                req_stride = (info.size.width * 4 + 3) & ~3;
-                req_size = req_stride * info.size.height;
-                break;
-        }
+        uint32_t size = stride * info.size.height;
 
         uint8_t buffer[1024];
         struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
         const struct spa_pod* params[1];
 
-        // Ensure MemPtr is forced so Mutter unpacks the DMA-BUFs into linear memory
         params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
             &b, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers, SPA_PARAM_BUFFERS_buffers,
             SPA_POD_CHOICE_RANGE_Int(4, 2, 8), SPA_PARAM_BUFFERS_blocks, SPA_POD_Int(1), SPA_PARAM_BUFFERS_size,
-            SPA_POD_Int(req_size), SPA_PARAM_BUFFERS_stride, SPA_POD_Int(req_stride), SPA_PARAM_BUFFERS_align,
-            SPA_POD_Int(16), SPA_PARAM_BUFFERS_dataType, SPA_POD_CHOICE_FLAGS_Int(1 << SPA_DATA_MemPtr), 0);
+            SPA_POD_Int(size), SPA_PARAM_BUFFERS_stride, SPA_POD_Int(stride), SPA_PARAM_BUFFERS_align, SPA_POD_Int(16),
+            SPA_PARAM_BUFFERS_dataType, SPA_POD_CHOICE_FLAGS_Int(1 << SPA_DATA_MemPtr), 0);
 
         pw_stream_update_params(enc->pw_stream_inst, params, 1);
     }
@@ -217,7 +171,10 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
 
     params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
         &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
-        SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), 0);
+        SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), SPA_FORMAT_VIDEO_format,
+        SPA_POD_CHOICE_ENUM_Id(5, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRA,
+                               SPA_VIDEO_FORMAT_RGBx, SPA_VIDEO_FORMAT_RGBA),
+        0);
 
     int res = pw_stream_connect(pw_stream_inst, PW_DIRECTION_INPUT, node_id,
                                 (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 1);
@@ -274,18 +231,13 @@ void VideoEncoder::run_pipewire_loop(uint32_t node_id, int pw_fd)
                     current_w = pw_w;
                     current_h = pw_h;
 
-                    // Initialize buffer if empty to prevent zero-size crashes
                     if (latest_frame_buffer.empty() && current_w > 0 && current_h > 0)
                     {
                         int req = av_image_get_buffer_size(pw_fmt, current_w, current_h, 1);
                         if (req > 0)
                         {
                             latest_frame_buffer.resize(req, 0);
-
-                            if (pw_fmt == AV_PIX_FMT_NV12 || pw_fmt == AV_PIX_FMT_YUV420P)
-                                latest_stride = current_w;
-                            else
-                                latest_stride = current_w * 4;
+                            latest_stride = current_w * 4;
                         }
                     }
                     frame_copy = latest_frame_buffer;
