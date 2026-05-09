@@ -130,7 +130,7 @@ bool VideoEncoder::init_encoder()
     frame->format = codec_ctx->pix_fmt;
     frame->width = codec_ctx->width;
     frame->height = codec_ctx->height;
-    av_frame_get_buffer(frame, 32);
+    av_frame_get_buffer(frame, 1); // 1 forces tight packing, preventing V4L2 padding mismatches
     pkt = av_packet_alloc();
 
     return true;
