@@ -60,8 +60,8 @@ void VideoEncoder::update_sws()
     if (pw_w == 0 || pw_h == 0)
         return;
 
-    sws_ctx = sws_getContext(pw_w, pw_h, pw_fmt, target_width, target_height, AV_PIX_FMT_YUV420P, SWS_BILINEAR, NULL,
-                             NULL, NULL);
+    sws_ctx = sws_getContext(pw_w, pw_h, pw_fmt, target_width, target_height, AV_PIX_FMT_NV12, SWS_BILINEAR, NULL, NULL,
+                             NULL);
 
     if (!sws_ctx)
         LOG_E("[Capture] CRITICAL: sws_getContext failed! Format: " << pw_fmt);
@@ -89,7 +89,7 @@ bool VideoEncoder::init_encoder()
         codec_ctx = avcodec_alloc_context3(codec);
         codec_ctx->width = target_width;
         codec_ctx->height = target_height;
-        codec_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
+        codec_ctx->pix_fmt = AV_PIX_FMT_NV12;
         codec_ctx->colorspace = AVCOL_SPC_BT709;
         codec_ctx->color_range = AVCOL_RANGE_MPEG;
         codec_ctx->color_primaries = AVCOL_PRI_BT709;
@@ -130,7 +130,7 @@ bool VideoEncoder::init_encoder()
     frame->format = codec_ctx->pix_fmt;
     frame->width = codec_ctx->width;
     frame->height = codec_ctx->height;
-    av_frame_get_buffer(frame, 1); // 1 forces tight packing, preventing V4L2 padding mismatches
+    av_frame_get_buffer(frame, 32);
     pkt = av_packet_alloc();
 
     return true;
