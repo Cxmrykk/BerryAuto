@@ -163,8 +163,6 @@ void VideoEncoder::process_raw_frame(void* raw_data, int stride, int pw_w, int p
     int in_linesize[4] = {0};
 
     av_image_fill_arrays((uint8_t**)in_data, in_linesize, (const uint8_t*)raw_data, pw_fmt, pw_w, pw_h, 1);
-
-    // Safely override line size if the compositor padded the width
     if (stride > in_linesize[0])
         in_linesize[0] = stride;
 

@@ -113,6 +113,7 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
         struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
         const struct spa_pod* params[1];
 
+        // Ensure MemPtr is forced so Mutter unpacks the DMA-BUFs into linear memory
         params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
             &b, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers, SPA_PARAM_BUFFERS_buffers,
             SPA_POD_CHOICE_RANGE_Int(4, 2, 8), SPA_PARAM_BUFFERS_blocks, SPA_POD_Int(1), SPA_PARAM_BUFFERS_size,
@@ -127,7 +128,6 @@ static void on_state_changed(void* userdata, enum pw_stream_state old, enum pw_s
 {
     (void)userdata;
     (void)old;
-    (void)state;
     if (error)
         LOG_E("[PipeWire] Stream Error: " << error);
 }
@@ -169,15 +169,9 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
     struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
     const struct spa_pod* params[1];
 
-    // CRITICAL FIX: Add `SPA_FORMAT_VIDEO_modifier` enforced to `0ULL` (DRM_FORMAT_MOD_LINEAR).
-    // This absolutely forbids PipeWire/Mutter from giving us a Broadcom VC4_T_TILED DMA-BUF!
-    // Mutter is forced to run an OpenGL blit pass to detile the hardware frame into linear memory for us.
     params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
         &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
-        SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), SPA_FORMAT_VIDEO_format,
-        SPA_POD_CHOICE_ENUM_Id(5, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRA,
-                               SPA_VIDEO_FORMAT_RGBx, SPA_VIDEO_FORMAT_RGBA),
-        SPA_FORMAT_VIDEO_modifier, SPA_POD_CHOICE_ENUM_Long(2, 0ULL, 0ULL), 0);
+        SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), 0);
 
     int res = pw_stream_connect(pw_stream_inst, PW_DIRECTION_INPUT, node_id,
                                 (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params, 1);
@@ -234,6 +228,7 @@ void VideoEncoder::run_pipewire_loop(uint32_t node_id, int pw_fd)
                     current_w = pw_w;
                     current_h = pw_h;
 
+                    // Initialize buffer if empty to prevent zero-size crashes
                     if (latest_frame_buffer.empty() && current_w > 0 && current_h > 0)
                     {
                         int req = av_image_get_buffer_size(pw_fmt, current_w, current_h, 1);
@@ -263,6 +258,7 @@ void VideoEncoder::run_pipewire_loop(uint32_t node_id, int pw_fd)
     pw_main_loop_run(pw_loop);
 
     running = false;
+    // Tell the loop to stop so it unblocks `pw_main_loop_run`
     pw_main_loop_quit(pw_loop);
 
     if (pw_encoder_thread.joinable())
