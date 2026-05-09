@@ -134,6 +134,7 @@ static void on_state_changed(void* userdata, enum pw_stream_state old, enum pw_s
 {
     (void)userdata;
     (void)old;
+    (void)state;
     if (error)
         LOG_E("[PipeWire] Stream Error: " << error);
 }
@@ -175,12 +176,10 @@ bool VideoEncoder::init_pipewire(uint32_t node_id, int pw_fd)
     struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
     const struct spa_pod* params[1];
 
-    // CRITICAL FIX: Explicitly enforce supported single-planar RGB formats.
-    // If Mutter's internal hardware buffer is NV12 (which it handles via direct scanout),
-    // PipeWire will automatically insert a videoconvert node to supply us with clean BGRA.
+    // Explicitly enforce supported single-planar RGB formats.
     params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
         &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
-        SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), SPA_FORMAT_format,
+        SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), SPA_FORMAT_VIDEO_format,
         SPA_POD_CHOICE_ENUM_Id(7, SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_RGBA,
                                SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_RGBx, SPA_VIDEO_FORMAT_BGR,
                                SPA_VIDEO_FORMAT_RGB),
