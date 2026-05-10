@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <libavcodec/avcodec.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -98,7 +99,7 @@ bool VideoEncoder::init_encoder()
         codec_ctx->framerate = {target_fps, 1};
         codec_ctx->gop_size = target_fps * 2;
         codec_ctx->max_b_frames = 0;
-        codec_ctx->profile = FF_PROFILE_H264_HIGH;
+        codec_ctx->profile = FF_PROFILE_H264_BASELINE;
 
         int target_bitrate = static_cast<int>(target_width * target_height * target_fps * 0.15);
         target_bitrate = std::clamp(target_bitrate, 4000000, 40000000);
@@ -110,7 +111,7 @@ bool VideoEncoder::init_encoder()
         codec_ctx->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
 
         if (std::string(codec->name) == "h264_v4l2m2m")
-            av_opt_set(codec_ctx->priv_data, "profile", "high", 0);
+            av_opt_set(codec_ctx->priv_data, "profile", "baseline", 0);
         else if (std::string(codec->name) == "libx264" || std::string(codec->name) == "libx265")
         {
             av_opt_set(codec_ctx->priv_data, "preset", "ultrafast", 0);
