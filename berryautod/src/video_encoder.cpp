@@ -66,8 +66,6 @@ void VideoEncoder::update_sws()
         return;
 
     // Use SWS_FAST_BILINEAR instead of SWS_BILINEAR for heavy SIMD optimizations.
-    // CHANGED TO YUV420P: Bypasses the Raspberry Pi V4L2 NV12 chroma stride bug on resolutions
-    // like 800x480 where the width is not a clean multiple of 128.
     sws_ctx = sws_getContext(pw_w, pw_h, pw_fmt, target_width, target_height, AV_PIX_FMT_YUV420P, SWS_FAST_BILINEAR,
                              NULL, NULL, NULL);
 
@@ -100,8 +98,7 @@ bool VideoEncoder::init_encoder()
         codec_ctx->width = target_width;
         codec_ctx->height = target_height;
 
-        // YUV420P strictly separates the U and V planes, preventing the Pi's V4L2 M2M
-        // driver from corrupting the chroma data when memory boundaries are unaligned.
+        // YUV420P strictly separates the U and V planes.
         codec_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
 
         codec_ctx->colorspace = AVCOL_SPC_BT709;
@@ -198,7 +195,12 @@ void VideoEncoder::process_raw_frame(void* raw_data, int stride, int pw_w, int p
     encode_frame->format = codec_ctx->pix_fmt;
     encode_frame->width = codec_ctx->width;
     encode_frame->height = codec_ctx->height;
-    av_frame_get_buffer(encode_frame, 32);
+
+    // CRITICAL FIX: Use alignment = 1 to explicitly DISABLE linesize padding!
+    // V4L2 M2M requires tightly packed memory. If we use 32, FFmpeg pads the 400-byte
+    // chroma planes (at 800x480) to 416 bytes. The V4L2 hardware blindly ignores the padding,
+    // throwing every subsequent line out of sync and causing diagonal tearing.
+    av_frame_get_buffer(encode_frame, 1);
 
     sws_scale(sws_ctx, in_data, in_linesize, 0, pw_h, encode_frame->data, encode_frame->linesize);
 
