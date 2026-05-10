@@ -3,7 +3,7 @@
 #include <fcntl.h>
 #include <iostream>
 #include <linux/usb/functionfs.h>
-#include <stdio.h> // For perror
+#include <stdio.h>
 #include <unistd.h>
 
 #ifndef FUNCTIONFS_ALL_CTRL_RECIP

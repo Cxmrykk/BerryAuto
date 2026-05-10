@@ -3,7 +3,7 @@
 #include "control.pb.h"
 #include "globals.hpp"
 #include "input.pb.h"
-#include "input_handler.hpp" // NEW: Added input handler include
+#include "input_handler.hpp"
 #include "media.pb.h"
 #include "sensors.pb.h"
 #include <cstdlib>
@@ -181,9 +181,8 @@ void process_service_discovery_response(uint8_t* payload_data, int payload_len)
                         const auto& video_config = svc.media_sink_service().video_configs(best_idx);
                         int res_type = video_config.has_codec_resolution() ? video_config.codec_resolution() : 1;
 
-                        // EXTRACT FRAMERATE
                         int fps_type = video_config.has_frame_rate() ? video_config.frame_rate() : 1;
-                        global_video_fps = (fps_type == 2) ? 30 : 60; // Type 1 = 60, Type 2 = 30
+                        global_video_fps = (fps_type == 2) ? 30 : 60;
 
                         switch (res_type)
                         {

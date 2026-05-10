@@ -1,6 +1,6 @@
 #include "handler_media.hpp"
 #include "aap_sender.hpp"
-#include "control.pb.h" // ADDED: Required for AudioFocusRequestNotification
+#include "control.pb.h"
 #include "globals.hpp"
 #include "media.pb.h"
 #include "video_encoder.hpp"

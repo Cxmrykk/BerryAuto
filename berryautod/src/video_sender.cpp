@@ -76,7 +76,7 @@ void inject_cached_video_config()
     }
     std::vector<uint8_t> pt;
     pt.push_back(0x00);
-    pt.push_back(0x01); // MEDIA_MESSAGE_CODEC_CONFIG (Type 1)
+    pt.push_back(0x01);
     pt.insert(pt.end(), config_copy.begin(), config_copy.end());
     send_media_payload(video_channel_id, pt);
 }
@@ -85,7 +85,7 @@ void send_video_frame_internal(const std::vector<uint8_t>& nal_data, uint64_t ti
 {
     std::vector<uint8_t> pt;
     pt.push_back(0x00);
-    pt.push_back(0x00); // MEDIA_MESSAGE_DATA (Type 0)
+    pt.push_back(0x00);
 
     for (int i = 7; i >= 0; --i)
         pt.push_back((timestamp >> (i * 8)) & 0xFF);
@@ -136,7 +136,6 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp, 
         }
     }
 
-    // --- NEW H.264 RECOVERY LOGIC ---
     if (drop_until_keyframe)
     {
         if (is_keyframe)
@@ -146,12 +145,10 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp, 
         }
         else
         {
-            // We dropped a previous frame, so this P-frame is useless. Silently drop it.
             return;
         }
     }
 
-    // If the car falls behind, enter the Drop State and demand a new Keyframe
     if (max_video_unacked > 0 && video_unacked_count.load() >= max_video_unacked)
     {
         if (video_streamer)

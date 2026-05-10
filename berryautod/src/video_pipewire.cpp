@@ -113,7 +113,6 @@ static void on_param_changed(void* userdata, uint32_t id, const struct spa_pod* 
         struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
         const struct spa_pod* params[1];
 
-        // Ensure MemPtr is forced so Mutter unpacks the DMA-BUFs into linear memory
         params[0] = (const struct spa_pod*)spa_pod_builder_add_object(
             &b, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers, SPA_PARAM_BUFFERS_buffers,
             SPA_POD_CHOICE_RANGE_Int(4, 2, 8), SPA_PARAM_BUFFERS_blocks, SPA_POD_Int(1), SPA_PARAM_BUFFERS_size,
@@ -228,7 +227,6 @@ void VideoEncoder::run_pipewire_loop(uint32_t node_id, int pw_fd)
                     current_w = pw_w;
                     current_h = pw_h;
 
-                    // Initialize buffer if empty to prevent zero-size crashes
                     if (latest_frame_buffer.empty() && current_w > 0 && current_h > 0)
                     {
                         int req = av_image_get_buffer_size(pw_fmt, current_w, current_h, 1);
@@ -258,7 +256,7 @@ void VideoEncoder::run_pipewire_loop(uint32_t node_id, int pw_fd)
     pw_main_loop_run(pw_loop);
 
     running = false;
-    // Tell the loop to stop so it unblocks `pw_main_loop_run`
+
     pw_main_loop_quit(pw_loop);
 
     if (pw_encoder_thread.joinable())

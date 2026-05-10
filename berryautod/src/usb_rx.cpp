@@ -1,5 +1,5 @@
 #include "usb_rx.hpp"
-#include "aap_sender.hpp" // ADDED: Required for flush_ssl_buffers()
+#include "aap_sender.hpp"
 #include "globals.hpp"
 #include "input_handler.hpp"
 #include "message_handler.hpp"
@@ -76,7 +76,7 @@ int usb_rx_loop()
 
                         size_t offset = 0;
                         if ((flags & 0x01) != 0 && (flags & 0x02) == 0)
-                        { // 0x09
+                        {
                             if (payload.size() >= 4)
                                 offset = 4;
                         }

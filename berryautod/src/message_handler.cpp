@@ -72,7 +72,7 @@ void handle_parsed_payload(uint8_t channel, uint16_t type, uint8_t* payload_data
             {
                 SensorBatch batch;
                 auto* night = batch.add_night_mode();
-                night->set_is_night_mode(false); // Default to day mode
+                night->set_is_night_mode(false);
                 send_message(channel, SensorsMsgType::SENSOR_EVENT, batch);
                 LOG_I(">>> Sent Night Mode Status (Day) <<<");
             }

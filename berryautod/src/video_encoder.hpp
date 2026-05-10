@@ -41,7 +41,6 @@ public:
     void process_raw_frame(void* data, int stride, int w, int h);
     void update_sws();
 
-    // Universal Frame Data
     int pw_w = 0;
     int pw_h = 0;
     AVPixelFormat pw_fmt = AV_PIX_FMT_BGRA;
@@ -52,7 +51,6 @@ public:
     std::mutex frame_mutex;
     std::atomic<bool> running{false};
 
-    // --- Wayland wlr-screencopy State ---
     bool has_wlr_screencopy = false;
     bool frame_ready = false;
     void* current_data = nullptr;
@@ -63,8 +61,6 @@ public:
     zwlr_screencopy_manager_v1* wlr_screencopy = nullptr;
     void request_wayland_frame_sync();
 
-    // --- PipeWire State ---
-    // CRITICAL FIX: Appended '_inst' to avoid C++ struct namespace collisions
     pw_main_loop* pw_loop = nullptr;
     pw_context* pw_ctx = nullptr;
     pw_core* pw_core_inst = nullptr;
@@ -80,12 +76,10 @@ private:
 
     void capture_loop();
 
-    // Backend Execution Loops
     void run_x11_loop();
     void run_wlr_loop();
     void run_pipewire_loop(uint32_t node_id, int pw_fd);
 
-    // --- X11 ---
     Display* dpy = nullptr;
     Window root_window;
     XImage* img = nullptr;
@@ -93,17 +87,14 @@ private:
     bool init_x11();
     void cleanup_x11();
 
-    // --- Wayland Registry (Prober) ---
     wl_display* wl_dpy = nullptr;
     wl_registry* wl_reg = nullptr;
     bool init_wlr_registry();
     void cleanup_wlr_registry();
 
-    // --- PipeWire ---
     bool init_pipewire(uint32_t node_id, int pw_fd);
     void cleanup_pipewire();
 
-    // --- FFmpeg ---
     const AVCodec* codec = nullptr;
     AVCodecContext* codec_ctx = nullptr;
     AVFrame* frame = nullptr;

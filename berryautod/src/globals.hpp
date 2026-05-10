@@ -20,23 +20,19 @@ extern VideoEncoder* video_streamer;
 extern bool video_channel_ready;
 extern bool input_channel_ready;
 
-// Graceful Shutdown Flag (Fix #5)
 extern std::atomic<bool> should_exit;
 
-// Global safe cleanup function (Fix #1)
 void stop_video_stream();
 
-// Dynamic AAP Channels
 extern int video_channel_id;
 extern int input_channel_id;
 
-// Dynamic OS and Video Globals
 extern int os_desktop_width;
 extern int os_desktop_height;
 
 extern int global_video_config_index;
 extern int global_video_codec_type;
-extern int global_video_fps; // NEW: Dynamic FPS support
+extern int global_video_fps;
 extern int global_video_width;
 extern int global_video_height;
 extern int global_video_margin_w;
@@ -44,7 +40,6 @@ extern int global_video_margin_h;
 extern int global_touch_width;
 extern int global_touch_height;
 
-// Dynamic Channel State Management
 enum class ChannelType
 {
     UNKNOWN,

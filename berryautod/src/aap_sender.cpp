@@ -12,7 +12,6 @@
 
 using namespace com::andrerinas::headunitrevived::aap::protocol::proto;
 
-// STRICT SINGLE-FIFO QUEUE: Guarantees TLS Sequence numbers perfectly match USB transmission order!
 std::queue<std::vector<std::vector<uint8_t>>> tx_queue;
 std::mutex queue_mutex;
 std::condition_variable queue_cv;
@@ -79,9 +78,6 @@ void build_chunk(std::vector<std::vector<uint8_t>>& batch, const std::vector<uin
     std::vector<uint8_t> out;
     uint16_t len_field = chunk_data.size();
 
-    // CRITICAL FIX: The AAP header length field specifies the length of the ciphertext payload ONLY.
-    // Do NOT add +4 bytes for unfragmented_size.
-
     out.push_back(target_channel);
     out.push_back(flags);
     out.push_back((len_field >> 8) & 0xFF);
@@ -103,7 +99,6 @@ void flush_ssl_buffers()
 {
     init_tx_thread();
 
-    // SIMULTANEOUS LOCK: Enforces flawless TLS ordering!
     std::lock_guard<std::recursive_mutex> aap_lock(aap_mutex);
     std::lock_guard<std::mutex> tx_lock(queue_mutex);
 
@@ -178,7 +173,6 @@ void send_message(uint8_t channel, uint16_t type, const google::protobuf::Messag
 
     init_tx_thread();
     {
-        // STRICT LOCK: Ties TLS Sequence generation to TX Queue insertion.
         std::lock_guard<std::recursive_mutex> aap_lock(aap_mutex);
         std::lock_guard<std::mutex> tx_lock(queue_mutex);
 
@@ -248,7 +242,6 @@ bool send_media_payload(uint8_t channel, const std::vector<uint8_t>& pt)
                 size_t chunk_size = std::min(remain, MAX_CHUNK);
                 std::vector<uint8_t> chunk(pt.begin() + offset, pt.begin() + offset + chunk_size);
 
-                // CRITICAL FIX: Fragment the payload FIRST, then encrypt EACH fragment independently
                 if (!ssl_bypassed)
                 {
                     SSL_write(ssl, chunk.data(), chunk.size());

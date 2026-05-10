@@ -253,7 +253,6 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id, int& out_fd)
         return state.response_code == 0;
     };
 
-    // STEP 1: CreateSession
     GVariantBuilder b1;
     g_variant_builder_init(&b1, G_VARIANT_TYPE_VARDICT);
     g_variant_builder_add(&b1, "{sv}", "session_handle_token", g_variant_new_string("berryauto"));
@@ -262,7 +261,6 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id, int& out_fd)
     if (!run_portal_step("CreateSession", "req1", g_variant_new("(a{sv})", &b1), 10))
         return false;
 
-    // STEP 2: SelectSources (This triggers the GUI prompt! Increased to 120s for RDP/VNC)
     GVariantBuilder b2;
     g_variant_builder_init(&b2, G_VARIANT_TYPE_VARDICT);
     g_variant_builder_add(&b2, "{sv}", "multiple", g_variant_new_boolean(FALSE));
@@ -281,7 +279,6 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id, int& out_fd)
     if (!run_portal_step("SelectSources", "req2", g_variant_new("(oa{sv})", session_path.c_str(), &b2), 120))
         return false;
 
-    // STEP 3: Start (Increased to 120s for RDP/VNC)
     GVariantBuilder b3;
     g_variant_builder_init(&b3, G_VARIANT_TYPE_VARDICT);
     g_variant_builder_add(&b3, "{sv}", "handle_token", g_variant_new_string("req3"));
@@ -289,7 +286,6 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id, int& out_fd)
     if (!run_portal_step("Start", "req3", g_variant_new("(osa{sv})", session_path.c_str(), "", &b3), 120))
         return false;
 
-    // STEP 4: Extract Node & Auth FD
     if (negotiated_node_id > 0)
     {
         LOG_I("[Portal] Extracting authenticated PipeWire FD...");

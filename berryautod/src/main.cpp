@@ -11,7 +11,6 @@
 #include "usb_rx.hpp"
 #include "video_encoder.hpp"
 
-// Global Instantiations
 int ep_in, ep_out;
 SSL_CTX* ssl_ctx;
 SSL* ssl;
@@ -134,6 +133,5 @@ int main()
     std::thread ep0_t(ep0_thread, ep0);
     ep0_t.detach();
 
-    // Replaces the huge loop with an isolated, clean function call
     return usb_rx_loop();
 }
