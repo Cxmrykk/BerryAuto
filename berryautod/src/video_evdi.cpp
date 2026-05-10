@@ -59,52 +59,29 @@ std::vector<uint8_t> VideoEncoder::get_edid(int width, int height)
     return edid;
 }
 
-// Safely drains the queue of any synchronously available frames to prevent deadlocks
 void VideoEncoder::handle_evdi_update(int buffer_id)
 {
-    if (buffer_id < 0 || buffer_id >= evdi_buffer_count)
-        return;
-
-    evdi_buffer& buf = evdi_buffers[buffer_id];
-
-    // Continuously grab pixels as long as EVDI says they are immediately available
-    while (evdi_request_update(evdi, buffer_id))
-    {
-        evdi_rect rects[16];
-        int num_rects = 16;
-        evdi_grab_pixels(evdi, rects, &num_rects);
-
-        if (num_rects > 0 && buf.buffer && input_w > 0 && input_h > 0)
-        {
-            static bool first_desktop_frame = false;
-            if (!first_desktop_frame)
-            {
-                LOG_I("[EVDI] Received first actual desktop frame! Overwriting dummy screen.");
-                first_desktop_frame = true;
-            }
-
-            std::lock_guard<std::mutex> lock(frame_mutex);
-            size_t req_size = buf.stride * buf.height;
-            if (latest_frame_buffer.size() != req_size)
-            {
-                latest_frame_buffer.resize(req_size);
-            }
-            memcpy(latest_frame_buffer.data(), buf.buffer, req_size);
-            latest_stride = buf.stride;
-        }
-    }
+    // Deprecated: Internal looping mechanism moved to evdi_update_ready_handler
+    // to strictly respect libevdi's state machine.
+    (void)buffer_id;
 }
 
 static void evdi_dpms_handler(int dpms_mode, void* user_data)
 {
     VideoEncoder* enc = static_cast<VideoEncoder*>(user_data);
     LOG_I("[EVDI] DPMS State Changed: " << dpms_mode);
+
     if (dpms_mode == 0)
     {
         for (int i = 0; i < enc->evdi_buffer_count; ++i)
         {
-            // Drain the pump using our new handler instead of a raw request
-            enc->handle_evdi_update(i);
+            // Only request updates if the buffer is actually registered.
+            // We ignore the return value to prevent libevdi internal sync deadlocks.
+            // If the kernel immediately has a frame, it signals the poll() FD directly.
+            if (enc->evdi_buffers[i].buffer)
+            {
+                evdi_request_update(enc->evdi, enc->evdi_buffers[i].id);
+            }
         }
     }
 }
@@ -115,7 +92,6 @@ static void evdi_mode_changed_handler(evdi_mode mode, void* user_data)
     LOG_I("[EVDI] Compositor updated Mode: " << mode.width << "x" << mode.height);
 
     {
-        // Scope the lock so we don't deadlock when handle_evdi_update tries to grab it later
         std::lock_guard<std::mutex> lock(enc->frame_mutex);
         enc->input_w = mode.width;
         enc->input_h = mode.height;
@@ -132,7 +108,7 @@ static void evdi_mode_changed_handler(evdi_mode mode, void* user_data)
             enc->latest_frame_buffer[i + 2] = 0x80; // Red   (128)
             enc->latest_frame_buffer[i + 3] = 0xFF; // Alpha (255)
         }
-    } // Unlock frame_mutex
+    }
 
     for (int i = 0; i < enc->evdi_buffer_count; ++i)
     {
@@ -142,7 +118,6 @@ static void evdi_mode_changed_handler(evdi_mode mode, void* user_data)
             free(enc->evdi_buffers[i].buffer);
         }
 
-        // CRITICAL FIX: Zero-initialize the struct to clear garbage pointers in rects/rect_count
         memset(&enc->evdi_buffers[i], 0, sizeof(evdi_buffer));
         enc->evdi_buffers[i].id = i;
         enc->evdi_buffers[i].width = mode.width;
@@ -152,8 +127,8 @@ static void evdi_mode_changed_handler(evdi_mode mode, void* user_data)
 
         evdi_register_buffer(enc->evdi, enc->evdi_buffers[i]);
 
-        // CRITICAL FIX: Request update and immediately drain it if Mutter instantly flipped a frame
-        enc->handle_evdi_update(enc->evdi_buffers[i].id);
+        // Prime the pump so EVDI immediately knows it has buffers available.
+        evdi_request_update(enc->evdi, enc->evdi_buffers[i].id);
     }
 
     enc->update_sws();
@@ -167,32 +142,34 @@ static void evdi_update_ready_handler(int buffer_to_be_updated, void* user_data)
     {
         evdi_buffer& buf = enc->evdi_buffers[buffer_to_be_updated];
 
-        // 1. We are here because of an asynchronous event, so grab the pixels immediately
-        evdi_rect rects[16];
-        int num_rects = 16;
-        evdi_grab_pixels(enc->evdi, rects, &num_rects);
-
-        if (num_rects > 0 && buf.buffer && enc->input_w > 0 && enc->input_h > 0)
+        // Process all synchronously available frames safely within the event handler loop.
+        // This ensures libevdi's current_buffer_id context matches the grab request.
+        do
         {
-            static bool first_desktop_frame = false;
-            if (!first_desktop_frame)
+            evdi_rect rects[16];
+            int num_rects = 16;
+            evdi_grab_pixels(enc->evdi, rects, &num_rects);
+
+            if (num_rects > 0 && buf.buffer && enc->input_w > 0 && enc->input_h > 0)
             {
-                LOG_I("[EVDI] Received first actual desktop frame! Overwriting dummy screen.");
-                first_desktop_frame = true;
+                static bool first_desktop_frame = false;
+                if (!first_desktop_frame)
+                {
+                    LOG_I("[EVDI] Received first actual desktop frame! Overwriting dummy screen.");
+                    first_desktop_frame = true;
+                }
+
+                std::lock_guard<std::mutex> lock(enc->frame_mutex);
+                size_t req_size = buf.stride * buf.height;
+                if (enc->latest_frame_buffer.size() != req_size)
+                {
+                    enc->latest_frame_buffer.resize(req_size);
+                }
+                memcpy(enc->latest_frame_buffer.data(), buf.buffer, req_size);
+                enc->latest_stride = buf.stride;
             }
 
-            std::lock_guard<std::mutex> lock(enc->frame_mutex);
-            size_t req_size = buf.stride * buf.height;
-            if (enc->latest_frame_buffer.size() != req_size)
-            {
-                enc->latest_frame_buffer.resize(req_size);
-            }
-            memcpy(enc->latest_frame_buffer.data(), buf.buffer, req_size);
-            enc->latest_stride = buf.stride;
-        }
-
-        // 2. Return the buffer to EVDI, and loop to drain any immediate subsequent updates
-        enc->handle_evdi_update(buffer_to_be_updated);
+        } while (evdi_request_update(enc->evdi, buffer_to_be_updated));
     }
 }
 
