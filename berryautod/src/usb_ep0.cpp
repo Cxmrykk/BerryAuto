@@ -2,6 +2,7 @@
 #include "aap_sender.hpp"
 #include "globals.hpp"
 #include <linux/usb/functionfs.h>
+#include <openssl/ssl.h> // ADDED
 #include <sys/syscall.h>
 #include <unistd.h>
 
@@ -49,6 +50,11 @@ void ep0_thread(int ep0)
                 video_channel_ready = false;
                 input_channel_ready = false;
                 video_unacked_count = 0;
+
+                // ADDED: Scrub TLS data so next rapid connection does not fault on stale symmetric keys
+                SSL_clear(ssl);
+                BIO_reset(rbio);
+                BIO_reset(wbio);
                 break;
             }
             case FUNCTIONFS_SETUP:

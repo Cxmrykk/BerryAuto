@@ -13,7 +13,7 @@
 int usb_rx_loop()
 {
     std::vector<uint8_t> usb_rx_buffer;
-    uint8_t tmp_buf[16384];
+    uint8_t tmp_buf[65536]; // MODIFIED: Expanded for larger payloads
 
     while (true)
     {
@@ -85,7 +85,7 @@ int usb_rx_loop()
                         {
                             BIO_write(rbio, payload.data() + offset, payload.size() - offset);
 
-                            uint8_t dec_buf[16384];
+                            uint8_t dec_buf[65536]; // MODIFIED: Expanded to match rx buf
                             while (true)
                             {
                                 int dec_bytes = SSL_read(ssl, dec_buf, sizeof(dec_buf));

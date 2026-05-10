@@ -11,6 +11,7 @@
 #include "usb_ep0.hpp"
 #include "usb_rx.hpp"
 #include "video_encoder.hpp"
+#include "video_sender.hpp"
 
 // Config definitions
 std::string user_config_video_encoder = "";
@@ -63,6 +64,8 @@ std::atomic<int> video_session_id{0};
 void stop_video_stream()
 {
     is_video_streaming = false;
+    reset_video_sender_state();
+
     if (video_streamer != nullptr)
     {
         VideoEncoder* enc = video_streamer;

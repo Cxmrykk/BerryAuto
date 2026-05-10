@@ -3,6 +3,7 @@
 #include "channel_manager.hpp"
 #include "control.pb.h"
 #include "globals.hpp"
+#include <openssl/ssl.h> // ADDED
 
 using namespace com::andrerinas::headunitrevived::aap::protocol::proto;
 
@@ -36,6 +37,14 @@ void handle_control_message(uint16_t type, uint8_t* payload_data, int payload_le
         input_channel_ready = false;
         ByeByeResponse resp;
         send_message(0, ControlMsgType::MESSAGE_BYEBYE_RESPONSE, resp);
+
+        std::lock_guard<std::recursive_mutex> lock(aap_mutex);
+        is_tls_connected = false;
+        ssl_bypassed = false;
+        SSL_clear(ssl);
+        BIO_reset(rbio);
+        BIO_reset(wbio);
+        flush_usb_tx_queue();
     }
     else if (type == ControlMsgType::MESSAGE_CHANNEL_CLOSE_NOTIFICATION)
     {

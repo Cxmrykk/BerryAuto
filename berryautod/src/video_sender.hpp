@@ -4,3 +4,4 @@
 
 void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp, bool is_keyframe);
 void on_video_nal_ready(const std::vector<uint8_t>& nal_data, uint64_t timestamp, bool is_keyframe);
+void reset_video_sender_state();

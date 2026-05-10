@@ -10,6 +10,16 @@ using namespace com::andrerinas::headunitrevived::aap::protocol::proto;
 
 void handle_media_message(uint8_t channel, uint16_t type, uint8_t* payload_data, int payload_len, ChannelType ctype)
 {
+    // ADDED: Prevent car stalls by ACKing incoming microphone/audio data payloads
+    if (type == MediaMsgType::MEDIA_MESSAGE_DATA || type == MediaMsgType::MEDIA_MESSAGE_CODEC_CONFIG)
+    {
+        Ack ack;
+        ack.set_session_id(0);
+        ack.set_ack(1);
+        send_message(channel, MediaMsgType::MEDIA_MESSAGE_ACK, ack);
+        return;
+    }
+
     if (type == MediaMsgType::MEDIA_MESSAGE_CONFIG)
     {
         if (ctype == ChannelType::VIDEO)
@@ -117,24 +127,22 @@ void handle_media_message(uint8_t channel, uint16_t type, uint8_t* payload_data,
                     LOG_I(">>> Car GRANTED Video Focus! Queuing stream start. <<<");
                     int current_session = ++video_session_id;
 
-                    // Execute startup asynchronously so we don't block the USB RX thread
                     std::thread(
                         [current_session]()
                         {
-                            // Wait for any previous encoder to finish freeing V4L2 hardware
                             while (encoder_teardown_in_progress.load())
                             {
                                 usleep(10000);
                             }
 
                             std::lock_guard<std::recursive_mutex> lock(aap_mutex);
-                            // If focus was revoked while we waited, abort
                             if (video_session_id.load() != current_session)
                                 return;
 
                             if (!is_video_streaming.load())
                             {
                                 is_video_streaming = true;
+                                reset_video_sender_state(); // ADDED: Hard reset state
                                 video_unacked_count = 0;
                                 if (video_streamer == nullptr)
                                 {
@@ -153,7 +161,7 @@ void handle_media_message(uint8_t channel, uint16_t type, uint8_t* payload_data,
                 else
                 {
                     LOG_I(">>> Car REVOKED Video Focus. <<<");
-                    video_session_id++; // Invalidate pending starts
+                    video_session_id++;
                     stop_video_stream();
                 }
             }

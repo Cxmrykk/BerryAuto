@@ -11,6 +11,16 @@ bool has_cached_config = false;
 bool config_injected_this_session = false;
 static bool drop_until_keyframe = false;
 
+// ADDED: Explicit function to clear state between sessions
+void reset_video_sender_state()
+{
+    std::lock_guard<std::mutex> lock(config_mutex);
+    config_injected_this_session = false;
+    drop_until_keyframe = false;
+    video_unacked_count = 0;
+    LOG_I("[VideoSender] Reset video sender state for new session.");
+}
+
 void extract_and_cache_sps_pps(const std::vector<uint8_t>& frame)
 {
     std::lock_guard<std::mutex> lock(config_mutex);
@@ -104,16 +114,7 @@ void send_video_frame_internal(const std::vector<uint8_t>& nal_data, uint64_t ti
 
 void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp, bool is_keyframe)
 {
-    static bool was_streaming = false;
     bool currently_streaming = is_video_streaming.load() && video_channel_ready && (is_tls_connected || ssl_bypassed);
-
-    if (currently_streaming && !was_streaming)
-    {
-        config_injected_this_session = false;
-        video_unacked_count = 0;
-        drop_until_keyframe = false;
-    }
-    was_streaming = currently_streaming;
 
     if (!currently_streaming)
         return;
@@ -157,9 +158,6 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp, 
         return;
     }
 
-    // LOW LATENCY FIX: Reduced queue limit from 60 to 10.
-    // TLS CORRUPTION FIX: Removed flush_usb_tx_queue(). We now drop the raw frame BEFORE
-    // it enters the encryption pipeline, ensuring Ping/Control messages are never deleted.
     if (get_tx_queue_size() >= 10)
     {
         LOG_E("[WARNING] USB Queue Congested! Dropping frame BEFORE encryption to preserve TLS sequence.");
