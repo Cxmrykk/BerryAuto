@@ -71,10 +71,14 @@ void VideoEncoder::update_sws()
 bool VideoEncoder::init_encoder()
 {
     std::vector<std::string> encoder_names;
+
+    // SOFTWARE ENCODING FIX:
+    // We prioritize libx265 / libx264 over the hardware V4L2 encoders.
+    // This forces the CPU to encode the stream, bypassing the buggy hardware H264 blocks.
     if (global_video_codec_type == 7)
-        encoder_names = {"hevc_v4l2m2m", "libx265", "hevc"};
+        encoder_names = {"libx265", "hevc_v4l2m2m", "hevc"};
     else
-        encoder_names = {"h264_v4l2m2m", "h264_omx", "libx264", "h264"};
+        encoder_names = {"libx264", "h264_v4l2m2m", "h264_omx", "h264"};
 
     for (const auto& name : encoder_names)
     {
@@ -104,15 +108,9 @@ bool VideoEncoder::init_encoder()
         int target_bitrate = static_cast<int>(target_width * target_height * target_fps * 0.15);
         target_bitrate = std::clamp(target_bitrate, 4000000, 40000000);
         codec_ctx->bit_rate = target_bitrate;
-
-        // Relaxed Bitrate Fix: Switch from strict CBR to constrained VBR
-        // Allow the hardware encoder to double its bandwidth during high motion
-        codec_ctx->rc_max_rate = target_bitrate * 2;
-        // Don't force the encoder to pad the stream with junk data on static scenes
-        codec_ctx->rc_min_rate = 0;
-        // Increase the VBV buffer to gracefully absorb the motion spikes
-        codec_ctx->rc_buffer_size = target_bitrate;
-
+        codec_ctx->rc_min_rate = target_bitrate;
+        codec_ctx->rc_max_rate = target_bitrate;
+        codec_ctx->rc_buffer_size = target_bitrate / 2;
         codec_ctx->thread_count = std::max(1u, std::thread::hardware_concurrency());
         codec_ctx->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
 
@@ -125,7 +123,10 @@ bool VideoEncoder::init_encoder()
         }
 
         if (avcodec_open2(codec_ctx, codec, NULL) >= 0)
+        {
+            LOG_I("[Capture] Successfully initialized encoder: " << codec->name);
             break;
+        }
         avcodec_free_context(&codec_ctx);
         codec = nullptr;
     }
