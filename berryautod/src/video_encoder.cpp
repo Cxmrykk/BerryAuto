@@ -180,8 +180,9 @@ void VideoEncoder::process_raw_frame(void* raw_data, int stride, int pw_w, int p
             break;
 
         uint64_t absolute_ts = pkt->pts;
+        bool is_keyframe = (pkt->flags & AV_PKT_FLAG_KEY) != 0;
         std::vector<uint8_t> nal_data(pkt->data, pkt->data + pkt->size);
-        nal_callback(nal_data, absolute_ts);
+        nal_callback(nal_data, absolute_ts, is_keyframe);
         av_packet_unref(pkt);
     }
 }

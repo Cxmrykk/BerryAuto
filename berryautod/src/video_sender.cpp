@@ -9,6 +9,7 @@ std::mutex config_mutex;
 std::vector<uint8_t> cached_config_nal;
 bool has_cached_config = false;
 bool config_injected_this_session = false;
+static bool drop_until_keyframe = false;
 
 void extract_and_cache_sps_pps(const std::vector<uint8_t>& frame)
 {
@@ -101,7 +102,7 @@ void send_video_frame_internal(const std::vector<uint8_t>& nal_data, uint64_t ti
     }
 }
 
-void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
+void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp, bool is_keyframe)
 {
     static bool was_streaming = false;
     bool currently_streaming = is_video_streaming.load() && video_channel_ready && (is_tls_connected || ssl_bypassed);
@@ -110,6 +111,7 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
     {
         config_injected_this_session = false;
         video_unacked_count = 0;
+        drop_until_keyframe = false;
     }
     was_streaming = currently_streaming;
 
@@ -119,9 +121,7 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
     if (!config_injected_this_session)
     {
         if (!has_cached_config)
-        {
             extract_and_cache_sps_pps(nal_data);
-        }
 
         if (has_cached_config)
         {
@@ -130,17 +130,33 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
         }
         else
         {
-            LOG_E("[VideoSender] Waiting for SPS/PPS Header. Dropping Frame (Size: " << nal_data.size() << ")");
             if (video_streamer)
                 video_streamer->force_keyframe();
             return;
         }
     }
 
+    // --- NEW H.264 RECOVERY LOGIC ---
+    if (drop_until_keyframe)
+    {
+        if (is_keyframe)
+        {
+            LOG_I("[VideoSender] Valid Keyframe received! Resuming stream.");
+            drop_until_keyframe = false;
+        }
+        else
+        {
+            // We dropped a previous frame, so this P-frame is useless. Silently drop it.
+            return;
+        }
+    }
+
+    // If the car falls behind, enter the Drop State and demand a new Keyframe
     if (max_video_unacked > 0 && video_unacked_count.load() >= max_video_unacked)
     {
         if (video_streamer)
             video_streamer->force_keyframe();
+        drop_until_keyframe = true;
         return;
     }
 
@@ -150,13 +166,14 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
         flush_usb_tx_queue();
         if (video_streamer)
             video_streamer->force_keyframe();
+        drop_until_keyframe = true;
         return;
     }
 
     send_video_frame_internal(nal_data, timestamp);
 }
 
-void on_video_nal_ready(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
+void on_video_nal_ready(const std::vector<uint8_t>& nal_data, uint64_t timestamp, bool is_keyframe)
 {
-    send_video_frame(nal_data, timestamp);
+    send_video_frame(nal_data, timestamp, is_keyframe);
 }

@@ -27,8 +27,7 @@ extern "C"
 #undef None
 #undef Bool
 
-using NalCallback = std::function<void(const std::vector<uint8_t>&, uint64_t)>;
-
+using NalCallback = std::function<void(const std::vector<uint8_t>&, uint64_t, bool)>;
 class VideoEncoder
 {
 public:
