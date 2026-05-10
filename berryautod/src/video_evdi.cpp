@@ -50,7 +50,6 @@ std::vector<uint8_t> VideoEncoder::get_edid(int width, int height)
                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
     }
 
-    // GUARANTEE the EDID checksum is valid so the kernel accepts the resolution
     uint8_t sum = 0;
     for (int i = 0; i < 127; ++i)
     {
@@ -84,12 +83,9 @@ static void evdi_mode_changed_handler(evdi_mode mode, void* user_data)
     enc->input_fmt = AV_PIX_FMT_BGRA;
     enc->latest_stride = mode.width * 4;
 
-    // Seed the buffer with Dark Purple so FFmpeg doesn't starve
-    // while waiting for the headless desktop environment to draw a frame.
     size_t req_size = enc->latest_stride * enc->input_h;
     enc->latest_frame_buffer.resize(req_size);
 
-    // Fill with Dark Purple (BGRA format)
     for (size_t i = 0; i < req_size; i += 4)
     {
         enc->latest_frame_buffer[i] = 0x80;     // Blue  (128)
@@ -100,16 +96,25 @@ static void evdi_mode_changed_handler(evdi_mode mode, void* user_data)
 
     for (int i = 0; i < enc->evdi_buffer_count; ++i)
     {
+        // CRITICAL FIX: Properly unregister before freeing memory
         if (enc->evdi_buffers[i].buffer)
         {
+            evdi_unregister_buffer(enc->evdi, enc->evdi_buffers[i].id);
             free(enc->evdi_buffers[i].buffer);
         }
+
         enc->evdi_buffers[i].id = i;
         enc->evdi_buffers[i].width = mode.width;
         enc->evdi_buffers[i].height = mode.height;
         enc->evdi_buffers[i].stride = mode.width * 4;
-        enc->evdi_buffers[i].buffer = malloc(enc->evdi_buffers[i].stride * mode.height);
+
+        // Use calloc to ensure the buffer starts clean
+        enc->evdi_buffers[i].buffer = calloc(mode.height, enc->evdi_buffers[i].stride);
+
         evdi_register_buffer(enc->evdi, enc->evdi_buffers[i]);
+
+        // CRITICAL FIX: "Prime the pump" so EVDI immediately knows it has buffers available
+        evdi_request_update(enc->evdi, enc->evdi_buffers[i].id);
     }
 
     enc->update_sws();
@@ -124,7 +129,7 @@ static void evdi_update_ready_handler(int buffer_to_be_updated, void* user_data)
         evdi_buffer& buf = enc->evdi_buffers[buffer_to_be_updated];
 
         evdi_rect rects[16];
-        int num_rects = 16; // CRITICAL FIX: Tell EVDI the capacity of our array!
+        int num_rects = 16;
         evdi_grab_pixels(enc->evdi, rects, &num_rects);
 
         if (num_rects > 0 && buf.buffer && enc->input_w > 0 && enc->input_h > 0)
@@ -142,7 +147,6 @@ static void evdi_update_ready_handler(int buffer_to_be_updated, void* user_data)
             {
                 enc->latest_frame_buffer.resize(req_size);
             }
-            // Copy the freshly grabbed desktop pixels into our encoder queue
             memcpy(enc->latest_frame_buffer.data(), buf.buffer, req_size);
             enc->latest_stride = buf.stride;
         }
@@ -201,12 +205,9 @@ void VideoEncoder::run_evdi_loop()
     }
 
     std::vector<uint8_t> edid = get_edid(target_width, target_height);
-
-    // Provide a massive max pixel limit to prevent EVDI restrictions
     evdi_connect(evdi, edid.data(), edid.size(), 3840 * 2160);
     LOG_I("[EVDI] Virtual Monitor connected: " << target_width << "x" << target_height);
 
-    // Launch a background thread dedicated solely to handling EVDI asynchronous events
     std::thread evdi_bg_thread(
         [this]()
         {
@@ -229,7 +230,6 @@ void VideoEncoder::run_evdi_loop()
             }
         });
 
-    // Main foreground loop: Feed FFmpeg at exactly `target_fps` (e.g. 60 FPS)
     uint64_t frame_interval_us = 1000000 / target_fps;
     uint64_t next_frame_time = get_monotonic_usec() + frame_interval_us;
 
@@ -246,7 +246,6 @@ void VideoEncoder::run_evdi_loop()
             frame_copy = latest_frame_buffer;
         }
 
-        // Send frames constantly, whether they changed or not!
         if (!frame_copy.empty() && current_w > 0 && current_h > 0)
         {
             process_raw_frame(frame_copy.data(), current_stride, current_w, current_h);
