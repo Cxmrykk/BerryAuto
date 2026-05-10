@@ -72,9 +72,6 @@ bool VideoEncoder::init_encoder()
 {
     std::vector<std::string> encoder_names;
 
-    // SOFTWARE ENCODING FIX:
-    // We prioritize libx265 / libx264 over the hardware V4L2 encoders.
-    // This forces the CPU to encode the stream, bypassing the buggy hardware H264 blocks.
     if (global_video_codec_type == 7)
         encoder_names = {"libx265", "hevc_v4l2m2m", "hevc"};
     else
@@ -103,19 +100,35 @@ bool VideoEncoder::init_encoder()
         codec_ctx->framerate = {target_fps, 1};
         codec_ctx->gop_size = target_fps * 2;
         codec_ctx->max_b_frames = 0;
-        codec_ctx->profile = FF_PROFILE_H264_BASELINE;
 
         int target_bitrate = static_cast<int>(target_width * target_height * target_fps * 0.15);
         target_bitrate = std::clamp(target_bitrate, 4000000, 40000000);
-        codec_ctx->bit_rate = target_bitrate;
-        codec_ctx->rc_min_rate = target_bitrate;
-        codec_ctx->rc_max_rate = target_bitrate;
-        codec_ctx->rc_buffer_size = target_bitrate / 2;
-        codec_ctx->thread_count = std::max(1u, std::thread::hardware_concurrency());
-        codec_ctx->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
 
+        // 2. Buffer & Quantization Fix: Prevent hardware DMA truncation on high motion
+        codec_ctx->bit_rate = target_bitrate;
+        codec_ctx->rc_max_rate = target_bitrate * 2;
+        codec_ctx->rc_buffer_size = target_bitrate * 2;
+        codec_ctx->qmin = 15;
+        codec_ctx->qmax = 51;
+
+        // 1. Threading Fix: Hardware encoders MUST be single-threaded
+        if (std::string(codec->name).find("v4l2m2m") != std::string::npos ||
+            std::string(codec->name).find("omx") != std::string::npos)
+        {
+            codec_ctx->thread_count = 1;
+            codec_ctx->thread_type = 0;
+        }
+        else
+        {
+            codec_ctx->thread_count = std::max(1u, std::thread::hardware_concurrency());
+            codec_ctx->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
+        }
+
+        // 3. Profile Optimization
         if (std::string(codec->name) == "h264_v4l2m2m")
-            av_opt_set(codec_ctx->priv_data, "profile", "baseline", 0);
+        {
+            av_opt_set(codec_ctx->priv_data, "profile", "main", 0);
+        }
         else if (std::string(codec->name) == "libx264" || std::string(codec->name) == "libx265")
         {
             av_opt_set(codec_ctx->priv_data, "preset", "ultrafast", 0);
@@ -177,7 +190,11 @@ void VideoEncoder::process_raw_frame(void* raw_data, int stride, int pw_w, int p
     sws_scale(sws_ctx, in_data, in_linesize, 0, pw_h, frame->data, frame->linesize);
 
     frame->pts = get_monotonic_usec();
-    frame->pict_type = request_keyframe.exchange(false) ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_NONE;
+
+    // V4L2 Hardware keyframe recovery fix
+    bool keyframe_req = request_keyframe.exchange(false);
+    frame->pict_type = keyframe_req ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_NONE;
+    frame->key_frame = keyframe_req ? 1 : 0;
 
     int ret = avcodec_send_frame(codec_ctx, frame);
     while (ret >= 0)
