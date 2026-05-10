@@ -10,10 +10,12 @@ pkg_check_modules(PROTOBUF REQUIRED protobuf)
 pkg_check_modules(FFMPEG REQUIRED libavcodec libavutil libswscale)
 pkg_check_modules(LIBDRM REQUIRED libdrm)
 
-# EVDI doesn't always provide a pkg-config file, manually find it
+# EVDI doesn't provide a pkg-config file, manually find the library AND the headers
 find_library(EVDI_LIBRARY evdi)
-if(NOT EVDI_LIBRARY)
-    message(FATAL_ERROR "libevdi not found! Please install libevdi-dev")
+find_path(EVDI_INCLUDE_DIR evdi_lib.h PATHS /usr/local/include /usr/include)
+
+if(NOT EVDI_LIBRARY OR NOT EVDI_INCLUDE_DIR)
+    message(FATAL_ERROR "libevdi or evdi_lib.h not found! Please compile and install the EVDI library.")
 endif()
 
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS 
@@ -50,6 +52,7 @@ include_directories(
     ${PROTOBUF_INCLUDE_DIRS} 
     ${FFMPEG_INCLUDE_DIRS} 
     ${LIBDRM_INCLUDE_DIRS}
+    ${EVDI_INCLUDE_DIR}
     src 
     ${GENERATED_DIR}
 )
