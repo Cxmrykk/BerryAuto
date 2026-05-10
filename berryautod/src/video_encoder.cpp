@@ -66,10 +66,11 @@ void VideoEncoder::update_sws()
     if (pw_w == 0 || pw_h == 0)
         return;
 
-    // Use SWS_FAST_BILINEAR instead of SWS_BILINEAR for heavy SIMD optimizations,
-    // reducing latency during scale/color conversion passes.
-    sws_ctx = sws_getContext(pw_w, pw_h, pw_fmt, target_width, target_height, AV_PIX_FMT_NV12, SWS_FAST_BILINEAR, NULL,
-                             NULL, NULL);
+    // Use SWS_FAST_BILINEAR instead of SWS_BILINEAR for heavy SIMD optimizations.
+    // NOTE: Output pixel format changed to AV_PIX_FMT_YUV420P as V4L2 M2M hardware encoders
+    // are highly prone to DMA stride tearing when scaling directly into NV12.
+    sws_ctx = sws_getContext(pw_w, pw_h, pw_fmt, target_width, target_height, AV_PIX_FMT_YUV420P, SWS_FAST_BILINEAR,
+                             NULL, NULL, NULL);
 
     if (!sws_ctx)
         LOG_E("[Capture] CRITICAL: sws_getContext failed! Format: " << pw_fmt);
@@ -99,48 +100,58 @@ bool VideoEncoder::init_encoder()
         codec_ctx = avcodec_alloc_context3(codec);
         codec_ctx->width = target_width;
         codec_ctx->height = target_height;
-        codec_ctx->pix_fmt = AV_PIX_FMT_NV12;
+
+        // YUV420P is universally robust against V4L2 DMA alignment bugs that cause macroblock tearing
+        codec_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
+
         codec_ctx->colorspace = AVCOL_SPC_BT709;
         codec_ctx->color_range = AVCOL_RANGE_MPEG;
         codec_ctx->color_primaries = AVCOL_PRI_BT709;
         codec_ctx->color_trc = AVCOL_TRC_BT709;
         codec_ctx->time_base = {1, 1000000};
         codec_ctx->framerate = {target_fps, 1};
-        codec_ctx->gop_size = target_fps * 2;
-        codec_ctx->max_b_frames = 0;
 
-        // Force zero-latency encoding without internal B-frame or lookahead queues
-        codec_ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
+        // Shorten GOP size to 1 second so that if USB packets are dropped,
+        // the visual tearing automatically recovers in at most 1 second.
+        codec_ctx->gop_size = target_fps;
+        codec_ctx->max_b_frames = 0;
 
         int target_bitrate = static_cast<int>(target_width * target_height * target_fps * 0.15);
         target_bitrate = std::clamp(target_bitrate, 4000000, 40000000);
-
-        // 2. Buffer & Quantization Fix: Prevent hardware DMA truncation on high motion
         codec_ctx->bit_rate = target_bitrate;
-        codec_ctx->rc_max_rate = target_bitrate * 2;
-        codec_ctx->rc_buffer_size = target_bitrate * 2;
-        codec_ctx->qmin = 15;
-        codec_ctx->qmax = 51;
 
-        // 1. Threading Fix: Hardware encoders MUST be single-threaded
-        if (std::string(codec->name).find("v4l2m2m") != std::string::npos ||
-            std::string(codec->name).find("omx") != std::string::npos)
+        bool is_hw = (name.find("v4l2m2m") != std::string::npos || name.find("omx") != std::string::npos);
+
+        if (is_hw)
         {
+            // Hardware Encoders
+            // MUST be single-threaded. Hardware blocks act as a singular pipeline.
             codec_ctx->thread_count = 1;
             codec_ctx->thread_type = 0;
         }
         else
         {
+            // Software Encoders (libx264/libx265)
             codec_ctx->thread_count = std::max(1u, std::thread::hardware_concurrency());
             codec_ctx->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
+
+            // Generic FFmpeg rate control and low-latency flags.
+            // Hardware encoders often crash or produce torn frames if these are set improperly,
+            // so we strictly isolate these parameters to software engines.
+            codec_ctx->rc_max_rate = target_bitrate * 2;
+            codec_ctx->rc_buffer_size = target_bitrate * 2;
+            codec_ctx->qmin = 15;
+            codec_ctx->qmax = 51;
+            codec_ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
         }
 
-        // 3. Profile Optimization
-        if (std::string(codec->name) == "h264_v4l2m2m")
+        // Profile Optimization
+        if (name == "h264_v4l2m2m" || name == "h264_omx")
         {
-            av_opt_set(codec_ctx->priv_data, "profile", "main", 0);
+            // Baseline avoids CABAC and B-frames completely, ensuring stable HW stream
+            av_opt_set(codec_ctx->priv_data, "profile", "baseline", 0);
         }
-        else if (std::string(codec->name) == "libx264" || std::string(codec->name) == "libx265")
+        else if (name == "libx264" || name == "libx265")
         {
             av_opt_set(codec_ctx->priv_data, "preset", "ultrafast", 0);
             av_opt_set(codec_ctx->priv_data, "tune", "zerolatency", 0);
