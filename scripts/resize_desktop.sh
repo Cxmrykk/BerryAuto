@@ -43,9 +43,16 @@ if [ -n "$DETECTED_WAYLAND_DISPLAY" ]; then
         
         if [ -n "$OUTPUT" ]; then
             echo "[RESIZE] Changing resolution of $OUTPUT to ${W}x${H}..."
-            # Modify the resolution. The rust tool natively accepts "WxH" format for --mode
-            run_wayland gnome-randr modify "$OUTPUT" --mode "${W}x${H}"
-            echo "[RESIZE] GNOME Desktop successfully adjusted!"
+            
+            # Attempt to set resolution, catch errors if the kernel forbids it
+            if run_wayland gnome-randr modify "$OUTPUT" --mode "${W}x${H}" >/dev/null 2>&1; then
+                echo "[RESIZE] GNOME Desktop successfully adjusted!"
+            else
+                echo "[RESIZE] WARNING: Resolution ${W}x${H} is not permitted by the kernel!"
+                echo "[RESIZE] The image will be safely upscaled, but aspect ratios may differ."
+                echo "[RESIZE] -> To fix this natively, edit: /boot/firmware/cmdline.txt"
+                echo "[RESIZE] -> Change your video parameter to: video=${OUTPUT}:${W}x${H}@60e"
+            fi
             exit 0
         fi
         

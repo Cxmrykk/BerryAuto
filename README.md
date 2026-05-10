@@ -111,3 +111,44 @@ The script will:
 2. Wait for the Android device to connect.
 3. Perform the AOA handshake to switch the phone into Accessory Mode.
 4. Restart the daemon to handle the active Android Auto video and control streams.
+
+## Autostart on Boot (Systemd Service)
+
+To make BerryAuto run automatically on boot and restart seamlessly when you plug and unplug your phone, you should set it up as a systemd service.
+
+From the project root directory (`~/BerryAuto`), run the following commands to generate and enable the service:
+
+```sh
+# Enable systemd linger for the current user so user-level systemd-run commands execute correctly
+loginctl enable-linger $USER
+
+# Create the service file
+sudo tee /etc/systemd/system/berryauto.service > /dev/null <<EOF
+[Unit]
+Description=BerryAuto Daemon Runner
+After=graphical.target
+Wants=graphical.target
+
+[Service]
+Type=simple
+User=$USER
+Group=$(id -g -n)
+WorkingDirectory=$PWD
+ExecStart=$PWD/scripts/run_berryauto.sh
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=graphical.target
+EOF
+
+# Reload systemd and enable the service
+sudo systemctl daemon-reload
+sudo systemctl enable --now berryauto.service
+```
+
+You can check the status of the daemon at any time using:
+
+```sh
+systemctl status berryauto.service
+```
