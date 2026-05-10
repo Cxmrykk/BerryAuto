@@ -124,17 +124,25 @@ static void evdi_update_ready_handler(int buffer_to_be_updated, void* user_data)
         evdi_buffer& buf = enc->evdi_buffers[buffer_to_be_updated];
 
         evdi_rect rects[16];
-        int num_rects = 0;
+        int num_rects = 16; // CRITICAL FIX: Tell EVDI the capacity of our array!
         evdi_grab_pixels(enc->evdi, rects, &num_rects);
 
         if (num_rects > 0 && buf.buffer && enc->input_w > 0 && enc->input_h > 0)
         {
+            static bool first_desktop_frame = false;
+            if (!first_desktop_frame)
+            {
+                LOG_I("[EVDI] Received first actual desktop frame! Overwriting dummy screen.");
+                first_desktop_frame = true;
+            }
+
             std::lock_guard<std::mutex> lock(enc->frame_mutex);
             size_t req_size = buf.stride * buf.height;
             if (enc->latest_frame_buffer.size() != req_size)
             {
                 enc->latest_frame_buffer.resize(req_size);
             }
+            // Copy the freshly grabbed desktop pixels into our encoder queue
             memcpy(enc->latest_frame_buffer.data(), buf.buffer, req_size);
             enc->latest_stride = buf.stride;
         }
