@@ -5,11 +5,20 @@
 #include <unistd.h>
 
 #include "certs.hpp"
+#include "config_parser.hpp"
 #include "ffs_usb.hpp"
 #include "globals.hpp"
 #include "usb_ep0.hpp"
 #include "usb_rx.hpp"
 #include "video_encoder.hpp"
+
+// Config definitions
+std::string user_config_video_encoder = "";
+int user_config_video_bitrate = 0;
+int user_config_force_width = 0;
+int user_config_force_height = 0;
+int user_config_force_fps = 0;
+bool user_config_disable_hw_encoding = false;
 
 int ep_in, ep_out;
 SSL_CTX* ssl_ctx;
@@ -99,6 +108,8 @@ int dummy_verify_cb(int preverify_ok, X509_STORE_CTX* ctx)
 int main()
 {
     LOG_I("Starting OpenGAL Emitter...");
+
+    load_config();
 
     os_desktop_width = 800;
     os_desktop_height = 480;

@@ -79,18 +79,37 @@ bool VideoEncoder::init_encoder()
 {
     std::vector<std::string> encoder_names;
 
-    // Prioritize hardware encoders before falling back to software
-    if (global_video_codec_type == 7)
-        encoder_names = {"hevc_v4l2m2m", "libx265", "hevc"};
+    if (!user_config_video_encoder.empty())
+    {
+        encoder_names.push_back(user_config_video_encoder);
+    }
     else
-        encoder_names = {"h264_v4l2m2m", "h264_omx", "libx264", "h264"};
+    {
+        if (global_video_codec_type == 7)
+        {
+            if (!user_config_disable_hw_encoding)
+                encoder_names.push_back("hevc_v4l2m2m");
+            encoder_names.push_back("libx265");
+            encoder_names.push_back("hevc");
+        }
+        else
+        {
+            if (!user_config_disable_hw_encoding)
+            {
+                encoder_names.push_back("h264_v4l2m2m");
+                encoder_names.push_back("h264_omx");
+            }
+            encoder_names.push_back("libx264");
+            encoder_names.push_back("h264");
+        }
+    }
 
     for (const auto& name : encoder_names)
     {
         codec = avcodec_find_encoder_by_name(name.c_str());
         if (!codec)
         {
-            if (name == encoder_names.back())
+            if (name == encoder_names.back() && user_config_video_encoder.empty())
                 codec = avcodec_find_encoder(global_video_codec_type == 7 ? AV_CODEC_ID_HEVC : AV_CODEC_ID_H264);
             if (!codec)
                 continue;
@@ -113,6 +132,10 @@ bool VideoEncoder::init_encoder()
         codec_ctx->max_b_frames = 0;
 
         int target_bitrate = static_cast<int>(target_width * target_height * target_fps * 0.15);
+        if (user_config_video_bitrate > 0)
+        {
+            target_bitrate = user_config_video_bitrate;
+        }
         target_bitrate = std::clamp(target_bitrate, 4000000, 40000000);
         codec_ctx->bit_rate = target_bitrate;
 
@@ -152,7 +175,7 @@ bool VideoEncoder::init_encoder()
 
         if (avcodec_open2(codec_ctx, codec, NULL) >= 0)
         {
-            LOG_I("[Capture] Successfully initialized encoder: " << codec->name);
+            LOG_I("[Capture] Successfully initialized encoder: " << codec->name << " at " << target_bitrate << " bps");
             break;
         }
         avcodec_free_context(&codec_ctx);

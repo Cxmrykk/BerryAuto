@@ -5,6 +5,7 @@
 #include <mutex>
 #include <openssl/ssl.h>
 #include <queue>
+#include <string>
 
 class VideoEncoder;
 
@@ -39,6 +40,14 @@ extern int global_video_margin_w;
 extern int global_video_margin_h;
 extern int global_touch_width;
 extern int global_touch_height;
+
+// User Configuration Overrides
+extern std::string user_config_video_encoder;
+extern int user_config_video_bitrate;
+extern int user_config_force_width;
+extern int user_config_force_height;
+extern int user_config_force_fps;
+extern bool user_config_disable_hw_encoding;
 
 enum class ChannelType
 {

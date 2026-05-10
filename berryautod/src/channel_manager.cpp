@@ -228,6 +228,20 @@ void process_service_discovery_response(uint8_t* payload_data, int payload_len)
                                 break;
                         }
 
+                        // Override with user config if present
+                        if (user_config_force_width > 0 && user_config_force_height > 0)
+                        {
+                            global_video_width = user_config_force_width;
+                            global_video_height = user_config_force_height;
+                            LOG_I("[Config] Overriding negotiated resolution to " << global_video_width << "x"
+                                                                                  << global_video_height);
+                        }
+                        if (user_config_force_fps > 0)
+                        {
+                            global_video_fps = user_config_force_fps;
+                            LOG_I("[Config] Overriding negotiated FPS to " << global_video_fps);
+                        }
+
                         os_desktop_width = global_video_width;
                         os_desktop_height = global_video_height;
 
