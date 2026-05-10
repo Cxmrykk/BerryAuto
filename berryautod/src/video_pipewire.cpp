@@ -1,4 +1,5 @@
 #include "globals.hpp"
+#include "dbus_portal.hpp"
 #include "input_handler.hpp"
 #include "video_encoder.hpp"
 #include <cerrno>
