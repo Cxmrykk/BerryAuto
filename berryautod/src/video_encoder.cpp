@@ -1,6 +1,7 @@
 #include "video_encoder.hpp"
 #include "dbus_portal.hpp"
 #include "globals.hpp"
+#include "input_handler.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
@@ -41,6 +42,7 @@ void VideoEncoder::stop()
         return;
     running = false;
 
+    // Interrupt PipeWire Loop
     if (pw_loop)
         pw_main_loop_quit(pw_loop);
 
@@ -64,6 +66,7 @@ void VideoEncoder::update_sws()
     if (pw_w == 0 || pw_h == 0)
         return;
 
+    // Use SWS_FAST_BILINEAR instead of SWS_BILINEAR for heavy SIMD optimizations.
     // MUST remain NV12: V4L2 M2M hardware encoders heavily rely on NV12 DMA stride compatibility
     sws_ctx = sws_getContext(pw_w, pw_h, pw_fmt, target_width, target_height, AV_PIX_FMT_NV12, SWS_FAST_BILINEAR, NULL,
                              NULL, NULL);
@@ -159,12 +162,6 @@ bool VideoEncoder::init_encoder()
     if (!codec_ctx)
         return false;
 
-    frame = av_frame_alloc();
-    frame->format = codec_ctx->pix_fmt;
-    frame->width = codec_ctx->width;
-    frame->height = codec_ctx->height;
-    // Align frame buffers to 32 bytes explicitly for V4L2 M2M stride compatibility
-    av_frame_get_buffer(frame, 32);
     pkt = av_packet_alloc();
 
     return true;
@@ -175,14 +172,11 @@ void VideoEncoder::cleanup_encoder()
     std::lock_guard<std::mutex> lock(sws_mutex);
     if (sws_ctx)
         sws_freeContext(sws_ctx);
-    if (frame)
-        av_frame_free(&frame);
     if (pkt)
         av_packet_free(&pkt);
     if (codec_ctx)
         avcodec_free_context(&codec_ctx);
     sws_ctx = nullptr;
-    frame = nullptr;
     pkt = nullptr;
     codec_ctx = nullptr;
 }
@@ -200,15 +194,32 @@ void VideoEncoder::process_raw_frame(void* raw_data, int stride, int pw_w, int p
     if (stride > in_linesize[0])
         in_linesize[0] = stride;
 
-    sws_scale(sws_ctx, in_data, in_linesize, 0, pw_h, frame->data, frame->linesize);
+    // ALLOCATE A FRESH FRAME FOR V4L2 M2M (HARDWARE DMA SAFETY)
+    // Hardware encoders process asynchronously. Reusing a single persistent frame buffer
+    // causes sws_scale to overwrite the pixels while the hardware is still reading them,
+    // resulting in severe screen tearing. We create a new AVFrame per cycle.
+    AVFrame* encode_frame = av_frame_alloc();
+    encode_frame->format = codec_ctx->pix_fmt;
+    encode_frame->width = codec_ctx->width;
+    encode_frame->height = codec_ctx->height;
 
-    frame->pts = get_monotonic_usec();
+    // Align frame buffers to 32 bytes explicitly for V4L2 M2M stride compatibility
+    av_frame_get_buffer(encode_frame, 32);
+
+    sws_scale(sws_ctx, in_data, in_linesize, 0, pw_h, encode_frame->data, encode_frame->linesize);
+
+    encode_frame->pts = get_monotonic_usec();
 
     bool keyframe_req = request_keyframe.exchange(false);
-    frame->pict_type = keyframe_req ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_NONE;
-    frame->key_frame = keyframe_req ? 1 : 0;
+    encode_frame->pict_type = keyframe_req ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_NONE;
+    encode_frame->key_frame = keyframe_req ? 1 : 0;
 
-    int ret = avcodec_send_frame(codec_ctx, frame);
+    int ret = avcodec_send_frame(codec_ctx, encode_frame);
+
+    // Unref our handle. The encoder will keep its own internal reference if it's still
+    // using it via DMA, releasing the memory only when it's entirely finished.
+    av_frame_free(&encode_frame);
+
     while (ret >= 0)
     {
         ret = avcodec_receive_packet(codec_ctx, pkt);

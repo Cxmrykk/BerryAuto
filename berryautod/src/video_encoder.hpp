@@ -97,7 +97,6 @@ private:
 
     const AVCodec* codec = nullptr;
     AVCodecContext* codec_ctx = nullptr;
-    AVFrame* frame = nullptr;
     AVPacket* pkt = nullptr;
     SwsContext* sws_ctx = nullptr;
     bool init_encoder();
