@@ -167,13 +167,24 @@ void VideoEncoder::process_raw_frame(void* raw_data, int stride, int pw_w, int p
     if (stride > in_linesize[0])
         in_linesize[0] = stride;
 
+    if (av_frame_make_writable(frame) < 0)
+    {
+        LOG_E("[Capture] Error making frame writable!");
+        return;
+    }
+
     sws_scale(sws_ctx, in_data, in_linesize, 0, pw_h, frame->data, frame->linesize);
 
     frame->pts = get_monotonic_usec();
     frame->pict_type = request_keyframe.exchange(false) ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_NONE;
 
     int ret = avcodec_send_frame(codec_ctx, frame);
-    while (ret >= 0)
+    if (ret < 0 && ret != AVERROR(EAGAIN))
+    {
+        LOG_E("[Capture] avcodec_send_frame failed: " << ret);
+    }
+
+    while (true)
     {
         ret = avcodec_receive_packet(codec_ctx, pkt);
         if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF || ret < 0)

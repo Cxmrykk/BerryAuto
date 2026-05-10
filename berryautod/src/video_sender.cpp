@@ -157,7 +157,7 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp, 
         return;
     }
 
-    if (get_tx_queue_size() >= 60)
+    if (get_tx_queue_size() >= 200)
     {
         LOG_E("[WARNING] USB Queue Congested! Flushing pipeline and forcing a Keyframe.");
         flush_usb_tx_queue();
