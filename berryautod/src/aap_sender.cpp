@@ -209,10 +209,10 @@ bool send_media_payload(uint8_t channel, const std::vector<uint8_t>& pt)
     std::vector<std::vector<uint8_t>> batch;
 
     {
-        // DEADLOCK PREVENTION: Do not block indefinitely if the stream is stopping.
-        // We try to acquire the lock iteratively. If `stop_video_stream()` has set
-        // is_video_streaming to false while we wait, we abort the transfer immediately
-        // and allow the encoder thread to shut down cleanly without freezing.
+        // DEADLOCK PREVENTION FIX:
+        // We use a non-blocking try_lock loop. If stop_video_stream() shuts down the pipeline,
+        // we instantly gracefully abort the frame submission. This prevents the video thread
+        // from permanently freezing during focus loss/reconnects.
         std::unique_lock<std::recursive_mutex> aap_lock(aap_mutex, std::defer_lock);
         while (!aap_lock.try_lock())
         {

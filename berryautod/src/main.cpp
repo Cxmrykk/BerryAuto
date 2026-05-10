@@ -52,9 +52,9 @@ void stop_video_stream()
     is_video_streaming = false;
     if (video_streamer != nullptr)
     {
-        // Synchronous teardown. The try_lock loop in aap_sender prevents deadlocks,
-        // so we can safely block here to guarantee the V4L2 hardware is completely
-        // freed before a quick reconnect attempts to claim it again.
+        // SYNCHRONOUS TEARDOWN FIX:
+        // By joining directly on the calling thread, we guarantee the V4L2 hardware
+        // is fully released before Android Auto can trigger a new "Start Stream" request.
         video_streamer->stop();
         delete video_streamer;
         video_streamer = nullptr;

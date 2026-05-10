@@ -157,10 +157,12 @@ void send_video_frame(const std::vector<uint8_t>& nal_data, uint64_t timestamp, 
         return;
     }
 
-    if (get_tx_queue_size() >= 60)
+    // LOW LATENCY FIX: Reduced queue limit from 60 to 10.
+    // TLS CORRUPTION FIX: Removed flush_usb_tx_queue(). We now drop the raw frame BEFORE
+    // it enters the encryption pipeline, ensuring Ping/Control messages are never deleted.
+    if (get_tx_queue_size() >= 10)
     {
-        LOG_E("[WARNING] USB Queue Congested! Flushing pipeline and forcing a Keyframe.");
-        flush_usb_tx_queue();
+        LOG_E("[WARNING] USB Queue Congested! Dropping frame BEFORE encryption to preserve TLS sequence.");
         if (video_streamer)
             video_streamer->force_keyframe();
         drop_until_keyframe = true;
