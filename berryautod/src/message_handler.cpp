@@ -120,6 +120,9 @@ void handle_unencrypted_payload(uint8_t channel, uint16_t type, uint8_t* payload
             is_tls_connected = false;
             video_channel_ready = false;
             input_channel_ready = false;
+
+            // Invalidate pending sessions and kill stream
+            video_session_id++;
             stop_video_stream();
             flush_usb_tx_queue();
             video_unacked_count = 0;

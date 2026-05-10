@@ -47,17 +47,28 @@ std::atomic<int> video_unacked_count{0};
 std::atomic<bool> is_video_streaming{false};
 int max_video_unacked = 16;
 
+// Thread-safe state definitions
+std::atomic<bool> encoder_teardown_in_progress{false};
+std::atomic<int> video_session_id{0};
+
 void stop_video_stream()
 {
     is_video_streaming = false;
     if (video_streamer != nullptr)
     {
-        // SYNCHRONOUS TEARDOWN FIX:
-        // By joining directly on the calling thread, we guarantee the V4L2 hardware
-        // is fully released before Android Auto can trigger a new "Start Stream" request.
-        video_streamer->stop();
-        delete video_streamer;
+        VideoEncoder* enc = video_streamer;
         video_streamer = nullptr;
+        encoder_teardown_in_progress = true;
+
+        // Detached thread prevents deadlocking the USB Ping/RX Loop
+        std::thread(
+            [enc]()
+            {
+                enc->stop();
+                delete enc;
+                encoder_teardown_in_progress = false;
+            })
+            .detach();
     }
 }
 

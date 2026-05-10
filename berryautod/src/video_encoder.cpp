@@ -41,6 +41,14 @@ void VideoEncoder::stop()
     if (!running.load())
         return;
     running = false;
+
+    // Interrupt PipeWire Loop
+    if (pw_loop)
+        pw_main_loop_quit(pw_loop);
+
+    // Interrupt Wayland (wlr_screencopy) Loop by injecting a fake input event
+    wake_up_display();
+
     if (worker_thread.joinable())
         worker_thread.join();
 }

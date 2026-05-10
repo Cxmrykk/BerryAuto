@@ -91,6 +91,7 @@ void handle_media_message(uint8_t channel, uint16_t type, uint8_t* payload_data,
         if (ctype == ChannelType::VIDEO)
         {
             LOG_I(">>> Video Stream stopped by car! <<<");
+            video_session_id++; // Invalidate pending starts
             stop_video_stream();
         }
     }
@@ -113,25 +114,46 @@ void handle_media_message(uint8_t channel, uint16_t type, uint8_t* payload_data,
             {
                 if (focus_notif.has_mode() && focus_notif.mode() == VideoFocusMode::VIDEO_FOCUS_PROJECTED)
                 {
-                    if (!is_video_streaming.load())
-                    {
-                        LOG_I(">>> Car GRANTED Video Focus! Streaming active. <<<");
-                        is_video_streaming = true;
-                        video_unacked_count = 0;
-                        if (video_streamer == nullptr)
+                    LOG_I(">>> Car GRANTED Video Focus! Queuing stream start. <<<");
+                    int current_session = ++video_session_id;
+
+                    // Execute startup asynchronously so we don't block the USB RX thread
+                    std::thread(
+                        [current_session]()
                         {
-                            video_streamer = new VideoEncoder(global_video_width, global_video_height, global_video_fps,
-                                                              on_video_nal_ready);
-                            video_streamer->start();
-                            std::cout << "[VIDEO] Live Encoding Started (" << global_video_width << "x"
-                                      << global_video_height << " @ " << global_video_fps << " FPS)." << std::endl;
-                        }
-                        video_streamer->force_keyframe();
-                    }
+                            // Wait for any previous encoder to finish freeing V4L2 hardware
+                            while (encoder_teardown_in_progress.load())
+                            {
+                                usleep(10000);
+                            }
+
+                            std::lock_guard<std::recursive_mutex> lock(aap_mutex);
+                            // If focus was revoked while we waited, abort
+                            if (video_session_id.load() != current_session)
+                                return;
+
+                            if (!is_video_streaming.load())
+                            {
+                                is_video_streaming = true;
+                                video_unacked_count = 0;
+                                if (video_streamer == nullptr)
+                                {
+                                    video_streamer = new VideoEncoder(global_video_width, global_video_height,
+                                                                      global_video_fps, on_video_nal_ready);
+                                    video_streamer->start();
+                                    std::cout << "[VIDEO] Live Encoding Started (" << global_video_width << "x"
+                                              << global_video_height << " @ " << global_video_fps << " FPS)."
+                                              << std::endl;
+                                }
+                                video_streamer->force_keyframe();
+                            }
+                        })
+                        .detach();
                 }
                 else
                 {
                     LOG_I(">>> Car REVOKED Video Focus. <<<");
+                    video_session_id++; // Invalidate pending starts
                     stop_video_stream();
                 }
             }

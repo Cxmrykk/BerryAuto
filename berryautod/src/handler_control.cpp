@@ -30,6 +30,7 @@ void handle_control_message(uint16_t type, uint8_t* payload_data, int payload_le
     }
     else if (type == ControlMsgType::MESSAGE_BYEBYE_REQUEST)
     {
+        video_session_id++;
         stop_video_stream();
         video_channel_ready = false;
         input_channel_ready = false;
@@ -38,6 +39,7 @@ void handle_control_message(uint16_t type, uint8_t* payload_data, int payload_le
     }
     else if (type == ControlMsgType::MESSAGE_CHANNEL_CLOSE_NOTIFICATION)
     {
+        video_session_id++;
         stop_video_stream();
         video_channel_ready = false;
     }

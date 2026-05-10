@@ -60,6 +60,9 @@ extern std::atomic<int> video_unacked_count;
 extern std::atomic<bool> is_video_streaming;
 extern int max_video_unacked;
 
+extern std::atomic<bool> encoder_teardown_in_progress;
+extern std::atomic<int> video_session_id;
+
 #define LOG_I(msg)                                                                                                     \
     do                                                                                                                 \
     {                                                                                                                  \
