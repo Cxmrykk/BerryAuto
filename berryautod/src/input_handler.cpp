@@ -26,8 +26,6 @@ void init_uinput()
     ioctl(uinput_fd, UI_SET_KEYBIT, BTN_RIGHT);
     ioctl(uinput_fd, UI_SET_KEYBIT, BTN_MOUSE);
 
-    ioctl(uinput_fd, UI_SET_KEYBIT, KEY_LEFTSHIFT);
-
     ioctl(uinput_fd, UI_SET_EVBIT, EV_ABS);
     ioctl(uinput_fd, UI_SET_ABSBIT, ABS_X);
     ioctl(uinput_fd, UI_SET_ABSBIT, ABS_Y);

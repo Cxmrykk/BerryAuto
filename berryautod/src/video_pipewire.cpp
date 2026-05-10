@@ -1,6 +1,5 @@
 #include "dbus_portal.hpp"
 #include "globals.hpp"
-#include "input_handler.hpp"
 #include "video_encoder.hpp"
 #include <cerrno>
 #include <cstring>

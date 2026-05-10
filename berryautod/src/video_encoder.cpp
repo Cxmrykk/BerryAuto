@@ -1,7 +1,6 @@
 #include "video_encoder.hpp"
 #include "dbus_portal.hpp"
 #include "globals.hpp"
-#include "input_handler.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
@@ -42,7 +41,6 @@ void VideoEncoder::stop()
         return;
     running = false;
 
-    // Interrupt PipeWire Loop
     if (pw_loop)
         pw_main_loop_quit(pw_loop);
 
@@ -66,11 +64,9 @@ void VideoEncoder::update_sws()
     if (pw_w == 0 || pw_h == 0)
         return;
 
-    // Use SWS_FAST_BILINEAR instead of SWS_BILINEAR for heavy SIMD optimizations.
-    // NOTE: Output pixel format changed to AV_PIX_FMT_YUV420P as V4L2 M2M hardware encoders
-    // are highly prone to DMA stride tearing when scaling directly into NV12.
-    sws_ctx = sws_getContext(pw_w, pw_h, pw_fmt, target_width, target_height, AV_PIX_FMT_YUV420P, SWS_FAST_BILINEAR,
-                             NULL, NULL, NULL);
+    // MUST remain NV12: V4L2 M2M hardware encoders heavily rely on NV12 DMA stride compatibility
+    sws_ctx = sws_getContext(pw_w, pw_h, pw_fmt, target_width, target_height, AV_PIX_FMT_NV12, SWS_FAST_BILINEAR, NULL,
+                             NULL, NULL);
 
     if (!sws_ctx)
         LOG_E("[Capture] CRITICAL: sws_getContext failed! Format: " << pw_fmt);
@@ -101,8 +97,8 @@ bool VideoEncoder::init_encoder()
         codec_ctx->width = target_width;
         codec_ctx->height = target_height;
 
-        // YUV420P is universally robust against V4L2 DMA alignment bugs that cause macroblock tearing
-        codec_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
+        // Strict requirement for Raspberry Pi hardware decoding memory alignment
+        codec_ctx->pix_fmt = AV_PIX_FMT_NV12;
 
         codec_ctx->colorspace = AVCOL_SPC_BT709;
         codec_ctx->color_range = AVCOL_RANGE_MPEG;
@@ -110,10 +106,7 @@ bool VideoEncoder::init_encoder()
         codec_ctx->color_trc = AVCOL_TRC_BT709;
         codec_ctx->time_base = {1, 1000000};
         codec_ctx->framerate = {target_fps, 1};
-
-        // Shorten GOP size to 1 second so that if USB packets are dropped,
-        // the visual tearing automatically recovers in at most 1 second.
-        codec_ctx->gop_size = target_fps;
+        codec_ctx->gop_size = target_fps * 2;
         codec_ctx->max_b_frames = 0;
 
         int target_bitrate = static_cast<int>(target_width * target_height * target_fps * 0.15);
@@ -125,36 +118,33 @@ bool VideoEncoder::init_encoder()
         if (is_hw)
         {
             // Hardware Encoders
-            // MUST be single-threaded. Hardware blocks act as a singular pipeline.
+            // MUST be single-threaded. Generic Rate control parameters (qmin/LOW_DELAY) are omitted
+            // as they confuse the V4L2 M2M driver, causing DMA buffer truncation & macroblock tearing.
             codec_ctx->thread_count = 1;
             codec_ctx->thread_type = 0;
+
+            if (name == "h264_v4l2m2m")
+            {
+                av_opt_set(codec_ctx->priv_data, "profile", "main", 0);
+            }
         }
         else
         {
-            // Software Encoders (libx264/libx265)
+            // Software Encoders
             codec_ctx->thread_count = std::max(1u, std::thread::hardware_concurrency());
             codec_ctx->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
 
-            // Generic FFmpeg rate control and low-latency flags.
-            // Hardware encoders often crash or produce torn frames if these are set improperly,
-            // so we strictly isolate these parameters to software engines.
             codec_ctx->rc_max_rate = target_bitrate * 2;
             codec_ctx->rc_buffer_size = target_bitrate * 2;
             codec_ctx->qmin = 15;
             codec_ctx->qmax = 51;
             codec_ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
-        }
 
-        // Profile Optimization
-        if (name == "h264_v4l2m2m" || name == "h264_omx")
-        {
-            // Baseline avoids CABAC and B-frames completely, ensuring stable HW stream
-            av_opt_set(codec_ctx->priv_data, "profile", "baseline", 0);
-        }
-        else if (name == "libx264" || name == "libx265")
-        {
-            av_opt_set(codec_ctx->priv_data, "preset", "ultrafast", 0);
-            av_opt_set(codec_ctx->priv_data, "tune", "zerolatency", 0);
+            if (name == "libx264" || name == "libx265")
+            {
+                av_opt_set(codec_ctx->priv_data, "preset", "ultrafast", 0);
+                av_opt_set(codec_ctx->priv_data, "tune", "zerolatency", 0);
+            }
         }
 
         if (avcodec_open2(codec_ctx, codec, NULL) >= 0)
@@ -173,6 +163,7 @@ bool VideoEncoder::init_encoder()
     frame->format = codec_ctx->pix_fmt;
     frame->width = codec_ctx->width;
     frame->height = codec_ctx->height;
+    // Align frame buffers to 32 bytes explicitly for V4L2 M2M stride compatibility
     av_frame_get_buffer(frame, 32);
     pkt = av_packet_alloc();
 
@@ -213,7 +204,6 @@ void VideoEncoder::process_raw_frame(void* raw_data, int stride, int pw_w, int p
 
     frame->pts = get_monotonic_usec();
 
-    // V4L2 Hardware keyframe recovery fix
     bool keyframe_req = request_keyframe.exchange(false);
     frame->pict_type = keyframe_req ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_NONE;
     frame->key_frame = keyframe_req ? 1 : 0;
