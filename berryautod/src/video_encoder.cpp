@@ -82,10 +82,11 @@ bool VideoEncoder::init_encoder()
 {
     std::vector<std::string> encoder_names;
 
+    // Prioritize hardware encoders before falling back to software
     if (global_video_codec_type == 7)
-        encoder_names = {"libx265", "hevc_v4l2m2m", "hevc"};
+        encoder_names = {"hevc_v4l2m2m", "libx265", "hevc"};
     else
-        encoder_names = {"libx264", "h264_v4l2m2m", "h264_omx", "h264"};
+        encoder_names = {"h264_v4l2m2m", "h264_omx", "libx264", "h264"};
 
     for (const auto& name : encoder_names)
     {
