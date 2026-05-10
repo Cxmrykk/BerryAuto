@@ -5,12 +5,13 @@
 #include "media.pb.h"
 #include "video_encoder.hpp"
 #include "video_sender.hpp"
+#include <unistd.h>
 
 using namespace com::andrerinas::headunitrevived::aap::protocol::proto;
 
 void handle_media_message(uint8_t channel, uint16_t type, uint8_t* payload_data, int payload_len, ChannelType ctype)
 {
-    // ADDED: Prevent car stalls by ACKing incoming microphone/audio data payloads
+    // Prevent car stalls by ACKing incoming microphone/audio data payloads
     if (type == MediaMsgType::MEDIA_MESSAGE_DATA || type == MediaMsgType::MEDIA_MESSAGE_CODEC_CONFIG)
     {
         Ack ack;
@@ -142,7 +143,7 @@ void handle_media_message(uint8_t channel, uint16_t type, uint8_t* payload_data,
                             if (!is_video_streaming.load())
                             {
                                 is_video_streaming = true;
-                                reset_video_sender_state(); // ADDED: Hard reset state
+                                reset_video_sender_state();
                                 video_unacked_count = 0;
                                 if (video_streamer == nullptr)
                                 {

@@ -59,6 +59,7 @@ cd evdi
 cd library
 make
 sudo make install
+sudo cp evdi_lib.h /usr/local/include/ # The EVDI Makefile forgets to do this!
 sudo ldconfig # Refresh the system linker so BerryAuto can find the new library
 cd ..
 

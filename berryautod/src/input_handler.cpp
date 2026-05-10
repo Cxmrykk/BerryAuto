@@ -61,7 +61,10 @@ void init_uinput()
     uidev.absmin[ABS_MT_TRACKING_ID] = 0;
     uidev.absmax[ABS_MT_TRACKING_ID] = 65535;
 
-    write(uinput_fd, &uidev, sizeof(uidev));
+    if (write(uinput_fd, &uidev, sizeof(uidev)) < 0)
+    {
+        LOG_E("[Input] Failed to write uinput device configuration.");
+    }
     ioctl(uinput_fd, UI_DEV_CREATE);
 }
 
@@ -74,7 +77,10 @@ void emit_uinput(int type, int code, int val)
     ie.type = type;
     ie.code = code;
     ie.value = val;
-    write(uinput_fd, &ie, sizeof(ie));
+    if (write(uinput_fd, &ie, sizeof(ie)) < 0)
+    {
+        // Silently ignore write failures to prevent log flooding during active touch
+    }
 }
 
 void reset_input_state()
