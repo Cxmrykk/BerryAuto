@@ -28,9 +28,8 @@ void handle_channel_open_response()
         if (ctype == ChannelType::VIDEO || ctype == ChannelType::AUDIO)
         {
             if (ctype == ChannelType::VIDEO)
-            {
                 video_channel_ready = true;
-            }
+
             std::cout << ">>> Sending Media Setup for Channel " << opened_channel << "... <<<" << std::endl;
             MediaSetupRequest setup;
             setup.set_type((MediaCodecType)channel_codecs[opened_channel]);
@@ -43,7 +42,6 @@ void handle_channel_open_response()
         else if (ctype == ChannelType::INPUT)
         {
             input_channel_ready = true;
-
             std::cout << ">>> Initializing Virtual Pointer Device... <<<" << std::endl;
             init_uinput();
 
@@ -54,7 +52,6 @@ void handle_channel_open_response()
         else if (ctype == ChannelType::SENSOR)
         {
             std::cout << ">>> Sending Sensor Start Requests... <<<" << std::endl;
-
             SensorRequest req_driving;
             req_driving.set_type(SensorType::DRIVING_STATUS);
             req_driving.set_min_update_period(1000);
@@ -111,9 +108,6 @@ void process_service_discovery_response(uint8_t* payload_data, int payload_len)
                         channel_types[svc_id] = ChannelType::VIDEO;
                         video_channel_id = svc_id;
 
-                        std::cout << "[INFO] Headunit offered " << svc.media_sink_service().video_configs_size()
-                                  << " video configurations:" << std::endl;
-
                         int best_idx = 0;
                         int best_score = -1;
 
@@ -123,41 +117,6 @@ void process_service_discovery_response(uint8_t* payload_data, int payload_len)
                             int codec = vc.has_video_codec_type() ? vc.video_codec_type()
                                                                   : MediaCodecType::MEDIA_CODEC_VIDEO_H264_BP;
                             int res_type = vc.has_codec_resolution() ? vc.codec_resolution() : 1;
-
-                            std::string res_str = "Unknown";
-                            switch (res_type)
-                            {
-                                case 1:
-                                    res_str = "800x480";
-                                    break;
-                                case 2:
-                                    res_str = "1280x720";
-                                    break;
-                                case 3:
-                                    res_str = "1920x1080";
-                                    break;
-                                case 4:
-                                    res_str = "2560x1440";
-                                    break;
-                                case 5:
-                                    res_str = "3840x2160";
-                                    break;
-                                case 6:
-                                    res_str = "720x1280";
-                                    break;
-                                case 7:
-                                    res_str = "1080x1920";
-                                    break;
-                                case 8:
-                                    res_str = "1440x2560";
-                                    break;
-                                case 9:
-                                    res_str = "2160x3840";
-                                    break;
-                            }
-
-                            std::cout << "  - Index " << k << ": Resolution=" << res_str << ", Codec=" << codec
-                                      << std::endl;
 
                             int score = (codec == MediaCodecType::MEDIA_CODEC_VIDEO_H264_BP) ? 10000
                                         : (codec == MediaCodecType::MEDIA_CODEC_VIDEO_H265)  ? 1000
@@ -228,29 +187,16 @@ void process_service_discovery_response(uint8_t* payload_data, int payload_len)
                                 break;
                         }
 
-                        // Override with user config if present
                         if (user_config_force_width > 0 && user_config_force_height > 0)
                         {
                             global_video_width = user_config_force_width;
                             global_video_height = user_config_force_height;
-                            LOG_I("[Config] Overriding negotiated resolution to " << global_video_width << "x"
-                                                                                  << global_video_height);
                         }
                         if (user_config_force_fps > 0)
-                        {
                             global_video_fps = user_config_force_fps;
-                            LOG_I("[Config] Overriding negotiated FPS to " << global_video_fps);
-                        }
 
                         os_desktop_width = global_video_width;
                         os_desktop_height = global_video_height;
-
-                        std::string cmd = "/usr/local/bin/resize_desktop.sh " + std::to_string(global_video_width) +
-                                          " " + std::to_string(global_video_height);
-                        system(cmd.c_str());
-
-                        global_video_margin_w = 0;
-                        global_video_margin_h = 0;
 
                         int codec = video_config.has_video_codec_type() ? video_config.video_codec_type()
                                                                         : MediaCodecType::MEDIA_CODEC_VIDEO_H264_BP;
@@ -259,7 +205,7 @@ void process_service_discovery_response(uint8_t* payload_data, int payload_len)
 
                         std::cout << "[INFO] Headunit negotiated VIDEO (Channel " << svc_id << ") at "
                                   << global_video_width << "x" << global_video_height << " @ " << global_video_fps
-                                  << " FPS (Codec " << codec << ", Index " << best_idx << ")" << std::endl;
+                                  << " FPS (Codec " << codec << ")" << std::endl;
                     }
                     else
                     {
@@ -268,8 +214,7 @@ void process_service_discovery_response(uint8_t* payload_data, int payload_len)
                                         ? svc.media_sink_service().available_type()
                                         : MediaCodecType::MEDIA_CODEC_AUDIO_PCM;
                         channel_codecs[svc_id] = codec;
-                        std::cout << "[INFO] Headunit advertised AUDIO (Channel " << svc_id << ", Codec " << codec
-                                  << ")" << std::endl;
+                        std::cout << "[INFO] Headunit advertised AUDIO (Channel " << svc_id << ")" << std::endl;
                     }
                 }
                 else if (svc.has_input_source_service())
@@ -294,40 +239,22 @@ void process_service_discovery_response(uint8_t* payload_data, int payload_len)
                     int codec = svc.media_source_service().has_type() ? svc.media_source_service().type()
                                                                       : MediaCodecType::MEDIA_CODEC_AUDIO_PCM;
                     channel_codecs[svc_id] = codec;
-                    std::cout << "[INFO] Headunit advertised MIC (Channel " << svc_id << ", Codec " << codec << ")"
-                              << std::endl;
+                    std::cout << "[INFO] Headunit advertised MIC (Channel " << svc_id << ")" << std::endl;
                 }
                 else if (svc.has_sensor_source_service())
                 {
                     channel_types[svc_id] = ChannelType::SENSOR;
                     std::cout << "[INFO] Headunit advertised SENSORS (Channel " << svc_id << ")" << std::endl;
                 }
-                else if (svc.has_navigation_status_service())
-                {
-                    channel_types[svc_id] = ChannelType::NAVIGATION;
-                    std::cout << "[INFO] Headunit advertised NAVIGATION (Channel " << svc_id << ")" << std::endl;
-                }
-                else if (svc.has_bluetooth_service())
-                {
-                    channel_types[svc_id] = ChannelType::BLUETOOTH;
-                    std::cout << "[INFO] Headunit advertised BLUETOOTH (Channel " << svc_id << ")" << std::endl;
-                }
                 else
                 {
                     channel_types[svc_id] = ChannelType::UNKNOWN;
-                    std::cout << "[INFO] Headunit advertised UNKNOWN SERVICE (Channel " << svc_id << ")" << std::endl;
                 }
 
                 pending_channel_opens.push(svc_id);
             }
         }
     }
-    else
-    {
-        LOG_E(">>> [CRITICAL] ParseFromArray FAILED for ServiceDiscoveryResponse! <<<");
-    }
-
-    LOG_I(">>> Negotiating Channels Sequentially... <<<");
 
     if (!pending_channel_opens.empty())
     {

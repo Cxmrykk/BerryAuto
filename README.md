@@ -1,57 +1,85 @@
 # BerryAuto
 
-BerryAuto is a daemon that transforms a Linux single-board computer into a wired Android Auto receiver. It handles Android Auto Protocol (AAP) communication over USB OTG, captures the local display, encodes it to H.264/HEVC, and translates Android Auto touch inputs into local Linux virtual input devices.
+BerryAuto is a daemon that transforms a Linux single-board computer into a wired Android Auto receiver. It handles Android Auto Protocol (AAP) communication over USB OTG, acts as a virtual hardware monitor via EVDI, encodes the display to H.264/HEVC, and translates Android Auto touch inputs into local Linux virtual input devices.
 
-While the Raspberry Pi 4 is the primary target, any Linux device with a USB Device Controller (UDC) and hardware video encoding capabilities (V4L2/OMX) is supported.
+While the Raspberry Pi 4 is a popular target, **any Linux device** with a USB Device Controller (UDC), hardware video encoding capabilities (V4L2/OMX/VAAPI), and DKMS support is compatible.
 
 ## Features
 
 - **USB OTG Emulation:** Uses Linux FunctionFS to negotiate the Android Open Accessory (AOA) protocol.
-- **Dynamic Screen Capture:** Automatically detects and utilizes Wayland (`wlr-screencopy`), PipeWire (GNOME/Mutter), or X11 (`XShm`).
+- **Kernel-Level Virtual Display (EVDI):** Appears to the OS as a physical plug-and-play monitor. Bypasses all Wayland/X11 screen-capture restrictions and headless display problems.
+- **Dynamic EDID Injection:** Automatically generates and injects a hardware EDID matching the vehicle's exact resolution and frame rate, causing the Linux desktop to perfectly resize itself natively.
 - **Hardware Encoding:** Prioritizes V4L2/OMX hardware encoders (`h264_v4l2m2m`, `h264_omx`) before falling back to software (`libx264`).
 - **Touch Injection:** Creates a virtual touchscreen via `uinput` to pass touch events to the local display server.
-- **Dynamic Resolution:** Automatically negotiates and resizes the local desktop to match the vehicle/headunit specifications via `xrandr` or `wlr-randr`.
 
 ## Requirements
 
 ### Hardware
 
-- A device with a USB Device Controller (UDC) capable of OTG (e.g., Raspberry Pi 4 via the USB-C port).
-- Hardware video encoder (recommended).
+- A device with a USB Device Controller (UDC) capable of OTG (e.g., Raspberry Pi 4 via the USB-C port, Orange Pi, Rock Pi, etc.).
 
-### OS Configuration (Raspberry Pi 4)
+### OS Configuration
 
-You must enable the `dwc2` USB driver to allow the Pi to act as a USB device.
-Add the following to `/boot/config.txt` (or `/boot/firmware/config.txt`):
+Enable the `dwc2` USB driver to allow the device to act as a USB gadget.  
+_(On Raspberry Pi, add `dtoverlay=dwc2` to `/boot/firmware/config.txt` or `/boot/config.txt`)_
 
-```ini
-dtoverlay=dwc2
-```
-
-Add the following to `/etc/modules`:
+Add the required modules to `/etc/modules`:
 
 ```text
 dwc2
 libcomposite
 uinput
+evdi
 ```
 
 Reboot your device after applying these changes.
 
 ### Dependencies
 
-Install the required build tools and libraries (Debian/Ubuntu):
+Install the required build tools, generic kernel headers for your OS, and graphics development libraries (Debian/Ubuntu):
 
 ```sh
 sudo apt update
-sudo apt install build-essential cmake pkg-config \
+sudo apt install -y build-essential cmake pkg-config git \
     libssl-dev libprotobuf-dev protobuf-compiler \
     libavcodec-dev libavutil-dev libswscale-dev \
-    libx11-dev libxext-dev libwayland-dev wayland-protocols \
-    libpipewire-0.3-dev libglib2.0-dev wlr-randr \
+    linux-headers-$(uname -r) dkms libdrm-dev
 ```
 
-## Building
+### Compiling EVDI from Source
+
+Because distribution package managers often contain outdated versions of EVDI, we will compile it directly from the official DisplayLink repository.
+
+```sh
+cd ~
+git clone https://github.com/DisplayLink/evdi.git
+cd evdi
+
+# 1. Build and install the userspace library (libevdi)
+cd library
+make
+sudo make install
+sudo ldconfig # Refresh the system linker so BerryAuto can find the new library
+cd ..
+
+# 2. Build and install the kernel module via DKMS
+# Extract the current version dynamically from the dkms.conf file
+EVDI_VER=$(grep PACKAGE_VERSION module/dkms.conf | cut -d'=' -f2 | tr -d '"')
+
+# Create the DKMS source directory and copy the module files into it
+sudo mkdir -p /usr/src/evdi-$EVDI_VER
+sudo cp -a module/. /usr/src/evdi-$EVDI_VER/
+
+# Build and install the module
+sudo dkms add -m evdi -v $EVDI_VER
+sudo dkms build -m evdi -v $EVDI_VER
+sudo dkms install -m evdi -v $EVDI_VER
+
+# Load the newly installed module into the active kernel
+sudo modprobe evdi
+```
+
+## Building BerryAuto
 
 Clone the repository and build the daemon:
 
@@ -67,20 +95,12 @@ make -j$(nproc)
 
 ## Installation & Setup
 
-The daemon relies on helper scripts to configure the USB gadget and handle display resizing. These must be placed in your system path.
+Helper scripts must be placed in your system path.
 
 ```sh
-# From the project root
 cd ~/BerryAuto
 sudo ln -sf "$(pwd)/scripts/setup_opengal_gadget.sh" /usr/local/bin/
-sudo ln -sf "$(pwd)/scripts/resize_desktop.sh" /usr/local/bin/
-```
-
-Make sure that the helper scripts are executable:
-
-```sh
 sudo chmod +x /usr/local/bin/setup_opengal_gadget.sh
-sudo chmod +x /usr/local/bin/resize_desktop.sh
 ```
 
 Ensure your user is in the `video` group to access hardware encoders:
@@ -89,15 +109,13 @@ Ensure your user is in the `video` group to access hardware encoders:
 sudo usermod -aG video $(whoami)
 ```
 
-## Running BerryAuto
-
-Do not run the daemon directly. Use the provided runner script which sets up the Wayland/X11 environment variables, configures FunctionFS, and handles the accessory morphing sequence.
-
-First you need to remove the password prompt from sudo. Run the following first:
+Remove the password prompt from `sudo` so the runner script can configure the USB gadget without interrupting the connection process:
 
 ```sh
 echo "$(whoami) ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/$(whoami)
 ```
+
+## Running BerryAuto
 
 Plug your phone into the OTG port, then execute:
 
@@ -105,18 +123,13 @@ Plug your phone into the OTG port, then execute:
 ./scripts/run_berryauto.sh
 ```
 
-The script will:
-
-1. Initialize the USB gadget as an MTP device.
-2. Wait for the Android device to connect.
-3. Perform the AOA handshake to switch the phone into Accessory Mode.
-4. Restart the daemon to handle the active Android Auto video and control streams.
+Because BerryAuto uses EVDI, there are no screen-sharing prompts or permission pop-ups to click. The daemon will instantly create a virtual display, the Linux desktop will extend/resize to it, and video streaming will begin.
 
 ## Autostart on Boot (Systemd Service)
 
 To make BerryAuto run automatically on boot and restart seamlessly when you plug and unplug your phone, you should set it up as a systemd service.
 
-From the project root directory (`~/BerryAuto`), run the following commands to generate and enable the service:
+From the project root directory (`~/BerryAuto`), run:
 
 ```sh
 # Enable systemd linger for the current user so user-level systemd-run commands execute correctly
@@ -126,7 +139,7 @@ loginctl enable-linger $USER
 sudo tee /etc/systemd/system/berryauto.service > /dev/null <<EOF
 [Unit]
 Description=BerryAuto Daemon Runner
-After=graphical.target
+After=graphical.target systemd-modules-load.service
 Wants=graphical.target
 
 [Service]

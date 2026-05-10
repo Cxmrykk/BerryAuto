@@ -13,39 +13,14 @@ trap cleanup SIGINT
 # Kill any old ghost root processes from previous runs
 sudo pkill -9 opengal_emitter 2>/dev/null || true
 
-# Identify real user behind sudo
-CURRENT_USER=${SUDO_USER:-$USER}
-USER_UID=$(id -u "$CURRENT_USER")
-USER_HOME=$(getent passwd "$CURRENT_USER" | cut -d: -f6)
-
-export DISPLAY=:0
-export XAUTHORITY="$USER_HOME/.Xauthority"
-export XDG_RUNTIME_DIR="/run/user/$USER_UID"
-
-if [ -z "$WAYLAND_DISPLAY" ]; then
-    if [ -S "$XDG_RUNTIME_DIR/wayland-1" ]; then
-        export WAYLAND_DISPLAY="wayland-1"
-    elif [ -S "$XDG_RUNTIME_DIR/wayland-0" ]; then
-        export WAYLAND_DISPLAY="wayland-0"
-    fi
-fi
-
-if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
-    export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
-fi
-
-if [ -z "$XDG_CURRENT_DESKTOP" ]; then
-    export XDG_CURRENT_DESKTOP="Wayfire" 
-fi
-
-xhost +SI:localuser:root > /dev/null 2>&1 || true
+# Ensure EVDI kernel module is loaded
+sudo modprobe evdi 2>/dev/null || true
 
 sudo /usr/local/bin/setup_opengal_gadget.sh
 echo "HU-AAAAAA001" | sudo tee /sys/kernel/config/usb_gadget/opengal/strings/0x409/serialnumber > /dev/null
 
-echo "[RUNNER] Environment: WAYLAND=$WAYLAND_DISPLAY DBUS=$DBUS_SESSION_BUS_ADDRESS DESKTOP=$XDG_CURRENT_DESKTOP"
+echo "[RUNNER] Starting BerryAuto Daemon..."
 
-# CRITICAL FIX: The unit name MUST perfectly match the new App ID (com.berryauto.receiver)
 systemd-run --quiet --user --scope --unit="app-com.berryauto.receiver-$$" "$PWD/berryautod/build/opengal_emitter" &
 EMITTER_PID=$!
 
@@ -80,7 +55,6 @@ if [ $EXIT_CODE -eq 42 ]; then
     
     echo "[RUNNER] Restarting for AAP Stream..."
     
-    # CRITICAL FIX: Must also match the new App ID here during the restart
     systemd-run --quiet --user --scope --unit="app-com.berryauto.receiver-morph-$$" "$PWD/berryautod/build/opengal_emitter" &
     PID2=$!
     
