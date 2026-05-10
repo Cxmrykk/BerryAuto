@@ -218,19 +218,9 @@ void VideoEncoder::run_wlr_loop()
 {
     uint64_t frame_interval_us = 1000000 / target_fps;
     uint64_t next_frame_time = get_monotonic_usec() + frame_interval_us;
-    int wake_timer = 0;
-
-    wake_up_display();
 
     while (running.load())
     {
-        wake_timer++;
-        if (wake_timer >= target_fps)
-        {
-            wake_up_display();
-            wake_timer = 0;
-        }
-
         request_wayland_frame_sync();
 
         std::vector<uint8_t> frame_copy;

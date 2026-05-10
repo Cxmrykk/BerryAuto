@@ -1,5 +1,5 @@
-#include "globals.hpp"
 #include "dbus_portal.hpp"
+#include "globals.hpp"
 #include "input_handler.hpp"
 #include "video_encoder.hpp"
 #include <cerrno>
@@ -212,17 +212,9 @@ void VideoEncoder::run_pipewire_loop(uint32_t node_id, int pw_fd)
         {
             uint64_t frame_interval_us = 1000000 / target_fps;
             uint64_t next_frame_time = get_monotonic_usec() + frame_interval_us;
-            int wake_timer = 0;
 
             while (running.load())
             {
-                wake_timer++;
-                if (wake_timer >= target_fps)
-                {
-                    wake_up_display();
-                    wake_timer = 0;
-                }
-
                 std::vector<uint8_t> frame_copy;
                 int current_stride = 0, current_w = 0, current_h = 0;
 
@@ -256,7 +248,6 @@ void VideoEncoder::run_pipewire_loop(uint32_t node_id, int pw_fd)
             }
         });
 
-    wake_up_display();
     pw_main_loop_run(pw_loop);
 
     running = false;

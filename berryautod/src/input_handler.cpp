@@ -93,26 +93,6 @@ void reset_input_state()
     }
 }
 
-void wake_up_display()
-{
-    if (uinput_fd < 0)
-        init_uinput();
-    if (uinput_fd >= 0)
-    {
-        static int wiggle = 10;
-        wiggle = -wiggle;
-
-        emit_uinput(EV_REL, REL_X, wiggle);
-        emit_uinput(EV_REL, REL_Y, wiggle);
-        emit_uinput(EV_SYN, SYN_REPORT, 0);
-
-        emit_uinput(EV_KEY, KEY_LEFTSHIFT, 1);
-        emit_uinput(EV_SYN, SYN_REPORT, 0);
-        emit_uinput(EV_KEY, KEY_LEFTSHIFT, 0);
-        emit_uinput(EV_SYN, SYN_REPORT, 0);
-    }
-}
-
 void handle_touch_event(const com::andrerinas::headunitrevived::aap::protocol::proto::InputReport& report)
 {
     std::lock_guard<std::recursive_mutex> lock(aap_mutex);
