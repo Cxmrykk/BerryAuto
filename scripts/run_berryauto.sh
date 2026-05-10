@@ -16,6 +16,15 @@ sudo pkill -9 opengal_emitter 2>/dev/null || true
 # Ensure EVDI kernel module is loaded
 sudo modprobe evdi 2>/dev/null || true
 
+# Check if any virtual screens exist. If not, tell the kernel to create one.
+EVDI_COUNT=$(cat /sys/devices/evdi/count 2>/dev/null || echo 0)
+if [ "$EVDI_COUNT" -eq 0 ] && [ -f /sys/devices/evdi/add ]; then
+    echo "[RUNNER] Provisioning kernel EVDI virtual display..."
+    echo 1 | sudo tee /sys/devices/evdi/add > /dev/null
+    # Give udev a split second to set the /dev/dri/cardX permissions for the 'video' group
+    sleep 1 
+fi
+
 sudo /usr/local/bin/setup_opengal_gadget.sh
 echo "HU-AAAAAA001" | sudo tee /sys/kernel/config/usb_gadget/opengal/strings/0x409/serialnumber > /dev/null
 
