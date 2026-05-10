@@ -7,6 +7,7 @@
 #include <cstring>
 #include <iostream>
 #include <libavcodec/avcodec.h>
+#include <libavutil/imgutils.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -41,7 +42,6 @@ void VideoEncoder::stop()
         return;
     running = false;
 
-    // Interrupt PipeWire Loop
     if (pw_loop)
         pw_main_loop_quit(pw_loop);
 
@@ -65,8 +65,8 @@ void VideoEncoder::update_sws()
     if (pw_w == 0 || pw_h == 0)
         return;
 
-    // Use SWS_FAST_BILINEAR instead of SWS_BILINEAR for heavy SIMD optimizations.
-    sws_ctx = sws_getContext(pw_w, pw_h, pw_fmt, target_width, target_height, AV_PIX_FMT_NV12, SWS_FAST_BILINEAR, NULL,
+    // Use standard SWS_BILINEAR to avoid SIMD artifacts on unaligned resolutions
+    sws_ctx = sws_getContext(pw_w, pw_h, pw_fmt, target_width, target_height, AV_PIX_FMT_YUV420P, SWS_BILINEAR, NULL,
                              NULL, NULL);
 
     if (!sws_ctx)
@@ -98,8 +98,8 @@ bool VideoEncoder::init_encoder()
         codec_ctx->width = target_width;
         codec_ctx->height = target_height;
 
-        // NV12 is required: YUV420P causes hardware driver crashes on Pi due to differing UV stride bounds.
-        codec_ctx->pix_fmt = AV_PIX_FMT_NV12;
+        // YUV420P strictly separates the U and V planes.
+        codec_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
 
         codec_ctx->colorspace = AVCOL_SPC_BT709;
         codec_ctx->color_range = AVCOL_RANGE_MPEG;
@@ -122,9 +122,13 @@ bool VideoEncoder::init_encoder()
             codec_ctx->thread_count = 1;
             codec_ctx->thread_type = 0;
 
-            if (name == "h264_v4l2m2m")
+            if (name == "h264_v4l2m2m" || name == "h264_omx")
             {
-                av_opt_set(codec_ctx->priv_data, "profile", "main", 0);
+                // CRITICAL FIX: Force Baseline profile!
+                // Car head units often lack Main/High profile hardware decoders for 800x480.
+                // Sending a High profile stream causes catastrophic visual corruption (neon tearing).
+                av_opt_set(codec_ctx->priv_data, "profile", "baseline", 0);
+                av_opt_set(codec_ctx->priv_data, "level", "3.1", 0);
             }
         }
         else
@@ -143,6 +147,7 @@ bool VideoEncoder::init_encoder()
             {
                 av_opt_set(codec_ctx->priv_data, "preset", "ultrafast", 0);
                 av_opt_set(codec_ctx->priv_data, "tune", "zerolatency", 0);
+                av_opt_set(codec_ctx->priv_data, "profile", "baseline", 0);
             }
         }
 
@@ -190,19 +195,22 @@ void VideoEncoder::process_raw_frame(void* raw_data, int stride, int pw_w, int p
     if (stride > in_linesize[0])
         in_linesize[0] = stride;
 
-    // Dynamically allocate a fresh frame to prevent hardware DMA memory races
+    // CRITICAL FIX: Explicitly allocate tightly packed memory to bypass V4L2 Stride Bugs.
+    // av_frame_get_buffer() often adds hidden alignment padding that the Pi's V4L2 driver ignores,
+    // causing a 16-byte shift per row resulting in diagonal screen tearing.
     AVFrame* encode_frame = av_frame_alloc();
     encode_frame->format = codec_ctx->pix_fmt;
     encode_frame->width = codec_ctx->width;
     encode_frame->height = codec_ctx->height;
 
-    // CRITICAL FIX: Force 64-byte alignment!
-    // The Raspberry Pi V4L2 M2M hardware encoder implicitly aligns memory strides to 64 bytes.
-    // 1280x720 is naturally 64-byte aligned, which is why it worked perfectly.
-    // 800x480 is NOT 64-byte aligned (800 % 64 == 32).
-    // By forcing av_frame_get_buffer to pad linesizes to 64 bytes, sws_scale will write the
-    // blank padding, and the hardware will read it in perfect sync, eliminating the tearing.
-    av_frame_get_buffer(encode_frame, 64);
+    int buffer_size = av_image_get_buffer_size(codec_ctx->pix_fmt, codec_ctx->width, codec_ctx->height, 1);
+    uint8_t* raw_buffer = (uint8_t*)av_malloc(buffer_size);
+
+    av_image_fill_arrays(encode_frame->data, encode_frame->linesize, raw_buffer, codec_ctx->pix_fmt, codec_ctx->width,
+                         codec_ctx->height, 1);
+
+    // Assign the memory to the frame so av_frame_free() handles cleanup natively
+    encode_frame->buf[0] = av_buffer_create(raw_buffer, buffer_size, av_buffer_default_free, NULL, 0);
 
     sws_scale(sws_ctx, in_data, in_linesize, 0, pw_h, encode_frame->data, encode_frame->linesize);
 
