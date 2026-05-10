@@ -42,7 +42,6 @@ void VideoEncoder::stop()
         return;
     running = false;
 
-    // Interrupt PipeWire Loop
     if (pw_loop)
         pw_main_loop_quit(pw_loop);
 
@@ -67,9 +66,10 @@ void VideoEncoder::update_sws()
         return;
 
     // Use SWS_FAST_BILINEAR instead of SWS_BILINEAR for heavy SIMD optimizations.
-    // MUST remain NV12: V4L2 M2M hardware encoders heavily rely on NV12 DMA stride compatibility
-    sws_ctx = sws_getContext(pw_w, pw_h, pw_fmt, target_width, target_height, AV_PIX_FMT_NV12, SWS_FAST_BILINEAR, NULL,
-                             NULL, NULL);
+    // CHANGED TO YUV420P: Bypasses the Raspberry Pi V4L2 NV12 chroma stride bug on resolutions
+    // like 800x480 where the width is not a clean multiple of 128.
+    sws_ctx = sws_getContext(pw_w, pw_h, pw_fmt, target_width, target_height, AV_PIX_FMT_YUV420P, SWS_FAST_BILINEAR,
+                             NULL, NULL, NULL);
 
     if (!sws_ctx)
         LOG_E("[Capture] CRITICAL: sws_getContext failed! Format: " << pw_fmt);
@@ -100,8 +100,9 @@ bool VideoEncoder::init_encoder()
         codec_ctx->width = target_width;
         codec_ctx->height = target_height;
 
-        // Strict requirement for Raspberry Pi hardware decoding memory alignment
-        codec_ctx->pix_fmt = AV_PIX_FMT_NV12;
+        // YUV420P strictly separates the U and V planes, preventing the Pi's V4L2 M2M
+        // driver from corrupting the chroma data when memory boundaries are unaligned.
+        codec_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
 
         codec_ctx->colorspace = AVCOL_SPC_BT709;
         codec_ctx->color_range = AVCOL_RANGE_MPEG;
@@ -121,8 +122,6 @@ bool VideoEncoder::init_encoder()
         if (is_hw)
         {
             // Hardware Encoders
-            // MUST be single-threaded. Generic Rate control parameters (qmin/LOW_DELAY) are omitted
-            // as they confuse the V4L2 M2M driver, causing DMA buffer truncation & macroblock tearing.
             codec_ctx->thread_count = 1;
             codec_ctx->thread_type = 0;
 
@@ -194,16 +193,11 @@ void VideoEncoder::process_raw_frame(void* raw_data, int stride, int pw_w, int p
     if (stride > in_linesize[0])
         in_linesize[0] = stride;
 
-    // ALLOCATE A FRESH FRAME FOR V4L2 M2M (HARDWARE DMA SAFETY)
-    // Hardware encoders process asynchronously. Reusing a single persistent frame buffer
-    // causes sws_scale to overwrite the pixels while the hardware is still reading them,
-    // resulting in severe screen tearing. We create a new AVFrame per cycle.
+    // Dynamically allocate a fresh frame to prevent hardware DMA memory races
     AVFrame* encode_frame = av_frame_alloc();
     encode_frame->format = codec_ctx->pix_fmt;
     encode_frame->width = codec_ctx->width;
     encode_frame->height = codec_ctx->height;
-
-    // Align frame buffers to 32 bytes explicitly for V4L2 M2M stride compatibility
     av_frame_get_buffer(encode_frame, 32);
 
     sws_scale(sws_ctx, in_data, in_linesize, 0, pw_h, encode_frame->data, encode_frame->linesize);
@@ -216,8 +210,7 @@ void VideoEncoder::process_raw_frame(void* raw_data, int stride, int pw_w, int p
 
     int ret = avcodec_send_frame(codec_ctx, encode_frame);
 
-    // Unref our handle. The encoder will keep its own internal reference if it's still
-    // using it via DMA, releasing the memory only when it's entirely finished.
+    // Hand over memory management to FFmpeg / Hardware DMA
     av_frame_free(&encode_frame);
 
     while (ret >= 0)
