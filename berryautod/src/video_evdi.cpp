@@ -84,10 +84,19 @@ static void evdi_mode_changed_handler(evdi_mode mode, void* user_data)
     enc->input_fmt = AV_PIX_FMT_BGRA;
     enc->latest_stride = mode.width * 4;
 
-    // CRITICAL FIX: Seed the buffer with black so FFmpeg doesn't starve
+    // Seed the buffer with Dark Purple so FFmpeg doesn't starve
     // while waiting for the headless desktop environment to draw a frame.
     size_t req_size = enc->latest_stride * enc->input_h;
-    enc->latest_frame_buffer.assign(req_size, 0x00);
+    enc->latest_frame_buffer.resize(req_size);
+
+    // Fill with Dark Purple (BGRA format)
+    for (size_t i = 0; i < req_size; i += 4)
+    {
+        enc->latest_frame_buffer[i] = 0x80;     // Blue  (128)
+        enc->latest_frame_buffer[i + 1] = 0x00; // Green (0)
+        enc->latest_frame_buffer[i + 2] = 0x80; // Red   (128)
+        enc->latest_frame_buffer[i + 3] = 0xFF; // Alpha (255)
+    }
 
     for (int i = 0; i < enc->evdi_buffer_count; ++i)
     {
