@@ -3,64 +3,50 @@
 #include <cstring>
 #include <iostream>
 #include <sys/select.h>
+#include <unistd.h>
 #include <vector>
 
-// CVT Base EDID Template
-std::vector<uint8_t> VideoEncoder::generate_edid(int width, int height, int fps)
+extern uint64_t get_monotonic_usec();
+
+// Pre-computed, VESA-compliant EDID blocks to prevent compositor fallbacks
+std::vector<uint8_t> VideoEncoder::get_edid(int width, int height)
 {
-    // A standard 128-byte EDID. We patch the Detailed Timing Descriptor (DTD) dynamically.
-    std::vector<uint8_t> edid = {
-        0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x09, 0x69, 0x12, 0x34, 0x01, 0x00, 0x00, 0x00, 0x01, 0x20,
-        0x01, 0x04, 0x95, 0x21, 0x13, 0x78, 0xea, 0x8d, 0x85, 0xa6, 0x54, 0x4a, 0x9c, 0x26, 0x12, 0x50, 0x54, 0x00,
-        0x00, 0x00, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
-        // DTD Block starts at index 54
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        // Descriptor 2 (Monitor Name)
-        0x00, 0x00, 0x00, 0xfc, 0x00, 'B', 'e', 'r', 'r', 'y', 'A', 'u', 't', 'o', 0x0a, 0x20, 0x20, 0x20,
-        // Descriptor 3 (Unused)
-        0x00, 0x00, 0x00, 0xfd, 0x00, 0x32, 0x4c, 0x1e, 0x53, 0x11, 0x00, 0x0a, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
-        // Descriptor 4 (Unused)
-        0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00 // Extension block count + checksum (replaced later)
-    };
-
-    // Calculate basic CVT timing values
-    int h_blank = width * 0.25;
-    int v_blank = 30;
-    int pixel_clock = ((width + h_blank) * (height + v_blank) * fps) / 10000;
-
-    edid[54] = pixel_clock & 0xFF;
-    edid[55] = (pixel_clock >> 8) & 0xFF;
-
-    edid[56] = width & 0xFF;
-    edid[57] = h_blank & 0xFF;
-    edid[58] = (((width >> 8) & 0x0F) << 4) | ((h_blank >> 8) & 0x0F);
-
-    edid[59] = height & 0xFF;
-    edid[60] = v_blank & 0xFF;
-    edid[61] = (((height >> 8) & 0x0F) << 4) | ((v_blank >> 8) & 0x0F);
-
-    // Sync offsets / pulse widths (Dummy values for virtual display)
-    edid[62] = 0x20;
-    edid[63] = 0x20;
-    edid[64] = 0x20;
-    edid[65] = 0x20;
-
-    edid[66] = 0x10; // Image Size H
-    edid[67] = 0x09; // Image Size V
-    edid[68] = 0x00;
-
-    edid[69] = 0x00; // Border
-    edid[70] = 0x00;
-    edid[71] = 0x18; // Features
-
-    // Checksum
-    uint8_t sum = 0;
-    for (int i = 0; i < 127; ++i)
-        sum += edid[i];
-    edid[127] = (256 - sum) & 0xFF;
-
-    return edid;
+    if (width >= 1920)
+    {
+        // 1920x1080 @ 60Hz
+        return {0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x04, 0x69, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x01, 0x14, 0x01, 0x03, 0x80, 0x10, 0x09, 0x78, 0x0A, 0xC8, 0x95, 0x9E, 0x57, 0x54, 0x92, 0x26,
+                0x0F, 0x50, 0x54, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+                0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x02, 0x3A, 0x80, 0x18, 0x71, 0x38, 0x2D, 0x40, 0x58, 0x2C,
+                0x45, 0x00, 0xA0, 0x5A, 0x00, 0x00, 0x00, 0x1E, 0x00, 0x00, 0x00, 0xFD, 0x00, 0x3B, 0x3D, 0x43,
+                0x45, 0x0F, 0x00, 0x0A, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x00, 0x00, 0x00, 0xFC, 0x00, 0x42,
+                0x65, 0x72, 0x72, 0x79, 0x41, 0x75, 0x74, 0x6F, 0x0A, 0x20, 0x20, 0x20, 0x00, 0x00, 0x00, 0x10,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x24};
+    }
+    else if (width >= 1280)
+    {
+        // 1280x720 @ 60Hz
+        return {0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x04, 0x69, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x01, 0x14, 0x01, 0x03, 0x80, 0x10, 0x09, 0x78, 0x0A, 0xC8, 0x95, 0x9E, 0x57, 0x54, 0x92, 0x26,
+                0x0F, 0x50, 0x54, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+                0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x1D, 0x00, 0x72, 0x51, 0xD0, 0x1E, 0x20, 0x6E, 0x28,
+                0x55, 0x00, 0xA0, 0x5A, 0x00, 0x00, 0x00, 0x1E, 0x00, 0x00, 0x00, 0xFD, 0x00, 0x3B, 0x3D, 0x43,
+                0x45, 0x08, 0x00, 0x0A, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x00, 0x00, 0x00, 0xFC, 0x00, 0x42,
+                0x65, 0x72, 0x72, 0x79, 0x41, 0x75, 0x74, 0x6F, 0x0A, 0x20, 0x20, 0x20, 0x00, 0x00, 0x00, 0x10,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x9C};
+    }
+    else
+    {
+        // 800x480 @ 60Hz
+        return {0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x04, 0x69, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x01, 0x14, 0x01, 0x03, 0x80, 0x10, 0x09, 0x78, 0x0A, 0xC8, 0x95, 0x9E, 0x57, 0x54, 0x92, 0x26,
+                0x0F, 0x50, 0x54, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+                0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x96, 0x0B, 0x20, 0x8A, 0x30, 0xE0, 0x1B, 0x10, 0x28, 0x30,
+                0x33, 0x00, 0xA0, 0x5A, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00, 0xFD, 0x00, 0x3B, 0x3D, 0x1D,
+                0x20, 0x03, 0x00, 0x0A, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x00, 0x00, 0x00, 0xFC, 0x00, 0x42,
+                0x65, 0x72, 0x72, 0x79, 0x41, 0x75, 0x74, 0x6F, 0x0A, 0x20, 0x20, 0x20, 0x00, 0x00, 0x00, 0x10,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xB4};
+    }
 }
 
 static void evdi_dpms_handler(int dpms_mode, void* user_data)
@@ -69,7 +55,6 @@ static void evdi_dpms_handler(int dpms_mode, void* user_data)
     LOG_I("[EVDI] DPMS State Changed: " << dpms_mode);
     if (dpms_mode == 0)
     {
-        // Monitor is ON, request initial frames
         for (int i = 0; i < enc->evdi_buffer_count; ++i)
         {
             evdi_request_update(enc->evdi, i);
@@ -82,15 +67,12 @@ static void evdi_mode_changed_handler(evdi_mode mode, void* user_data)
     VideoEncoder* enc = static_cast<VideoEncoder*>(user_data);
     LOG_I("[EVDI] Compositor updated Mode: " << mode.width << "x" << mode.height);
 
+    std::lock_guard<std::mutex> lock(enc->frame_mutex);
     enc->input_w = mode.width;
     enc->input_h = mode.height;
-
-    // EVDI defaults to BGRA or RGBA.
-    // We assume 32-bit BGRA (typical Linux framebuffer format for virtual outputs)
     enc->input_fmt = AV_PIX_FMT_BGRA;
     enc->update_sws();
 
-    // Reallocate buffers
     for (int i = 0; i < enc->evdi_buffer_count; ++i)
     {
         if (enc->evdi_buffers[i].buffer)
@@ -114,18 +96,24 @@ static void evdi_update_ready_handler(int buffer_to_be_updated, void* user_data)
     {
         evdi_buffer& buf = enc->evdi_buffers[buffer_to_be_updated];
 
-        // Grab the pixels that changed
         evdi_rect rects[16];
         int num_rects = 0;
         evdi_grab_pixels(enc->evdi, rects, &num_rects);
 
-        // Process the full buffer (we could optimize using rects later)
+        // Push the new pixels into our thread-safe buffer
         if (buf.buffer && enc->input_w > 0 && enc->input_h > 0)
         {
-            enc->process_raw_frame(buf.buffer, buf.stride, enc->input_w, enc->input_h);
+            std::lock_guard<std::mutex> lock(enc->frame_mutex);
+            size_t req_size = buf.stride * buf.height;
+            if (enc->latest_frame_buffer.size() != req_size)
+            {
+                enc->latest_frame_buffer.resize(req_size);
+            }
+            memcpy(enc->latest_frame_buffer.data(), buf.buffer, req_size);
+            enc->latest_stride = buf.stride;
         }
 
-        // Return the buffer to the pool so EVDI can draw into it again
+        // Return the buffer to EVDI to get the next frame
         evdi_request_update(enc->evdi, buffer_to_be_updated);
     }
 }
@@ -138,7 +126,7 @@ static void evdi_crtc_state_handler(int state, void* user_data)
 
 void VideoEncoder::handle_evdi_update(int buffer_id)
 {
-    // Internal delegate method
+    (void)buffer_id;
 }
 
 void VideoEncoder::run_evdi_loop()
@@ -155,7 +143,7 @@ void VideoEncoder::run_evdi_loop()
 
     if (device_num == -1)
     {
-        LOG_E("[EVDI] CRITICAL: No available EVDI devices found! Did you `modprobe evdi`?");
+        LOG_E("[EVDI] CRITICAL: No available EVDI devices found!");
         return;
     }
 
@@ -166,7 +154,6 @@ void VideoEncoder::run_evdi_loop()
         return;
     }
 
-    // Set up event handlers
     memset(&evdi_ctx, 0, sizeof(evdi_ctx));
     evdi_ctx.dpms_handler = evdi_dpms_handler;
     evdi_ctx.mode_changed_handler = evdi_mode_changed_handler;
@@ -180,33 +167,73 @@ void VideoEncoder::run_evdi_loop()
         evdi_buffers[i].buffer = nullptr;
     }
 
-    // Generate dynamic EDID based on negotiated Android Auto resolution
-    std::vector<uint8_t> edid = generate_edid(target_width, target_height, target_fps);
-
-    // Connect the virtual monitor!
+    std::vector<uint8_t> edid = get_edid(target_width, target_height);
     evdi_connect(evdi, edid.data(), edid.size(), 0);
     LOG_I("[EVDI] Virtual Monitor connected: " << target_width << "x" << target_height);
 
-    int evdi_fd = evdi_get_event_ready(evdi);
-    fd_set rfds;
-    struct timeval tv;
+    // Launch a background thread dedicated solely to handling EVDI asynchronous events
+    std::thread evdi_bg_thread(
+        [this]()
+        {
+            int evdi_fd = evdi_get_event_ready(evdi);
+            fd_set rfds;
+            struct timeval tv;
 
-    // Main EVDI event loop
+            while (running.load())
+            {
+                FD_ZERO(&rfds);
+                FD_SET(evdi_fd, &rfds);
+                tv.tv_sec = 1;
+                tv.tv_usec = 0;
+
+                int retval = select(evdi_fd + 1, &rfds, NULL, NULL, &tv);
+                if (retval > 0)
+                {
+                    evdi_handle_events(evdi, &evdi_ctx);
+                }
+            }
+        });
+
+    // Main foreground loop: Feed FFmpeg at exactly `target_fps` (e.g. 60 FPS)
+    uint64_t frame_interval_us = 1000000 / target_fps;
+    uint64_t next_frame_time = get_monotonic_usec() + frame_interval_us;
+
     while (running.load())
     {
-        FD_ZERO(&rfds);
-        FD_SET(evdi_fd, &rfds);
-        tv.tv_sec = 1;
-        tv.tv_usec = 0;
+        std::vector<uint8_t> frame_copy;
+        int current_stride = 0, current_w = 0, current_h = 0;
 
-        int retval = select(evdi_fd + 1, &rfds, NULL, NULL, &tv);
-        if (retval > 0)
         {
-            evdi_handle_events(evdi, &evdi_ctx);
+            std::lock_guard<std::mutex> lock(frame_mutex);
+            current_w = input_w;
+            current_h = input_h;
+            current_stride = latest_stride;
+            frame_copy = latest_frame_buffer;
+        }
+
+        // If the desktop hasn't drawn anything yet, we can't encode a frame
+        if (!frame_copy.empty() && current_w > 0 && current_h > 0)
+        {
+            process_raw_frame(frame_copy.data(), current_stride, current_w, current_h);
+        }
+
+        uint64_t now = get_monotonic_usec();
+        if (now < next_frame_time)
+        {
+            usleep(next_frame_time - now);
+            next_frame_time += frame_interval_us;
+        }
+        else
+        {
+            next_frame_time = now + frame_interval_us;
         }
     }
 
-    // Disconnect and Cleanup
+    if (evdi_bg_thread.joinable())
+    {
+        evdi_bg_thread.join();
+    }
+
     evdi_disconnect(evdi);
 
     for (int i = 0; i < evdi_buffer_count; ++i)

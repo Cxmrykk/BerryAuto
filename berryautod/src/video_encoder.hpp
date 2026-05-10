@@ -8,11 +8,11 @@
 
 extern "C"
 {
+#include <evdi_lib.h>
 #include <libavcodec/avcodec.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/opt.h>
 #include <libswscale/swscale.h>
-#include <evdi_lib.h>
 }
 
 using NalCallback = std::function<void(const std::vector<uint8_t>&, uint64_t, bool)>;
@@ -34,6 +34,11 @@ public:
     int input_h = 0;
     AVPixelFormat input_fmt = AV_PIX_FMT_BGRA;
     std::mutex sws_mutex;
+
+    // Buffer states for async EVDI capturing
+    std::vector<uint8_t> latest_frame_buffer;
+    int latest_stride = 0;
+    std::mutex frame_mutex;
 
     std::atomic<bool> running{false};
 
@@ -60,5 +65,5 @@ private:
     bool init_encoder();
     void cleanup_encoder();
 
-    std::vector<uint8_t> generate_edid(int width, int height, int fps);
+    std::vector<uint8_t> get_edid(int width, int height);
 };
