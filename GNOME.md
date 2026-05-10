@@ -46,7 +46,18 @@ Verify the installation by listing your current monitors and supported resolutio
 gnome-randr query
 ```
 
-## 3. Force HDMI Output in the Kernel
+## 3. Disable Screen Blanking and Auto-Locking (GUI)
+
+To prevent your head unit from turning off or locking you out while driving, you must disable GNOME's power-saving features.
+
+1. Open **Settings**.
+2. Navigate to **Power** -> **Power Saving**:
+   - Set **Screen Blank** to **Never**.
+   - Ensure **Automatic Suspend** is set to **Off**.
+3. Navigate to **Privacy & Security** -> **Screen Lock**:
+   - Toggle **Automatic Screen Lock** to **Off**.
+
+## 4. Force HDMI Output in the Kernel
 
 When the Raspberry Pi runs headless, we won't likely have a HDMI output connected (since we are using the head unit as the external display). Therefore we need to tell the linux kernel to "pretend" that a monitor is connected with our preferred head unit resolution.
 
@@ -66,7 +77,7 @@ video=HDMI-A-1:800x480@60e
 
 3. Reboot the Pi
 
-## 4. The Screen-Cast Portal "Share" Prompt
+## 5. The Screen-Cast Portal "Share" Prompt
 
 GNOME uses the XDG Desktop Portal for screen capture (`org.freedesktop.portal.ScreenCast`). By design, this requires interactive user consent and is tied to the active display.
 

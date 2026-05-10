@@ -61,8 +61,10 @@ void VideoEncoder::update_sws()
     if (pw_w == 0 || pw_h == 0)
         return;
 
-    sws_ctx = sws_getContext(pw_w, pw_h, pw_fmt, target_width, target_height, AV_PIX_FMT_NV12, SWS_BILINEAR, NULL, NULL,
-                             NULL);
+    // Use SWS_FAST_BILINEAR instead of SWS_BILINEAR for heavy SIMD optimizations,
+    // reducing latency during scale/color conversion passes.
+    sws_ctx = sws_getContext(pw_w, pw_h, pw_fmt, target_width, target_height, AV_PIX_FMT_NV12, SWS_FAST_BILINEAR, NULL,
+                             NULL, NULL);
 
     if (!sws_ctx)
         LOG_E("[Capture] CRITICAL: sws_getContext failed! Format: " << pw_fmt);
@@ -100,6 +102,9 @@ bool VideoEncoder::init_encoder()
         codec_ctx->framerate = {target_fps, 1};
         codec_ctx->gop_size = target_fps * 2;
         codec_ctx->max_b_frames = 0;
+
+        // Force zero-latency encoding without internal B-frame or lookahead queues
+        codec_ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
 
         int target_bitrate = static_cast<int>(target_width * target_height * target_fps * 0.15);
         target_bitrate = std::clamp(target_bitrate, 4000000, 40000000);

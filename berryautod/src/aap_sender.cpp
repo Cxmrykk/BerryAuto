@@ -209,7 +209,25 @@ bool send_media_payload(uint8_t channel, const std::vector<uint8_t>& pt)
     std::vector<std::vector<uint8_t>> batch;
 
     {
-        std::lock_guard<std::recursive_mutex> aap_lock(aap_mutex);
+        // DEADLOCK PREVENTION: Do not block indefinitely if the stream is stopping.
+        // We try to acquire the lock iteratively. If `stop_video_stream()` has set
+        // is_video_streaming to false while we wait, we abort the transfer immediately
+        // and allow the encoder thread to shut down cleanly without freezing.
+        std::unique_lock<std::recursive_mutex> aap_lock(aap_mutex, std::defer_lock);
+        while (!aap_lock.try_lock())
+        {
+            if (!is_video_streaming.load() || should_exit.load())
+            {
+                return false;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+
+        if (!is_video_streaming.load() || should_exit.load())
+        {
+            return false;
+        }
+
         std::lock_guard<std::mutex> tx_lock(queue_mutex);
 
         const size_t MAX_CHUNK = 15000;

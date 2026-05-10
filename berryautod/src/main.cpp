@@ -52,15 +52,12 @@ void stop_video_stream()
     is_video_streaming = false;
     if (video_streamer != nullptr)
     {
-        VideoEncoder* enc = video_streamer;
+        // Synchronous teardown. The try_lock loop in aap_sender prevents deadlocks,
+        // so we can safely block here to guarantee the V4L2 hardware is completely
+        // freed before a quick reconnect attempts to claim it again.
+        video_streamer->stop();
+        delete video_streamer;
         video_streamer = nullptr;
-        std::thread(
-            [enc]()
-            {
-                enc->stop();
-                delete enc;
-            })
-            .detach();
     }
 }
 
