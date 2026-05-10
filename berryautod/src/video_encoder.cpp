@@ -1,7 +1,6 @@
 #include "video_encoder.hpp"
 #include "dbus_portal.hpp"
 #include "globals.hpp"
-#include "input_handler.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
@@ -42,6 +41,7 @@ void VideoEncoder::stop()
         return;
     running = false;
 
+    // Interrupt PipeWire Loop
     if (pw_loop)
         pw_main_loop_quit(pw_loop);
 
@@ -66,8 +66,8 @@ void VideoEncoder::update_sws()
         return;
 
     // Use SWS_FAST_BILINEAR instead of SWS_BILINEAR for heavy SIMD optimizations.
-    sws_ctx = sws_getContext(pw_w, pw_h, pw_fmt, target_width, target_height, AV_PIX_FMT_YUV420P, SWS_FAST_BILINEAR,
-                             NULL, NULL, NULL);
+    sws_ctx = sws_getContext(pw_w, pw_h, pw_fmt, target_width, target_height, AV_PIX_FMT_NV12, SWS_FAST_BILINEAR, NULL,
+                             NULL, NULL);
 
     if (!sws_ctx)
         LOG_E("[Capture] CRITICAL: sws_getContext failed! Format: " << pw_fmt);
@@ -98,8 +98,8 @@ bool VideoEncoder::init_encoder()
         codec_ctx->width = target_width;
         codec_ctx->height = target_height;
 
-        // YUV420P strictly separates the U and V planes.
-        codec_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
+        // NV12 is required: YUV420P causes hardware driver crashes on Pi due to differing UV stride bounds.
+        codec_ctx->pix_fmt = AV_PIX_FMT_NV12;
 
         codec_ctx->colorspace = AVCOL_SPC_BT709;
         codec_ctx->color_range = AVCOL_RANGE_MPEG;
@@ -196,11 +196,13 @@ void VideoEncoder::process_raw_frame(void* raw_data, int stride, int pw_w, int p
     encode_frame->width = codec_ctx->width;
     encode_frame->height = codec_ctx->height;
 
-    // CRITICAL FIX: Use alignment = 1 to explicitly DISABLE linesize padding!
-    // V4L2 M2M requires tightly packed memory. If we use 32, FFmpeg pads the 400-byte
-    // chroma planes (at 800x480) to 416 bytes. The V4L2 hardware blindly ignores the padding,
-    // throwing every subsequent line out of sync and causing diagonal tearing.
-    av_frame_get_buffer(encode_frame, 1);
+    // CRITICAL FIX: Force 64-byte alignment!
+    // The Raspberry Pi V4L2 M2M hardware encoder implicitly aligns memory strides to 64 bytes.
+    // 1280x720 is naturally 64-byte aligned, which is why it worked perfectly.
+    // 800x480 is NOT 64-byte aligned (800 % 64 == 32).
+    // By forcing av_frame_get_buffer to pad linesizes to 64 bytes, sws_scale will write the
+    // blank padding, and the hardware will read it in perfect sync, eliminating the tearing.
+    av_frame_get_buffer(encode_frame, 64);
 
     sws_scale(sws_ctx, in_data, in_linesize, 0, pw_h, encode_frame->data, encode_frame->linesize);
 
