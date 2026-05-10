@@ -16,6 +16,10 @@ static GDBusConnection* portal_conn = nullptr;
 static GMainLoop* global_dbus_bg_loop = nullptr;
 static std::thread global_dbus_thread;
 
+// Track active session to clean it up properly
+static std::string active_session_path = "";
+static uint32_t portal_req_counter = 0;
+
 static void ensure_global_dbus_loop()
 {
     if (!global_dbus_bg_loop)
@@ -62,8 +66,6 @@ static void ensure_desktop_file()
         std::string cmd = "update-desktop-database " + app_dir + " >/dev/null 2>&1";
         int ret = system(cmd.c_str());
         (void)ret;
-
-        LOG_I("[Portal] Verified persistent desktop file for App-ID anchoring.");
     }
 }
 
@@ -95,7 +97,6 @@ static void save_portal_token(const char* t)
     if (f.is_open())
     {
         f << t;
-        LOG_I("[Portal] Token saved to persistent storage: " << path);
     }
 }
 
@@ -177,6 +178,18 @@ static void on_signal_response(GDBusConnection* conn, const gchar* sender, const
         g_main_loop_quit(state->loop);
 }
 
+void close_wayland_screencast()
+{
+    if (!portal_conn || active_session_path.empty())
+        return;
+
+    LOG_I("[Portal] Closing active screencast session: " << active_session_path);
+    g_dbus_connection_call(portal_conn, "org.freedesktop.portal.Desktop", active_session_path.c_str(),
+                           "org.freedesktop.portal.Session", "Close", nullptr, nullptr, G_DBUS_CALL_FLAGS_NONE, -1,
+                           nullptr, nullptr, nullptr);
+    active_session_path = "";
+}
+
 bool negotiate_wayland_screencast(uint32_t& out_node_id, int& out_fd)
 {
     ensure_desktop_file();
@@ -204,7 +217,14 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id, int& out_fd)
     sender.erase(std::remove(sender.begin(), sender.end(), ':'), sender.end());
     std::replace(sender.begin(), sender.end(), '.', '_');
 
-    std::string session_path = "/org/freedesktop/portal/desktop/session/" + sender + "/berryauto";
+    // Generate UNIQUE tokens to prevent GNOME from rejecting reconnects
+    portal_req_counter++;
+    std::string req1 = "req1_" + std::to_string(portal_req_counter);
+    std::string req2 = "req2_" + std::to_string(portal_req_counter);
+    std::string req3 = "req3_" + std::to_string(portal_req_counter);
+    std::string session_handle = "berryauto_" + std::to_string(portal_req_counter);
+
+    active_session_path = "/org/freedesktop/portal/desktop/session/" + sender + "/" + session_handle;
     std::string request_path = "/org/freedesktop/portal/desktop/request/" + sender;
 
     auto run_portal_step = [&](const std::string& method, const std::string& req_token, GVariant* args,
@@ -255,10 +275,10 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id, int& out_fd)
 
     GVariantBuilder b1;
     g_variant_builder_init(&b1, G_VARIANT_TYPE_VARDICT);
-    g_variant_builder_add(&b1, "{sv}", "session_handle_token", g_variant_new_string("berryauto"));
-    g_variant_builder_add(&b1, "{sv}", "handle_token", g_variant_new_string("req1"));
+    g_variant_builder_add(&b1, "{sv}", "session_handle_token", g_variant_new_string(session_handle.c_str()));
+    g_variant_builder_add(&b1, "{sv}", "handle_token", g_variant_new_string(req1.c_str()));
 
-    if (!run_portal_step("CreateSession", "req1", g_variant_new("(a{sv})", &b1), 10))
+    if (!run_portal_step("CreateSession", req1, g_variant_new("(a{sv})", &b1), 10))
         return false;
 
     GVariantBuilder b2;
@@ -266,7 +286,7 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id, int& out_fd)
     g_variant_builder_add(&b2, "{sv}", "multiple", g_variant_new_boolean(FALSE));
     g_variant_builder_add(&b2, "{sv}", "types", g_variant_new_uint32(1));
     g_variant_builder_add(&b2, "{sv}", "cursor_mode", g_variant_new_uint32(1));
-    g_variant_builder_add(&b2, "{sv}", "handle_token", g_variant_new_string("req2"));
+    g_variant_builder_add(&b2, "{sv}", "handle_token", g_variant_new_string(req2.c_str()));
     g_variant_builder_add(&b2, "{sv}", "persist_mode", g_variant_new_uint32(2));
 
     std::string token = get_portal_token();
@@ -276,14 +296,14 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id, int& out_fd)
         g_variant_builder_add(&b2, "{sv}", "restore_token", g_variant_new_string(token.c_str()));
     }
 
-    if (!run_portal_step("SelectSources", "req2", g_variant_new("(oa{sv})", session_path.c_str(), &b2), 120))
+    if (!run_portal_step("SelectSources", req2, g_variant_new("(oa{sv})", active_session_path.c_str(), &b2), 120))
         return false;
 
     GVariantBuilder b3;
     g_variant_builder_init(&b3, G_VARIANT_TYPE_VARDICT);
-    g_variant_builder_add(&b3, "{sv}", "handle_token", g_variant_new_string("req3"));
+    g_variant_builder_add(&b3, "{sv}", "handle_token", g_variant_new_string(req3.c_str()));
 
-    if (!run_portal_step("Start", "req3", g_variant_new("(osa{sv})", session_path.c_str(), "", &b3), 120))
+    if (!run_portal_step("Start", req3, g_variant_new("(osa{sv})", active_session_path.c_str(), "", &b3), 120))
         return false;
 
     if (negotiated_node_id > 0)
@@ -297,8 +317,8 @@ bool negotiate_wayland_screencast(uint32_t& out_node_id, int& out_fd)
         GVariant* res_fd = g_dbus_connection_call_with_unix_fd_list_sync(
             portal_conn, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
             "org.freedesktop.portal.ScreenCast", "OpenPipeWireRemote",
-            g_variant_new("(oa{sv})", session_path.c_str(), &b_fd), G_VARIANT_TYPE("(h)"), G_DBUS_CALL_FLAGS_NONE, -1,
-            nullptr, &fd_list, nullptr, &fd_error);
+            g_variant_new("(oa{sv})", active_session_path.c_str(), &b_fd), G_VARIANT_TYPE("(h)"),
+            G_DBUS_CALL_FLAGS_NONE, -1, nullptr, &fd_list, nullptr, &fd_error);
 
         if (fd_error)
         {

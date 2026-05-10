@@ -188,10 +188,13 @@ void VideoEncoder::cleanup_pipewire()
         pw_context_destroy(pw_ctx);
     if (pw_loop)
         pw_main_loop_destroy(pw_loop);
+
     pw_stream_inst = nullptr;
     pw_core_inst = nullptr;
     pw_ctx = nullptr;
     pw_loop = nullptr;
+
+    close_wayland_screencast();
 }
 
 void VideoEncoder::run_pipewire_loop(uint32_t node_id, int pw_fd)
