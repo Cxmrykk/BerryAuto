@@ -104,9 +104,15 @@ bool VideoEncoder::init_encoder()
         int target_bitrate = static_cast<int>(target_width * target_height * target_fps * 0.15);
         target_bitrate = std::clamp(target_bitrate, 4000000, 40000000);
         codec_ctx->bit_rate = target_bitrate;
-        codec_ctx->rc_min_rate = target_bitrate;
-        codec_ctx->rc_max_rate = target_bitrate;
-        codec_ctx->rc_buffer_size = target_bitrate / 2;
+
+        // Relaxed Bitrate Fix: Switch from strict CBR to constrained VBR
+        // Allow the hardware encoder to double its bandwidth during high motion
+        codec_ctx->rc_max_rate = target_bitrate * 2;
+        // Don't force the encoder to pad the stream with junk data on static scenes
+        codec_ctx->rc_min_rate = 0;
+        // Increase the VBV buffer to gracefully absorb the motion spikes
+        codec_ctx->rc_buffer_size = target_bitrate;
+
         codec_ctx->thread_count = std::max(1u, std::thread::hardware_concurrency());
         codec_ctx->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
 
@@ -167,24 +173,13 @@ void VideoEncoder::process_raw_frame(void* raw_data, int stride, int pw_w, int p
     if (stride > in_linesize[0])
         in_linesize[0] = stride;
 
-    if (av_frame_make_writable(frame) < 0)
-    {
-        LOG_E("[Capture] Error making frame writable!");
-        return;
-    }
-
     sws_scale(sws_ctx, in_data, in_linesize, 0, pw_h, frame->data, frame->linesize);
 
     frame->pts = get_monotonic_usec();
     frame->pict_type = request_keyframe.exchange(false) ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_NONE;
 
     int ret = avcodec_send_frame(codec_ctx, frame);
-    if (ret < 0 && ret != AVERROR(EAGAIN))
-    {
-        LOG_E("[Capture] avcodec_send_frame failed: " << ret);
-    }
-
-    while (true)
+    while (ret >= 0)
     {
         ret = avcodec_receive_packet(codec_ctx, pkt);
         if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF || ret < 0)
