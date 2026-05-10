@@ -59,6 +59,42 @@ std::vector<uint8_t> VideoEncoder::get_edid(int width, int height)
     return edid;
 }
 
+// Safely drains the queue of any synchronously available frames to prevent deadlocks
+void VideoEncoder::handle_evdi_update(int buffer_id)
+{
+    if (buffer_id < 0 || buffer_id >= evdi_buffer_count)
+        return;
+
+    evdi_buffer& buf = evdi_buffers[buffer_id];
+
+    // Continuously grab pixels as long as EVDI says they are immediately available
+    while (evdi_request_update(evdi, buffer_id))
+    {
+        evdi_rect rects[16];
+        int num_rects = 16;
+        evdi_grab_pixels(evdi, rects, &num_rects);
+
+        if (num_rects > 0 && buf.buffer && input_w > 0 && input_h > 0)
+        {
+            static bool first_desktop_frame = false;
+            if (!first_desktop_frame)
+            {
+                LOG_I("[EVDI] Received first actual desktop frame! Overwriting dummy screen.");
+                first_desktop_frame = true;
+            }
+
+            std::lock_guard<std::mutex> lock(frame_mutex);
+            size_t req_size = buf.stride * buf.height;
+            if (latest_frame_buffer.size() != req_size)
+            {
+                latest_frame_buffer.resize(req_size);
+            }
+            memcpy(latest_frame_buffer.data(), buf.buffer, req_size);
+            latest_stride = buf.stride;
+        }
+    }
+}
+
 static void evdi_dpms_handler(int dpms_mode, void* user_data)
 {
     VideoEncoder* enc = static_cast<VideoEncoder*>(user_data);
@@ -67,7 +103,8 @@ static void evdi_dpms_handler(int dpms_mode, void* user_data)
     {
         for (int i = 0; i < enc->evdi_buffer_count; ++i)
         {
-            evdi_request_update(enc->evdi, i);
+            // Drain the pump using our new handler instead of a raw request
+            enc->handle_evdi_update(i);
         }
     }
 }
@@ -77,44 +114,46 @@ static void evdi_mode_changed_handler(evdi_mode mode, void* user_data)
     VideoEncoder* enc = static_cast<VideoEncoder*>(user_data);
     LOG_I("[EVDI] Compositor updated Mode: " << mode.width << "x" << mode.height);
 
-    std::lock_guard<std::mutex> lock(enc->frame_mutex);
-    enc->input_w = mode.width;
-    enc->input_h = mode.height;
-    enc->input_fmt = AV_PIX_FMT_BGRA;
-    enc->latest_stride = mode.width * 4;
-
-    size_t req_size = enc->latest_stride * enc->input_h;
-    enc->latest_frame_buffer.resize(req_size);
-
-    for (size_t i = 0; i < req_size; i += 4)
     {
-        enc->latest_frame_buffer[i] = 0x80;     // Blue  (128)
-        enc->latest_frame_buffer[i + 1] = 0x00; // Green (0)
-        enc->latest_frame_buffer[i + 2] = 0x80; // Red   (128)
-        enc->latest_frame_buffer[i + 3] = 0xFF; // Alpha (255)
-    }
+        // Scope the lock so we don't deadlock when handle_evdi_update tries to grab it later
+        std::lock_guard<std::mutex> lock(enc->frame_mutex);
+        enc->input_w = mode.width;
+        enc->input_h = mode.height;
+        enc->input_fmt = AV_PIX_FMT_BGRA;
+        enc->latest_stride = mode.width * 4;
+
+        size_t req_size = enc->latest_stride * enc->input_h;
+        enc->latest_frame_buffer.resize(req_size);
+
+        for (size_t i = 0; i < req_size; i += 4)
+        {
+            enc->latest_frame_buffer[i] = 0x80;     // Blue  (128)
+            enc->latest_frame_buffer[i + 1] = 0x00; // Green (0)
+            enc->latest_frame_buffer[i + 2] = 0x80; // Red   (128)
+            enc->latest_frame_buffer[i + 3] = 0xFF; // Alpha (255)
+        }
+    } // Unlock frame_mutex
 
     for (int i = 0; i < enc->evdi_buffer_count; ++i)
     {
-        // CRITICAL FIX: Properly unregister before freeing memory
         if (enc->evdi_buffers[i].buffer)
         {
             evdi_unregister_buffer(enc->evdi, enc->evdi_buffers[i].id);
             free(enc->evdi_buffers[i].buffer);
         }
 
+        // CRITICAL FIX: Zero-initialize the struct to clear garbage pointers in rects/rect_count
+        memset(&enc->evdi_buffers[i], 0, sizeof(evdi_buffer));
         enc->evdi_buffers[i].id = i;
         enc->evdi_buffers[i].width = mode.width;
         enc->evdi_buffers[i].height = mode.height;
         enc->evdi_buffers[i].stride = mode.width * 4;
-
-        // Use calloc to ensure the buffer starts clean
         enc->evdi_buffers[i].buffer = calloc(mode.height, enc->evdi_buffers[i].stride);
 
         evdi_register_buffer(enc->evdi, enc->evdi_buffers[i]);
 
-        // CRITICAL FIX: "Prime the pump" so EVDI immediately knows it has buffers available
-        evdi_request_update(enc->evdi, enc->evdi_buffers[i].id);
+        // CRITICAL FIX: Request update and immediately drain it if Mutter instantly flipped a frame
+        enc->handle_evdi_update(enc->evdi_buffers[i].id);
     }
 
     enc->update_sws();
@@ -128,6 +167,7 @@ static void evdi_update_ready_handler(int buffer_to_be_updated, void* user_data)
     {
         evdi_buffer& buf = enc->evdi_buffers[buffer_to_be_updated];
 
+        // 1. We are here because of an asynchronous event, so grab the pixels immediately
         evdi_rect rects[16];
         int num_rects = 16;
         evdi_grab_pixels(enc->evdi, rects, &num_rects);
@@ -151,19 +191,14 @@ static void evdi_update_ready_handler(int buffer_to_be_updated, void* user_data)
             enc->latest_stride = buf.stride;
         }
 
-        // Return the buffer to EVDI to get the next frame
-        evdi_request_update(enc->evdi, buffer_to_be_updated);
+        // 2. Return the buffer to EVDI, and loop to drain any immediate subsequent updates
+        enc->handle_evdi_update(buffer_to_be_updated);
     }
 }
 
 static void evdi_crtc_state_handler(int state, void* user_data)
 {
     (void)user_data;
-}
-
-void VideoEncoder::handle_evdi_update(int buffer_id)
-{
-    (void)buffer_id;
 }
 
 void VideoEncoder::run_evdi_loop()
@@ -201,6 +236,9 @@ void VideoEncoder::run_evdi_loop()
     evdi_buffers = new evdi_buffer[evdi_buffer_count];
     for (int i = 0; i < evdi_buffer_count; ++i)
     {
+        // Safe initialize properties preventing garbage memory reads
+        memset(&evdi_buffers[i], 0, sizeof(evdi_buffer));
+        evdi_buffers[i].id = i;
         evdi_buffers[i].buffer = nullptr;
     }
 
