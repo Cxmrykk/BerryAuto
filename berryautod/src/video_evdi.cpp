@@ -66,21 +66,73 @@ void VideoEncoder::handle_evdi_update(int buffer_id)
     (void)buffer_id;
 }
 
+// -------------------------------------------------------------------
+// Helper to safely grab pixels and recursively request the next frame.
+// This MUST be used because evdi_request_update returning 'true' means
+// the kernel will NOT send an event, so we must grab pixels immediately
+// or GNOME will permanently freeze waiting for a VBlank acknowledgment.
+// -------------------------------------------------------------------
+static void evdi_grab_and_request_next(VideoEncoder* enc, int buf_id)
+{
+    if (buf_id < 0 || buf_id >= enc->evdi_buffer_count)
+        return;
+    evdi_buffer& buf = enc->evdi_buffers[buf_id];
+
+    while (true)
+    {
+        evdi_rect rects[16];
+        int num_rects = 16;
+        evdi_grab_pixels(enc->evdi, rects, &num_rects);
+
+        if (num_rects > 0 && buf.buffer && enc->input_w > 0 && enc->input_h > 0)
+        {
+            static bool first_desktop_frame = false;
+            if (!first_desktop_frame)
+            {
+                LOG_I("[EVDI] Received first actual desktop frame! Overwriting dummy screen.");
+                first_desktop_frame = true;
+            }
+
+            std::lock_guard<std::mutex> lock(enc->frame_mutex);
+            size_t req_size = buf.stride * buf.height;
+            if (enc->latest_frame_buffer.size() != req_size)
+            {
+                enc->latest_frame_buffer.resize(req_size);
+            }
+            memcpy(enc->latest_frame_buffer.data(), buf.buffer, req_size);
+            enc->latest_stride = buf.stride;
+        }
+
+        // Ask the kernel for the next frame.
+        // If it returns true, frames are waiting NOW (loop again).
+        // If it returns false, kernel will send an event later (break out).
+        if (!evdi_request_update(enc->evdi, buf_id))
+        {
+            break;
+        }
+    }
+}
+
+static void evdi_update_ready_handler(int buffer_to_be_updated, void* user_data)
+{
+    VideoEncoder* enc = static_cast<VideoEncoder*>(user_data);
+    // The event loop woke up because a frame is ready. Grab it and queue the next.
+    evdi_grab_and_request_next(enc, buffer_to_be_updated);
+}
+
 static void evdi_dpms_handler(int dpms_mode, void* user_data)
 {
     VideoEncoder* enc = static_cast<VideoEncoder*>(user_data);
     LOG_I("[EVDI] DPMS State Changed: " << dpms_mode);
 
-    if (dpms_mode == 0)
+    if (dpms_mode == 0) // DRM_MODE_DPMS_ON
     {
-        for (int i = 0; i < enc->evdi_buffer_count; ++i)
+        // Prime the pump using buffer 0 ONLY
+        if (enc->evdi_buffers[0].buffer)
         {
-            // Only request updates if the buffer is actually registered.
-            // We ignore the return value to prevent libevdi internal sync deadlocks.
-            // If the kernel immediately has a frame, it signals the poll() FD directly.
-            if (enc->evdi_buffers[i].buffer)
+            if (evdi_request_update(enc->evdi, 0))
             {
-                evdi_request_update(enc->evdi, enc->evdi_buffers[i].id);
+                evdi_grab_and_request_next(enc, 0);
             }
         }
     }
@@ -101,6 +153,7 @@ static void evdi_mode_changed_handler(evdi_mode mode, void* user_data)
         size_t req_size = enc->latest_stride * enc->input_h;
         enc->latest_frame_buffer.resize(req_size);
 
+        // Purple dummy screen
         for (size_t i = 0; i < req_size; i += 4)
         {
             enc->latest_frame_buffer[i] = 0x80;     // Blue  (128)
@@ -126,49 +179,14 @@ static void evdi_mode_changed_handler(evdi_mode mode, void* user_data)
         enc->evdi_buffers[i].buffer = calloc(mode.height, enc->evdi_buffers[i].stride);
 
         evdi_register_buffer(enc->evdi, enc->evdi_buffers[i]);
-
-        // Prime the pump so EVDI immediately knows it has buffers available.
-        evdi_request_update(enc->evdi, enc->evdi_buffers[i].id);
     }
 
     enc->update_sws();
-}
 
-static void evdi_update_ready_handler(int buffer_to_be_updated, void* user_data)
-{
-    VideoEncoder* enc = static_cast<VideoEncoder*>(user_data);
-
-    if (buffer_to_be_updated >= 0 && buffer_to_be_updated < enc->evdi_buffer_count)
+    // Prime the pump using buffer 0 ONLY
+    if (evdi_request_update(enc->evdi, 0))
     {
-        evdi_buffer& buf = enc->evdi_buffers[buffer_to_be_updated];
-
-        evdi_rect rects[16];
-        int num_rects = 16;
-
-        // Grab the available pixels
-        evdi_grab_pixels(enc->evdi, rects, &num_rects);
-
-        if (num_rects > 0 && buf.buffer && enc->input_w > 0 && enc->input_h > 0)
-        {
-            static bool first_desktop_frame = false;
-            if (!first_desktop_frame)
-            {
-                LOG_I("[EVDI] Received first actual desktop frame! Overwriting dummy screen.");
-                first_desktop_frame = true;
-            }
-
-            std::lock_guard<std::mutex> lock(enc->frame_mutex);
-            size_t req_size = buf.stride * buf.height;
-            if (enc->latest_frame_buffer.size() != req_size)
-            {
-                enc->latest_frame_buffer.resize(req_size);
-            }
-            memcpy(enc->latest_frame_buffer.data(), buf.buffer, req_size);
-            enc->latest_stride = buf.stride;
-        }
-
-        // Request the kernel to notify us when the NEXT frame is ready
-        evdi_request_update(enc->evdi, buffer_to_be_updated);
+        evdi_grab_and_request_next(enc, 0);
     }
 }
 
