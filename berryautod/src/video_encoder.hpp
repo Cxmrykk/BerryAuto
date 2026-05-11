@@ -33,6 +33,7 @@ public:
     int input_w = 0;
     int input_h = 0;
     AVPixelFormat input_fmt = AV_PIX_FMT_BGRA;
+    AVPixelFormat encoder_pix_fmt = AV_PIX_FMT_NV12; // Dynamically populated by available hardware
     std::mutex sws_mutex;
 
     // Buffer states for async EVDI capturing

@@ -9,7 +9,7 @@ While the Raspberry Pi 4 is a popular target, **any Linux device** with a USB De
 - **USB OTG Emulation:** Uses Linux FunctionFS to negotiate the Android Open Accessory (AOA) protocol.
 - **Kernel-Level Virtual Display (EVDI):** Appears to the OS as a physical plug-and-play monitor. Bypasses all Wayland/X11 screen-capture restrictions and headless display problems.
 - **Dynamic EDID Injection:** Automatically generates and injects a hardware EDID matching the vehicle's exact resolution and frame rate, causing the Linux desktop to perfectly resize itself natively.
-- **Hardware Encoding:** Prioritizes V4L2/OMX hardware encoders (`h264_v4l2m2m`, `h264_omx`) before falling back to software (`libx264`).
+- **Smart Hardware Encoding:** Automatically queries FFmpeg to discover and prioritize system-specific hardware encoders (`v4l2m2m`, `vaapi`, `nvenc`, `qsv`, `rpi`, etc.) before falling back to highly optimized software encoders.
 - **Touch Injection:** Creates a virtual touchscreen via `uinput` to pass touch events to the local display server.
 
 ## Requirements
@@ -115,6 +115,14 @@ Remove the password prompt from `sudo` so the runner script can configure the US
 ```sh
 echo "$(whoami) ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/$(whoami)
 ```
+
+## Configuration
+
+By default, BerryAuto works **out of the box** with zero configuration. It will automatically negotiate the best resolution with your phone and automatically search your system for hardware video encoders.
+
+If you want to manually override the video encoder, adjust the bitrate, or force a specific resolution, you can create a configuration file at `~/.config/berryauto.conf` or `/etc/berryauto.conf`.
+
+See [CONFIG.md](CONFIG.md) for a full list of available options and an example configuration.
 
 ## Running BerryAuto
 

@@ -43,6 +43,9 @@ extern int global_touch_height;
 
 // User Configuration Overrides
 extern std::string user_config_video_encoder;
+extern std::string user_config_video_profile;
+extern std::string user_config_video_preset;
+extern std::string user_config_video_tune;
 extern int user_config_video_bitrate;
 extern int user_config_force_width;
 extern int user_config_force_height;

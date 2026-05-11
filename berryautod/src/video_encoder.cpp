@@ -7,6 +7,7 @@
 #include <cstring>
 #include <iostream>
 #include <libavcodec/avcodec.h>
+#include <string>
 #include <time.h>
 #include <unistd.h>
 
@@ -62,7 +63,7 @@ void VideoEncoder::update_sws()
     if (input_w == 0 || input_h == 0)
         return;
 
-    sws_ctx = sws_getContext(input_w, input_h, input_fmt, target_width, target_height, AV_PIX_FMT_NV12,
+    sws_ctx = sws_getContext(input_w, input_h, input_fmt, target_width, target_height, encoder_pix_fmt,
                              SWS_FAST_BILINEAR, NULL, NULL, NULL);
 
     if (!sws_ctx)
@@ -71,48 +72,105 @@ void VideoEncoder::update_sws()
 
 bool VideoEncoder::init_encoder()
 {
-    std::vector<std::string> encoder_names;
+    std::vector<const AVCodec*> candidates;
+    AVCodecID target_id = (global_video_codec_type == 7) ? AV_CODEC_ID_HEVC : AV_CODEC_ID_H264;
 
     if (!user_config_video_encoder.empty())
     {
-        encoder_names.push_back(user_config_video_encoder);
-    }
-    else
-    {
-        if (global_video_codec_type == 7)
-        {
-            if (!user_config_disable_hw_encoding)
-                encoder_names.push_back("hevc_v4l2m2m");
-            encoder_names.push_back("libx265");
-            encoder_names.push_back("hevc");
-        }
+        const AVCodec* c = avcodec_find_encoder_by_name(user_config_video_encoder.c_str());
+        if (c)
+            candidates.push_back(c);
         else
+            LOG_E("[Capture] User-specified encoder '" << user_config_video_encoder << "' not found! Falling back.");
+    }
+
+    if (candidates.empty())
+    {
+        std::vector<const AVCodec*> hw_encoders;
+        std::vector<const AVCodec*> sw_encoders;
+        std::vector<std::string> hw_keywords = {"v4l2m2m", "omx", "vaapi", "nvenc", "qsv", "amf", "rpi"};
+
+        void* opaque = nullptr;
+        const AVCodec* c = nullptr;
+        while ((c = av_codec_iterate(&opaque)) != nullptr)
         {
-            if (!user_config_disable_hw_encoding)
+            if (av_codec_is_encoder(c) && c->id == target_id)
             {
-                encoder_names.push_back("h264_v4l2m2m");
-                encoder_names.push_back("h264_omx");
+                std::string name = c->name;
+                bool is_hw = false;
+                for (const auto& kw : hw_keywords)
+                {
+                    if (name.find(kw) != std::string::npos)
+                    {
+                        is_hw = true;
+                        break;
+                    }
+                }
+                if (is_hw)
+                    hw_encoders.push_back(c);
+                else
+                    sw_encoders.push_back(c);
             }
-            encoder_names.push_back("libx264");
-            encoder_names.push_back("h264");
+        }
+
+        if (!user_config_disable_hw_encoding)
+        {
+            // Prioritize embedded/SBC hardware encoders natively
+            for (auto hw_c : hw_encoders)
+            {
+                std::string name = hw_c->name;
+                if (name.find("v4l2m2m") != std::string::npos || name.find("omx") != std::string::npos ||
+                    name.find("rpi") != std::string::npos)
+                {
+                    candidates.push_back(hw_c);
+                }
+            }
+            // Add remaining generic hardware encoders discovered (x86/AMD64/etc.)
+            for (auto hw_c : hw_encoders)
+            {
+                if (std::find(candidates.begin(), candidates.end(), hw_c) == candidates.end())
+                    candidates.push_back(hw_c);
+            }
+        }
+
+        // Fallback to highly optimized Software encoders, pushing generic ones (like 'h264') to the bottom
+        const AVCodec* libx = avcodec_find_encoder_by_name(target_id == AV_CODEC_ID_HEVC ? "libx265" : "libx264");
+        if (libx)
+            candidates.push_back(libx);
+
+        for (auto sw_c : sw_encoders)
+        {
+            if (sw_c != libx && std::find(candidates.begin(), candidates.end(), sw_c) == candidates.end())
+                candidates.push_back(sw_c);
         }
     }
 
-    for (const auto& name : encoder_names)
+    for (const AVCodec* c : candidates)
     {
-        codec = avcodec_find_encoder_by_name(name.c_str());
-        if (!codec)
+        codec = c;
+        codec_ctx = avcodec_alloc_context3(codec);
+        if (!codec_ctx)
+            continue;
+
+        // Dynamically select the best supported pixel format by the hardware, fallback to NV12
+        encoder_pix_fmt = AV_PIX_FMT_NV12;
+        if (codec->pix_fmts)
         {
-            if (name == encoder_names.back() && user_config_video_encoder.empty())
-                codec = avcodec_find_encoder(global_video_codec_type == 7 ? AV_CODEC_ID_HEVC : AV_CODEC_ID_H264);
-            if (!codec)
-                continue;
+            bool found_nv12 = false;
+            const enum AVPixelFormat* p = codec->pix_fmts;
+            while (*p != AV_PIX_FMT_NONE)
+            {
+                if (*p == AV_PIX_FMT_NV12)
+                    found_nv12 = true;
+                p++;
+            }
+            if (!found_nv12)
+                encoder_pix_fmt = codec->pix_fmts[0];
         }
 
-        codec_ctx = avcodec_alloc_context3(codec);
         codec_ctx->width = target_width;
         codec_ctx->height = target_height;
-        codec_ctx->pix_fmt = AV_PIX_FMT_NV12;
+        codec_ctx->pix_fmt = encoder_pix_fmt;
         codec_ctx->colorspace = AVCOL_SPC_BT709;
         codec_ctx->color_range = AVCOL_RANGE_MPEG;
         codec_ctx->color_primaries = AVCOL_PRI_BT709;
@@ -128,14 +186,23 @@ bool VideoEncoder::init_encoder()
         target_bitrate = std::clamp(target_bitrate, 4000000, 40000000);
         codec_ctx->bit_rate = target_bitrate;
 
-        bool is_hw = (name.find("v4l2m2m") != std::string::npos || name.find("omx") != std::string::npos);
+        std::string name = codec->name;
+        bool is_hw = false;
+        std::vector<std::string> hw_keywords = {"v4l2m2m", "omx", "vaapi", "nvenc", "qsv", "amf", "rpi"};
+        for (const auto& kw : hw_keywords)
+        {
+            if (name.find(kw) != std::string::npos)
+            {
+                is_hw = true;
+                break;
+            }
+        }
 
+        // Apply Architecture Threading Optimizations
         if (is_hw)
         {
             codec_ctx->thread_count = 1;
             codec_ctx->thread_type = 0;
-            if (name == "h264_v4l2m2m")
-                av_opt_set(codec_ctx->priv_data, "profile", "main", 0);
         }
         else
         {
@@ -146,12 +213,24 @@ bool VideoEncoder::init_encoder()
             codec_ctx->qmin = 15;
             codec_ctx->qmax = 51;
             codec_ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
+        }
 
-            if (name == "libx264" || name == "libx265")
-            {
-                av_opt_set(codec_ctx->priv_data, "preset", "ultrafast", 0);
-                av_opt_set(codec_ctx->priv_data, "tune", "zerolatency", 0);
-            }
+        // Apply external configurations overrides or sensible presets
+        if (!user_config_video_profile.empty())
+        {
+            av_opt_set(codec_ctx->priv_data, "profile", user_config_video_profile.c_str(), 0);
+        }
+        else if (is_hw && name.find("v4l2m2m") != std::string::npos)
+        {
+            av_opt_set(codec_ctx->priv_data, "profile", "main", 0);
+        }
+
+        if (!is_hw || name.find("libx") != std::string::npos)
+        {
+            std::string preset = user_config_video_preset.empty() ? "ultrafast" : user_config_video_preset;
+            std::string tune = user_config_video_tune.empty() ? "zerolatency" : user_config_video_tune;
+            av_opt_set(codec_ctx->priv_data, "preset", preset.c_str(), 0);
+            av_opt_set(codec_ctx->priv_data, "tune", tune.c_str(), 0);
         }
 
         if (avcodec_open2(codec_ctx, codec, NULL) >= 0)
@@ -159,12 +238,17 @@ bool VideoEncoder::init_encoder()
             LOG_I("[Capture] Successfully initialized encoder: " << codec->name << " at " << target_bitrate << " bps");
             break;
         }
+
+        LOG_I("[Capture] Failed to initialize encoder: " << codec->name << ". Trying the next available candidate...");
         avcodec_free_context(&codec_ctx);
         codec = nullptr;
     }
 
     if (!codec_ctx)
+    {
+        LOG_E("[Capture] CRITICAL: Failed to initialize ANY available video encoders on this system!");
         return false;
+    }
 
     pkt = av_packet_alloc();
     return true;

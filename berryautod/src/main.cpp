@@ -15,6 +15,9 @@
 
 // Config definitions
 std::string user_config_video_encoder = "";
+std::string user_config_video_profile = "";
+std::string user_config_video_preset = "";
+std::string user_config_video_tune = "";
 int user_config_video_bitrate = 0;
 int user_config_force_width = 0;
 int user_config_force_height = 0;

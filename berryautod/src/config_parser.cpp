@@ -44,6 +44,12 @@ void load_config()
                 {
                     if (key == "video_encoder")
                         user_config_video_encoder = val;
+                    else if (key == "video_profile")
+                        user_config_video_profile = val;
+                    else if (key == "video_preset")
+                        user_config_video_preset = val;
+                    else if (key == "video_tune")
+                        user_config_video_tune = val;
                     else if (key == "video_bitrate")
                         user_config_video_bitrate = std::stoi(val);
                     else if (key == "force_width")
