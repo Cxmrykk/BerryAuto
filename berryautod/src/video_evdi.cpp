@@ -142,34 +142,33 @@ static void evdi_update_ready_handler(int buffer_to_be_updated, void* user_data)
     {
         evdi_buffer& buf = enc->evdi_buffers[buffer_to_be_updated];
 
-        // Process all synchronously available frames safely within the event handler loop.
-        // This ensures libevdi's current_buffer_id context matches the grab request.
-        do
+        evdi_rect rects[16];
+        int num_rects = 16;
+
+        // Grab the available pixels
+        evdi_grab_pixels(enc->evdi, rects, &num_rects);
+
+        if (num_rects > 0 && buf.buffer && enc->input_w > 0 && enc->input_h > 0)
         {
-            evdi_rect rects[16];
-            int num_rects = 16;
-            evdi_grab_pixels(enc->evdi, rects, &num_rects);
-
-            if (num_rects > 0 && buf.buffer && enc->input_w > 0 && enc->input_h > 0)
+            static bool first_desktop_frame = false;
+            if (!first_desktop_frame)
             {
-                static bool first_desktop_frame = false;
-                if (!first_desktop_frame)
-                {
-                    LOG_I("[EVDI] Received first actual desktop frame! Overwriting dummy screen.");
-                    first_desktop_frame = true;
-                }
-
-                std::lock_guard<std::mutex> lock(enc->frame_mutex);
-                size_t req_size = buf.stride * buf.height;
-                if (enc->latest_frame_buffer.size() != req_size)
-                {
-                    enc->latest_frame_buffer.resize(req_size);
-                }
-                memcpy(enc->latest_frame_buffer.data(), buf.buffer, req_size);
-                enc->latest_stride = buf.stride;
+                LOG_I("[EVDI] Received first actual desktop frame! Overwriting dummy screen.");
+                first_desktop_frame = true;
             }
 
-        } while (evdi_request_update(enc->evdi, buffer_to_be_updated));
+            std::lock_guard<std::mutex> lock(enc->frame_mutex);
+            size_t req_size = buf.stride * buf.height;
+            if (enc->latest_frame_buffer.size() != req_size)
+            {
+                enc->latest_frame_buffer.resize(req_size);
+            }
+            memcpy(enc->latest_frame_buffer.data(), buf.buffer, req_size);
+            enc->latest_stride = buf.stride;
+        }
+
+        // Request the kernel to notify us when the NEXT frame is ready
+        evdi_request_update(enc->evdi, buffer_to_be_updated);
     }
 }
 
