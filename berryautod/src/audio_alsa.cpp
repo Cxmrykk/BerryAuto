@@ -15,8 +15,9 @@ static std::thread audio_capture_thread;
 bool init_alsa_playback()
 {
     int err;
-    // Mic data coming from AA (Headunit) -> Inject into Loopback so OS can read it as a microphone
-    if ((err = snd_pcm_open(&pcm_playback_handle, "hw:Loopback,1,1", SND_PCM_STREAM_PLAYBACK, 0)) < 0)
+    // Mic data coming from AA (Headunit) -> Inject into Loopback so OS can read it as a microphone.
+    // Uses 'plug:' to allow ALSA to automatically resample the 16kHz mic data to OS targets.
+    if ((err = snd_pcm_open(&pcm_playback_handle, "plug:hw:Loopback,1,1", SND_PCM_STREAM_PLAYBACK, 0)) < 0)
     {
         LOG_E("[ALSA] Cannot open Loopback for playback (mic): " << snd_strerror(err));
         return false;
@@ -33,8 +34,9 @@ bool init_alsa_playback()
 bool init_alsa_capture()
 {
     int err;
-    // Audio from OS Desktop -> Read from Loopback and send to AA (Headunit)
-    if ((err = snd_pcm_open(&pcm_capture_handle, "hw:Loopback,1,0", SND_PCM_STREAM_CAPTURE, 0)) < 0)
+    // Audio from OS Desktop -> Read from Loopback and send to AA (Headunit).
+    // Uses 'plug:' to allow ALSA to automatically resample from the host system's native rate (e.g. 44.1kHz).
+    if ((err = snd_pcm_open(&pcm_capture_handle, "plug:hw:Loopback,1,0", SND_PCM_STREAM_CAPTURE, 0)) < 0)
     {
         LOG_E("[ALSA] Cannot open Loopback for capture (audio): " << snd_strerror(err));
         return false;

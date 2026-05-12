@@ -226,14 +226,14 @@ bool send_media_payload(uint8_t channel, const std::vector<uint8_t>& pt)
         std::unique_lock<std::recursive_mutex> aap_lock(aap_mutex, std::defer_lock);
         while (!aap_lock.try_lock())
         {
-            if (!is_video_streaming.load() || should_exit.load())
+            if (should_exit.load())
             {
                 return false;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
 
-        if (!is_video_streaming.load() || should_exit.load())
+        if (should_exit.load() || (!is_tls_connected && !ssl_bypassed))
         {
             return false;
         }

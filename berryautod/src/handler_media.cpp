@@ -12,17 +12,24 @@ using namespace com::andrerinas::headunitrevived::aap::protocol::proto;
 
 void handle_media_message(uint8_t channel, uint16_t type, uint8_t* payload_data, int payload_len, ChannelType ctype)
 {
-    // Prevent car stalls by ACKing incoming microphone/audio data payloads
+    // Workaround for headunit-revived bug: Mic packets arrive with a stripped header.
+    // 'type' contains the middle of the timestamp, and PCM data starts at offset 4 of the payload.
+    if (ctype == ChannelType::MIC)
+    {
+        if (payload_len > 4)
+        {
+            inject_mic_data(payload_data + 4, payload_len - 4);
+        }
+        Ack ack;
+        ack.set_session_id(0);
+        ack.set_ack(1);
+        send_message(channel, MediaMsgType::MEDIA_MESSAGE_ACK, ack);
+        return;
+    }
+
+    // Prevent car stalls by ACKing incoming audio data payloads for normal channels
     if (type == MediaMsgType::MEDIA_MESSAGE_DATA || type == MediaMsgType::MEDIA_MESSAGE_CODEC_CONFIG)
     {
-        if (ctype == ChannelType::MIC && type == MediaMsgType::MEDIA_MESSAGE_DATA)
-        {
-            // AAP Audio Packets: [0..7] is the Timestamp. PCM Data starts at offset 8.
-            if (payload_len > 8)
-            {
-                inject_mic_data(payload_data + 8, payload_len - 8);
-            }
-        }
         Ack ack;
         ack.set_session_id(0);
         ack.set_ack(1);
