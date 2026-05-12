@@ -97,7 +97,11 @@ static void evdi_grab_and_request_next(VideoEncoder* enc, int buf_id)
             enc->frame_cv.notify_one();
         }
 
-        if (!evdi_request_update(enc->evdi, buf_id))
+        // CRITICAL FIX: evdi_request_update returns TRUE if the request is queued successfully.
+        // It returns FALSE if the buffer is ALREADY dirty, meaning the compositor updated the
+        // screen while we were copying. If it returns false, we MUST NOT break, we must loop
+        // and grab the new pixels immediately to catch the final frame of an animation.
+        if (evdi_request_update(enc->evdi, buf_id))
         {
             break;
         }
@@ -115,7 +119,7 @@ static void evdi_dpms_handler(int dpms_mode, void* user_data)
     VideoEncoder* enc = static_cast<VideoEncoder*>(user_data);
     LOG_I("[EVDI] DPMS State Changed: " << dpms_mode);
 
-    if (dpms_mode == 0)
+    if (dpms_mode == 0) // DRM_MODE_DPMS_ON
     {
         if (enc->evdi_buffers[0].buffer)
         {
@@ -179,6 +183,7 @@ static void evdi_mode_changed_handler(evdi_mode mode, void* user_data)
 
     enc->update_sws();
 
+    // Prime the pump using buffer 0 ONLY
     if (evdi_request_update(enc->evdi, 0))
     {
         evdi_grab_and_request_next(enc, 0);
@@ -259,12 +264,12 @@ void VideoEncoder::run_evdi_loop()
 
     // Constant FPS Loop Initialization
     auto frame_duration = std::chrono::milliseconds(1000 / target_fps);
-    auto next_tick = std::chrono::steady_clock::now();
+    auto next_tick = std::chrono::steady_clock::now() + frame_duration;
 
     while (running.load())
     {
-        next_tick += frame_duration;
         int current_stride = 0, current_w = 0, current_h = 0;
+        bool do_process = false;
 
         {
             std::unique_lock<std::mutex> lock(frame_mutex);
@@ -280,25 +285,33 @@ void VideoEncoder::run_evdi_loop()
                 // Only swap if we actually got new pixels from the compositor
                 std::swap(write_idx, read_idx);
                 frame_ready = false;
+                do_process = true;
+            }
+            else
+            {
+                // Timeout reached or keyframe requested.
+                // We MUST process the old frame (read_idx) to flush hardware encoders
+                // like v4l2m2m that hold frames hostage in their pipeline.
+                do_process = true;
             }
 
-            // By always grabbing the read_idx buffer, we constantly flush the encoder.
-            // If the screen is static, we just push the exact same frame again.
-            current_w = input_w;
-            current_h = input_h;
-            current_stride = latest_stride;
+            if (do_process)
+            {
+                current_w = input_w;
+                current_h = input_h;
+                current_stride = latest_stride;
+            }
         }
 
-        if (current_w > 0 && current_h > 0)
+        if (do_process && current_w > 0 && current_h > 0)
         {
             process_raw_frame(frame_buffers[read_idx].data(), current_stride, current_w, current_h);
         }
 
-        // Prevent a spiral of death if the hardware encoder is too slow
         auto now = std::chrono::steady_clock::now();
-        if (now > next_tick)
+        if (now >= next_tick)
         {
-            next_tick = now;
+            next_tick = now + frame_duration;
         }
     }
 

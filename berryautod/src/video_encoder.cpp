@@ -212,12 +212,7 @@ bool VideoEncoder::init_encoder()
         else
         {
             codec_ctx->thread_count = std::max(1u, std::thread::hardware_concurrency());
-
-            // REMOVED FF_THREAD_FRAME.
-            // Frame threading inherently introduces a 1-frame latency.
-            // Slicing threads gives parallel performance without delaying the output.
             codec_ctx->thread_type = FF_THREAD_SLICE;
-
             codec_ctx->qmin = 10;
             codec_ctx->qmax = 35;
         }
