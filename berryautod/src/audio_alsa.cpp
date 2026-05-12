@@ -26,6 +26,12 @@ bool init_alsa_playback()
         LOG_E("[ALSA] Cannot set params for playback (mic): " << snd_strerror(err));
         return false;
     }
+    // Force ALSA state into PREPARED so the pipeline is awake
+    if ((err = snd_pcm_prepare(pcm_playback_handle)) < 0)
+    {
+        LOG_E("[ALSA] Cannot prepare playback stream: " << snd_strerror(err));
+        return false;
+    }
     return true;
 }
 
@@ -43,6 +49,12 @@ bool init_alsa_capture()
         LOG_E("[ALSA] Cannot set params for capture (audio): " << snd_strerror(err));
         return false;
     }
+    // Force ALSA state into PREPARED
+    if ((err = snd_pcm_prepare(pcm_capture_handle)) < 0)
+    {
+        LOG_E("[ALSA] Cannot prepare capture stream: " << snd_strerror(err));
+        return false;
+    }
     return true;
 }
 
@@ -54,27 +66,33 @@ void audio_capture_loop()
 
     uint64_t last_log_time = get_monotonic_usec();
     uint64_t frames_sent = 0;
+    bool stream_active_logged = false;
 
     while (!should_exit.load())
     {
-        // If the car hasn't started the stream or granted focus, wait.
         if (!is_audio_streaming.load() || !has_audio_focus.load() || audio_channel_id < 0)
         {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue;
         }
 
-        // This will block until the Linux desktop (PulseAudio/PipeWire) actually plays audio to the loopback!
+        if (!stream_active_logged)
+        {
+            LOG_I("[ALSA] Car granted audio focus! Thread unblocked. Waiting for Linux OS to push audio...");
+            stream_active_logged = true;
+        }
+
+        // Block until PulseAudio/PipeWire pushes data to the loopback
         int err = snd_pcm_readi(pcm_capture_handle, buffer.data(), frames);
 
-        if (err == -EPIPE)
+        if (err < 0)
         {
-            snd_pcm_prepare(pcm_capture_handle); // Recover from overrun
-            continue;
-        }
-        else if (err < 0)
-        {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            if (err != -EPIPE && err != -EAGAIN)
+            {
+                LOG_E("[ALSA] Capture error: " << snd_strerror(err) << ". Attempting recovery...");
+            }
+            snd_pcm_recover(pcm_capture_handle, err, 0); // Forcibly wake up suspended pipelines
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
             continue;
         }
 
@@ -95,17 +113,14 @@ void audio_capture_loop()
                 pt.push_back((timestamp >> (i * 8)) & 0xFF);
             }
 
-            // Raw PCM payload
             pt.insert(pt.end(), buffer.data(), buffer.data() + bytes_read);
 
-            // Send payload to the car
             send_media_payload(audio_channel_id, pt);
             frames_sent++;
 
-            // Telemetry: Log every 5 seconds to prove the pipeline is active
             if (timestamp - last_log_time > 5000000ULL)
             {
-                LOG_I("[ALSA] Audio streaming is ACTIVE. Pushed " << frames_sent << " packets to the car.");
+                LOG_I("[ALSA] Audio stream flowing smoothly. Pushed " << frames_sent << " chunks to the car.");
                 last_log_time = timestamp;
             }
         }
@@ -121,7 +136,6 @@ bool init_alsa()
 
     audio_capture_thread = std::thread(audio_capture_loop);
     audio_capture_thread.detach();
-    LOG_I("[ALSA] Audio capture and playback loops initialized successfully.");
     return true;
 }
 
@@ -149,17 +163,15 @@ void inject_mic_data(const uint8_t* data, int len)
 
     int frames = len / 2; // 1 channel, 16-bit
     int err = snd_pcm_writei(pcm_playback_handle, data, frames);
-    if (err == -EPIPE)
+    if (err < 0)
     {
-        snd_pcm_prepare(pcm_playback_handle); // Recover from underrun
-        snd_pcm_writei(pcm_playback_handle, data, frames);
-    }
-    else if (err < 0)
-    {
-        LOG_E("[ALSA] Mic Write error: " << snd_strerror(err));
+        if (err != -EPIPE && err != -EAGAIN)
+        {
+            LOG_E("[ALSA] Mic Write error: " << snd_strerror(err));
+        }
+        snd_pcm_recover(pcm_playback_handle, err, 0);
     }
 
-    // Telemetry log for incoming mic data
     static uint64_t mic_frames = 0;
     static uint64_t last_mic_log = get_monotonic_usec();
     mic_frames++;
