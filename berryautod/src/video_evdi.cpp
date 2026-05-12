@@ -257,49 +257,48 @@ void VideoEncoder::run_evdi_loop()
             }
         });
 
+    // Constant FPS Loop Initialization
+    auto frame_duration = std::chrono::milliseconds(1000 / target_fps);
+    auto next_tick = std::chrono::steady_clock::now();
+
     while (running.load())
     {
+        next_tick += frame_duration;
         int current_stride = 0, current_w = 0, current_h = 0;
-        bool keyframe_req = false;
-        bool do_process = false;
 
         {
             std::unique_lock<std::mutex> lock(frame_mutex);
-            frame_cv.wait_for(lock, std::chrono::milliseconds(1000),
-                              [this, &keyframe_req]
-                              {
-                                  keyframe_req = request_keyframe.load();
-                                  return frame_ready || keyframe_req || !running.load();
-                              });
+            // Wait up to the frame duration for a NEW frame from EVDI or a manual keyframe request
+            frame_cv.wait_until(lock, next_tick,
+                                [this] { return frame_ready || request_keyframe.load() || !running.load(); });
 
             if (!running.load())
                 break;
 
             if (frame_ready)
             {
-                // Only swap buffers if EVDI actually produced a NEW frame
+                // Only swap if we actually got new pixels from the compositor
                 std::swap(write_idx, read_idx);
                 frame_ready = false;
-                do_process = true;
-            }
-            else if (keyframe_req)
-            {
-                // Watchdog requested a keyframe heartbeat, but the screen is static.
-                // Do NOT swap buffers! Simply re-encode the active read_idx buffer.
-                do_process = true;
             }
 
-            if (do_process)
-            {
-                current_w = input_w;
-                current_h = input_h;
-                current_stride = latest_stride;
-            }
+            // By always grabbing the read_idx buffer, we constantly flush the encoder.
+            // If the screen is static, we just push the exact same frame again.
+            current_w = input_w;
+            current_h = input_h;
+            current_stride = latest_stride;
         }
 
-        if (do_process && current_w > 0 && current_h > 0)
+        if (current_w > 0 && current_h > 0)
         {
             process_raw_frame(frame_buffers[read_idx].data(), current_stride, current_w, current_h);
+        }
+
+        // Prevent a spiral of death if the hardware encoder is too slow
+        auto now = std::chrono::steady_clock::now();
+        if (now > next_tick)
+        {
+            next_tick = now;
         }
     }
 

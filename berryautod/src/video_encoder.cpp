@@ -212,7 +212,12 @@ bool VideoEncoder::init_encoder()
         else
         {
             codec_ctx->thread_count = std::max(1u, std::thread::hardware_concurrency());
-            codec_ctx->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
+
+            // REMOVED FF_THREAD_FRAME.
+            // Frame threading inherently introduces a 1-frame latency.
+            // Slicing threads gives parallel performance without delaying the output.
+            codec_ctx->thread_type = FF_THREAD_SLICE;
+
             codec_ctx->qmin = 10;
             codec_ctx->qmax = 35;
         }
@@ -296,7 +301,6 @@ void VideoEncoder::process_raw_frame(void* raw_data, int stride, int pw_w, int p
     bool keyframe_req = request_keyframe.exchange(false);
 
     // Setting pict_type to I forces libavcodec to generate an I-Frame natively.
-    // Setting the deprecated 'key_frame' boolean is redundant and triggers compiler warnings.
     encode_frame->pict_type = keyframe_req ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_NONE;
 
     int ret = avcodec_send_frame(codec_ctx, encode_frame);
