@@ -11,7 +11,6 @@ bool has_cached_config = false;
 bool config_injected_this_session = false;
 static bool drop_until_keyframe = false;
 
-// ADDED: Explicit function to clear state between sessions
 void reset_video_sender_state()
 {
     std::lock_guard<std::mutex> lock(config_mutex);
@@ -85,6 +84,7 @@ void inject_cached_video_config()
         config_copy = cached_config_nal;
     }
     std::vector<uint8_t> pt;
+    pt.reserve(config_copy.size() + 4);
     pt.push_back(0x00);
     pt.push_back(0x01);
     pt.insert(pt.end(), config_copy.begin(), config_copy.end());
@@ -94,6 +94,8 @@ void inject_cached_video_config()
 void send_video_frame_internal(const std::vector<uint8_t>& nal_data, uint64_t timestamp)
 {
     std::vector<uint8_t> pt;
+    // Pre-allocate to prevent reallocation hit
+    pt.reserve(nal_data.size() + 10);
     pt.push_back(0x00);
     pt.push_back(0x00);
 

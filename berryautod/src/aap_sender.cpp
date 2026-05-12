@@ -72,11 +72,13 @@ int get_tx_queue_size()
     return tx_queue.size();
 }
 
-void build_chunk(std::vector<std::vector<uint8_t>>& batch, const std::vector<uint8_t>& chunk_data,
+void build_chunk(std::vector<std::vector<uint8_t>>& batch, const uint8_t* chunk_data, size_t chunk_size,
                  uint8_t target_channel, uint8_t flags, uint32_t unfragmented_size)
 {
     std::vector<uint8_t> out;
-    uint16_t len_field = chunk_data.size();
+    out.reserve(chunk_size + 8); // Pre-allocate to prevent mid-operation reallocs
+
+    uint16_t len_field = chunk_size;
 
     out.push_back(target_channel);
     out.push_back(flags);
@@ -91,7 +93,7 @@ void build_chunk(std::vector<std::vector<uint8_t>>& batch, const std::vector<uin
         out.push_back(unfragmented_size & 0xFF);
     }
 
-    out.insert(out.end(), chunk_data.begin(), chunk_data.end());
+    out.insert(out.end(), chunk_data, chunk_data + chunk_size);
     batch.push_back(std::move(out));
 }
 
@@ -110,6 +112,8 @@ void flush_ssl_buffers()
 
         std::vector<uint8_t> out;
         uint16_t len = tls_record.size();
+
+        out.reserve(len + 8);
 
         if (!is_tls_connected)
         {
@@ -143,6 +147,8 @@ void send_unencrypted(uint8_t channel, uint16_t type, const std::vector<uint8_t>
 
     uint16_t len_field = payload.size() + 2;
     std::vector<uint8_t> out;
+    out.reserve(payload.size() + 8);
+
     out.push_back(channel);
     out.push_back(flags);
     out.push_back((len_field >> 8) & 0xFF);
@@ -177,6 +183,7 @@ void send_message(uint8_t channel, uint16_t type, const google::protobuf::Messag
         std::lock_guard<std::mutex> tx_lock(queue_mutex);
 
         std::vector<uint8_t> pt;
+        pt.reserve(serialized.size() + 2);
         pt.push_back((type >> 8) & 0xFF);
         pt.push_back(type & 0xFF);
         pt.insert(pt.end(), serialized.begin(), serialized.end());
@@ -192,7 +199,7 @@ void send_message(uint8_t channel, uint16_t type, const google::protobuf::Messag
             if (channel != 0 && type <= 26)
                 flag = 0x0F;
 
-            build_chunk(batch, ciphertext, channel, flag, 0);
+            build_chunk(batch, ciphertext.data(), ciphertext.size(), channel, flag, 0);
         }
 
         if (!batch.empty())
@@ -209,10 +216,6 @@ bool send_media_payload(uint8_t channel, const std::vector<uint8_t>& pt)
     std::vector<std::vector<uint8_t>> batch;
 
     {
-        // DEADLOCK PREVENTION FIX:
-        // We use a non-blocking try_lock loop. If stop_video_stream() shuts down the pipeline,
-        // we instantly gracefully abort the frame submission. This prevents the video thread
-        // from permanently freezing during focus loss/reconnects.
         std::unique_lock<std::recursive_mutex> aap_lock(aap_mutex, std::defer_lock);
         while (!aap_lock.try_lock())
         {
@@ -230,24 +233,27 @@ bool send_media_payload(uint8_t channel, const std::vector<uint8_t>& pt)
 
         std::lock_guard<std::mutex> tx_lock(queue_mutex);
 
-        const size_t MAX_CHUNK = 15000;
+        // Optimal FFS limit prevents high syscalls while protecting from buffer bloat
+        const size_t MAX_CHUNK = 65000;
         uint32_t total_size = pt.size();
 
         if (total_size <= MAX_CHUNK)
         {
-            std::vector<uint8_t> chunk = pt;
             if (!ssl_bypassed)
             {
-                SSL_write(ssl, chunk.data(), chunk.size());
+                SSL_write(ssl, pt.data(), pt.size());
                 int pending = BIO_ctrl_pending(wbio);
                 if (pending > 0)
                 {
-                    chunk.resize(pending);
+                    std::vector<uint8_t> chunk(pending);
                     BIO_read(wbio, chunk.data(), pending);
+                    build_chunk(batch, chunk.data(), chunk.size(), channel, 0x0B, 0);
                 }
             }
-            uint8_t flag = ssl_bypassed ? 0x03 : 0x0B;
-            build_chunk(batch, chunk, channel, flag, 0);
+            else
+            {
+                build_chunk(batch, pt.data(), pt.size(), channel, 0x03, 0);
+            }
         }
         else
         {
@@ -258,18 +264,6 @@ bool send_media_payload(uint8_t channel, const std::vector<uint8_t>& pt)
             {
                 size_t remain = total_size - offset;
                 size_t chunk_size = std::min(remain, MAX_CHUNK);
-                std::vector<uint8_t> chunk(pt.begin() + offset, pt.begin() + offset + chunk_size);
-
-                if (!ssl_bypassed)
-                {
-                    SSL_write(ssl, chunk.data(), chunk.size());
-                    int pending = BIO_ctrl_pending(wbio);
-                    if (pending > 0)
-                    {
-                        chunk.resize(pending);
-                        BIO_read(wbio, chunk.data(), pending);
-                    }
-                }
 
                 uint8_t flag = base_flag;
                 uint32_t unfrag_size = 0;
@@ -283,12 +277,23 @@ bool send_media_payload(uint8_t channel, const std::vector<uint8_t>& pt)
                 {
                     flag |= 0x02;
                 }
+
+                if (!ssl_bypassed)
+                {
+                    SSL_write(ssl, pt.data() + offset, chunk_size);
+                    int pending = BIO_ctrl_pending(wbio);
+                    if (pending > 0)
+                    {
+                        std::vector<uint8_t> chunk(pending);
+                        BIO_read(wbio, chunk.data(), pending);
+                        build_chunk(batch, chunk.data(), chunk.size(), channel, flag, unfrag_size);
+                    }
+                }
                 else
                 {
-                    flag |= 0x00;
+                    build_chunk(batch, pt.data() + offset, chunk_size, channel, flag, unfrag_size);
                 }
 
-                build_chunk(batch, chunk, channel, flag, unfrag_size);
                 offset += chunk_size;
             }
         }

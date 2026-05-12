@@ -1,6 +1,6 @@
 #pragma once
 #include <atomic>
-#include <condition_variable> // Added condition variable support
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -34,19 +34,21 @@ public:
     int input_w = 0;
     int input_h = 0;
     AVPixelFormat input_fmt = AV_PIX_FMT_BGRA;
-    AVPixelFormat encoder_pix_fmt = AV_PIX_FMT_NV12; // Dynamically populated by available hardware
+    AVPixelFormat encoder_pix_fmt = AV_PIX_FMT_NV12;
     std::mutex sws_mutex;
 
-    // Buffer states for async EVDI capturing
-    std::vector<uint8_t> latest_frame_buffer;
+    // Zero-allocation double buffering system
+    std::vector<uint8_t> frame_buffers[2];
+    int write_idx = 0;
+    int read_idx = 1;
+
     int latest_stride = 0;
     std::mutex frame_mutex;
-    std::condition_variable frame_cv; // Event-driven frame notify
-    bool frame_ready{false};          // Flag indicating a new frame is available
+    std::condition_variable frame_cv;
+    bool frame_ready{false};
 
     std::atomic<bool> running{false};
 
-    // EVDI States
     evdi_handle evdi = EVDI_INVALID_HANDLE;
     evdi_event_context evdi_ctx;
     struct evdi_buffer* evdi_buffers = nullptr;
