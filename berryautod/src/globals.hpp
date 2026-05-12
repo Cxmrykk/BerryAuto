@@ -70,6 +70,7 @@ enum class ChannelType
     STATUS
 };
 extern std::map<int, ChannelType> channel_types;
+extern std::map<int, int> channel_codecs;
 extern std::queue<int> pending_channel_opens;
 
 extern std::recursive_mutex aap_mutex;

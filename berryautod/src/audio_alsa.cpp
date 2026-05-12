@@ -77,6 +77,17 @@ void audio_capture_loop()
 
         if (!stream_active_logged)
         {
+            // SAFEGUARD: Check if the Android Tablet is expecting AAC instead of PCM
+            if (channel_codecs[audio_channel_id] == 2)
+            { // 2 = MEDIA_CODEC_AUDIO_AAC_LC
+                LOG_E("******************************************************************");
+                LOG_E("[CRITICAL ERROR] The Headunit is expecting AAC Compressed Audio!");
+                LOG_E("BerryAuto currently only sends RAW PCM audio.");
+                LOG_E("Please open the 'headunit-revived' settings on your tablet/car,");
+                LOG_E("go to Audio, and TURN OFF 'Use AAC Audio', then reconnect.");
+                LOG_E("******************************************************************");
+            }
+
             LOG_I("[ALSA] Car granted audio focus! Waiting for Linux OS to route audio to Loopback...");
             stream_active_logged = true;
         }
@@ -87,15 +98,13 @@ void audio_capture_loop()
         {
             if (err == -EIO)
             {
-                // -EIO on snd-aloop means the other end (PulseAudio/PipeWire) is closed or not pushing audio.
                 if (eio_spam_guard % 100 == 0)
-                { // Log roughly every ~10 seconds instead of spamming
-                    LOG_I("[ALSA] Waiting for audio data... (Use pavucontrol to route an app to 'Built-in Audio Analog "
-                          "Stereo')");
+                {
+                    LOG_I("[ALSA] Still waiting for audio data... (Is 'BerryAuto Speaker' selected?)");
                 }
                 eio_spam_guard++;
                 snd_pcm_prepare(pcm_capture_handle);
-                std::this_thread::sleep_for(std::chrono::milliseconds(100)); // Throttle CPU while waiting
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
             else
             {
@@ -121,11 +130,9 @@ void audio_capture_loop()
             std::vector<uint8_t> pt;
             pt.reserve(bytes_read + 10);
 
-            // 2-byte AAP type header (0x00, 0x00 = Media Data)
             pt.push_back(0x00);
             pt.push_back(0x00);
 
-            // 8-byte AAP timestamp (Big Endian)
             uint64_t timestamp = get_monotonic_usec();
             for (int i = 7; i >= 0; --i)
             {
