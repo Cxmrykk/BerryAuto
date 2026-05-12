@@ -15,6 +15,7 @@ std::vector<uint8_t> VideoEncoder::get_edid(int width, int height)
 
     if (width >= 1920)
     {
+        // 1920x1080 @ 60Hz
         edid = {0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x04, 0x69, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
                 0x01, 0x14, 0x01, 0x03, 0x80, 0x10, 0x09, 0x78, 0x0A, 0xC8, 0x95, 0x9E, 0x57, 0x54, 0x92, 0x26,
                 0x0F, 0x50, 0x54, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
@@ -26,6 +27,7 @@ std::vector<uint8_t> VideoEncoder::get_edid(int width, int height)
     }
     else if (width >= 1280)
     {
+        // 1280x720 @ 60Hz
         edid = {0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x04, 0x69, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
                 0x01, 0x14, 0x01, 0x03, 0x80, 0x10, 0x09, 0x78, 0x0A, 0xC8, 0x95, 0x9E, 0x57, 0x54, 0x92, 0x26,
                 0x0F, 0x50, 0x54, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
@@ -37,6 +39,7 @@ std::vector<uint8_t> VideoEncoder::get_edid(int width, int height)
     }
     else
     {
+        // 800x480 @ 60Hz
         edid = {0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x04, 0x69, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
                 0x01, 0x14, 0x01, 0x03, 0x80, 0x10, 0x09, 0x78, 0x0A, 0xC8, 0x95, 0x9E, 0x57, 0x54, 0x92, 0x26,
                 0x0F, 0x50, 0x54, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
@@ -85,26 +88,23 @@ static void evdi_grab_and_request_next(VideoEncoder* enc, int buf_id)
                 first_desktop_frame = true;
             }
 
-            size_t req_size = buf.stride * buf.height;
-            if (enc->capture_buffer.size() != req_size)
-            {
-                enc->capture_buffer.resize(req_size);
-            }
-
-            memcpy(enc->capture_buffer.data(), buf.buffer, req_size);
-            enc->capture_stride = buf.stride;
-
             {
                 std::lock_guard<std::mutex> lock(enc->frame_mutex);
-                // Zero-copy swap: Instantaneously hand off memory to the encode loop
-                enc->encode_buffer.swap(enc->capture_buffer);
-                enc->encode_stride = enc->capture_stride;
+                size_t req_size = buf.stride * buf.height;
+                if (enc->latest_frame_buffer.size() != req_size)
+                {
+                    enc->latest_frame_buffer.resize(req_size);
+                }
+                memcpy(enc->latest_frame_buffer.data(), buf.buffer, req_size);
+                enc->latest_stride = buf.stride;
                 enc->frame_ready = true;
             }
 
+            // Wake up the event loop immediately to encode the captured frame
             enc->frame_cv.notify_one();
         }
 
+        // Ask the kernel for the next frame.
         if (!evdi_request_update(enc->evdi, buf_id))
         {
             break;
@@ -140,26 +140,24 @@ static void evdi_mode_changed_handler(evdi_mode mode, void* user_data)
     VideoEncoder* enc = static_cast<VideoEncoder*>(user_data);
     LOG_I("[EVDI] Compositor updated Mode: " << mode.width << "x" << mode.height);
 
-    enc->input_w = mode.width;
-    enc->input_h = mode.height;
-    enc->input_fmt = AV_PIX_FMT_BGRA;
-    enc->capture_stride = mode.width * 4;
-
-    size_t req_size = enc->capture_stride * enc->input_h;
-    enc->capture_buffer.resize(req_size);
-
-    for (size_t i = 0; i < req_size; i += 4)
-    {
-        enc->capture_buffer[i] = 0x80;     // Blue  (128)
-        enc->capture_buffer[i + 1] = 0x00; // Green (0)
-        enc->capture_buffer[i + 2] = 0x80; // Red   (128)
-        enc->capture_buffer[i + 3] = 0xFF; // Alpha (255)
-    }
-
     {
         std::lock_guard<std::mutex> lock(enc->frame_mutex);
-        enc->encode_buffer = enc->capture_buffer;
-        enc->encode_stride = enc->capture_stride;
+        enc->input_w = mode.width;
+        enc->input_h = mode.height;
+        enc->input_fmt = AV_PIX_FMT_BGRA;
+        enc->latest_stride = mode.width * 4;
+
+        size_t req_size = enc->latest_stride * enc->input_h;
+        enc->latest_frame_buffer.resize(req_size);
+
+        // Purple dummy screen
+        for (size_t i = 0; i < req_size; i += 4)
+        {
+            enc->latest_frame_buffer[i] = 0x80;     // Blue  (128)
+            enc->latest_frame_buffer[i + 1] = 0x00; // Green (0)
+            enc->latest_frame_buffer[i + 2] = 0x80; // Red   (128)
+            enc->latest_frame_buffer[i + 3] = 0xFF; // Alpha (255)
+        }
     }
 
     for (int i = 0; i < enc->evdi_buffer_count; ++i)
@@ -182,6 +180,7 @@ static void evdi_mode_changed_handler(evdi_mode mode, void* user_data)
 
     enc->update_sws();
 
+    // Prime the pump using buffer 0 ONLY
     if (evdi_request_update(enc->evdi, 0))
     {
         evdi_grab_and_request_next(enc, 0);
@@ -259,13 +258,17 @@ void VideoEncoder::run_evdi_loop()
             }
         });
 
+    // Event-driven capture loop. Wait for EVDI callbacks or Android Auto keyframe requests.
+    // Idles at ~0% CPU when screen is static, immediately responsive otherwise.
     while (running.load())
     {
+        std::vector<uint8_t> frame_copy;
         int current_stride = 0, current_w = 0, current_h = 0;
         bool keyframe_req = false;
 
         {
             std::unique_lock<std::mutex> lock(frame_mutex);
+            // 1-second timeout acts as a fallback heartbeat or keyframe trigger window
             frame_cv.wait_for(lock, std::chrono::milliseconds(1000),
                               [this, &keyframe_req]
                               {
@@ -280,14 +283,15 @@ void VideoEncoder::run_evdi_loop()
             {
                 current_w = input_w;
                 current_h = input_h;
-                current_stride = encode_stride;
+                current_stride = latest_stride;
+                frame_copy = latest_frame_buffer;
                 frame_ready = false;
             }
         }
 
-        if (!encode_buffer.empty() && current_w > 0 && current_h > 0)
+        if (!frame_copy.empty() && current_w > 0 && current_h > 0)
         {
-            process_raw_frame(encode_buffer.data(), current_stride, current_w, current_h);
+            process_raw_frame(frame_copy.data(), current_stride, current_w, current_h);
         }
     }
 

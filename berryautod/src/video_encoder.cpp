@@ -42,7 +42,8 @@ void VideoEncoder::stop()
         return;
     running = false;
 
-    frame_cv.notify_all();
+    // Wake up the EVDI event loop so it can break out immediately
+    frame_cv.notify_one();
 
     if (worker_thread.joinable())
         worker_thread.join();
@@ -51,7 +52,7 @@ void VideoEncoder::stop()
 void VideoEncoder::force_keyframe()
 {
     request_keyframe = true;
-    frame_cv.notify_one();
+    frame_cv.notify_one(); // Wake up the capture loop immediately to process the keyframe request
 }
 
 void VideoEncoder::update_sws()
@@ -65,9 +66,8 @@ void VideoEncoder::update_sws()
     if (input_w == 0 || input_h == 0)
         return;
 
-    // Use SWS_POINT for nearest neighbor instead of bilinear. Drops scaling CPU usage by ~60%.
-    sws_ctx = sws_getContext(input_w, input_h, input_fmt, target_width, target_height, encoder_pix_fmt, SWS_POINT, NULL,
-                             NULL, NULL);
+    sws_ctx = sws_getContext(input_w, input_h, input_fmt, target_width, target_height, encoder_pix_fmt,
+                             SWS_FAST_BILINEAR, NULL, NULL, NULL);
 
     if (!sws_ctx)
         LOG_E("[Capture] CRITICAL: sws_getContext failed! Format: " << input_fmt);
@@ -118,6 +118,7 @@ bool VideoEncoder::init_encoder()
 
         if (!user_config_disable_hw_encoding)
         {
+            // Prioritize embedded/SBC hardware encoders natively
             for (auto hw_c : hw_encoders)
             {
                 std::string name = hw_c->name;
@@ -127,6 +128,7 @@ bool VideoEncoder::init_encoder()
                     candidates.push_back(hw_c);
                 }
             }
+            // Add remaining generic hardware encoders discovered (x86/AMD64/etc.)
             for (auto hw_c : hw_encoders)
             {
                 if (std::find(candidates.begin(), candidates.end(), hw_c) == candidates.end())
@@ -134,6 +136,7 @@ bool VideoEncoder::init_encoder()
             }
         }
 
+        // Fallback to highly optimized Software encoders, pushing generic ones (like 'h264') to the bottom
         const AVCodec* libx = avcodec_find_encoder_by_name(target_id == AV_CODEC_ID_HEVC ? "libx265" : "libx264");
         if (libx)
             candidates.push_back(libx);
@@ -152,6 +155,7 @@ bool VideoEncoder::init_encoder()
         if (!codec_ctx)
             continue;
 
+        // Dynamically select the best supported pixel format by the hardware, fallback to NV12
         encoder_pix_fmt = AV_PIX_FMT_NV12;
         if (codec->pix_fmts)
         {
@@ -172,24 +176,26 @@ bool VideoEncoder::init_encoder()
         codec_ctx->pix_fmt = encoder_pix_fmt;
         codec_ctx->colorspace = AVCOL_SPC_BT709;
         codec_ctx->color_range = AVCOL_RANGE_MPEG;
-
-        // Strict FPS timebase prevents encoders from stalling
-        codec_ctx->time_base = {1, target_fps};
+        codec_ctx->color_primaries = AVCOL_PRI_BT709;
+        codec_ctx->color_trc = AVCOL_TRC_BT709;
+        codec_ctx->time_base = {1, 1000000};
         codec_ctx->framerate = {target_fps, 1};
         codec_ctx->gop_size = target_fps * 2;
         codec_ctx->max_b_frames = 0;
 
+        // Force zero-latency streaming behavior
         codec_ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
+        codec_ctx->strict_std_compliance = FF_COMPLIANCE_EXPERIMENTAL;
 
         int target_bitrate = static_cast<int>(target_width * target_height * target_fps * 0.15);
         if (user_config_video_bitrate > 0)
             target_bitrate = user_config_video_bitrate;
         target_bitrate = std::clamp(target_bitrate, 4000000, 40000000);
 
+        // Provide strong VBR constraints for artifact-free rendering
         codec_ctx->bit_rate = target_bitrate;
         codec_ctx->rc_max_rate = target_bitrate * 1.5;
-        // CRITICAL: Max buffer size of 1 frame eliminates the 500ms encoder delay completely
-        codec_ctx->rc_buffer_size = target_bitrate / target_fps;
+        codec_ctx->rc_buffer_size = target_bitrate / 2;
 
         std::string name = codec->name;
         bool is_hw = false;
@@ -203,23 +209,25 @@ bool VideoEncoder::init_encoder()
             }
         }
 
+        // Apply Architecture Threading Optimizations
         if (is_hw)
         {
             codec_ctx->thread_count = 1;
             codec_ctx->thread_type = 0;
+            // Best effort command to hardware encoders for latency priority
             av_opt_set(codec_ctx->priv_data, "tune", "zerolatency", 0);
         }
         else
         {
             codec_ctx->thread_count = std::max(1u, std::thread::hardware_concurrency());
-            // CRITICAL: Force SLICE threading. Frame threading buffers multiple frames, causing input latency.
-            codec_ctx->thread_type = FF_THREAD_SLICE;
+            codec_ctx->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
 
-            // Constrain quantizers to prevent muddy compression artifacts
-            codec_ctx->qmin = 15;
+            // Software Encoders: Establish a hard floor for visual quality to prevent muddy artifacts
+            codec_ctx->qmin = 10;
             codec_ctx->qmax = 35;
         }
 
+        // Apply external configurations overrides or sensible presets
         if (!user_config_video_profile.empty())
         {
             av_opt_set(codec_ctx->priv_data, "profile", user_config_video_profile.c_str(), 0);
@@ -227,16 +235,16 @@ bool VideoEncoder::init_encoder()
         else if (is_hw && name.find("v4l2m2m") != std::string::npos)
         {
             av_opt_set(codec_ctx->priv_data, "profile", "main", 0);
-            av_opt_set(codec_ctx->priv_data, "num_capture_buffers", "4", 0);
+            av_opt_set(codec_ctx->priv_data, "num_capture_buffers", "4", 0); // Optimization for RPi
         }
 
         if (!is_hw || name.find("libx") != std::string::npos)
         {
-            std::string preset = user_config_video_preset.empty() ? "ultrafast" : user_config_video_preset;
+            // Altered default preset from ultrafast to superfast. Much better visual quality with negligible CPU cost.
+            std::string preset = user_config_video_preset.empty() ? "superfast" : user_config_video_preset;
             std::string tune = user_config_video_tune.empty() ? "zerolatency" : user_config_video_tune;
             av_opt_set(codec_ctx->priv_data, "preset", preset.c_str(), 0);
             av_opt_set(codec_ctx->priv_data, "tune", tune.c_str(), 0);
-            av_opt_set(codec_ctx->priv_data, "x264opts", "no-mbtree:sliced-threads:sync-lookahead=0", 0);
         }
 
         if (avcodec_open2(codec_ctx, codec, NULL) >= 0)
@@ -245,6 +253,7 @@ bool VideoEncoder::init_encoder()
             break;
         }
 
+        LOG_I("[Capture] Failed to initialize encoder: " << codec->name << ". Trying the next available candidate...");
         avcodec_free_context(&codec_ctx);
         codec = nullptr;
     }
@@ -294,8 +303,7 @@ void VideoEncoder::process_raw_frame(void* raw_data, int stride, int pw_w, int p
 
     sws_scale(sws_ctx, in_data, in_linesize, 0, pw_h, encode_frame->data, encode_frame->linesize);
 
-    // Predictable PTS increment bypasses encoder VBR smoothing attempts
-    encode_frame->pts = frame_counter++;
+    encode_frame->pts = get_monotonic_usec();
 
     bool keyframe_req = request_keyframe.exchange(false);
     encode_frame->pict_type = keyframe_req ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_NONE;
@@ -310,8 +318,7 @@ void VideoEncoder::process_raw_frame(void* raw_data, int stride, int pw_w, int p
         if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF || ret < 0)
             break;
 
-        // Apply realtime hardware clock directly to packet to bypass any internal latency drift
-        uint64_t absolute_ts = get_monotonic_usec();
+        uint64_t absolute_ts = pkt->pts;
         bool is_keyframe = (pkt->flags & AV_PKT_FLAG_KEY) != 0;
         std::vector<uint8_t> nal_data(pkt->data, pkt->data + pkt->size);
         nal_callback(nal_data, absolute_ts, is_keyframe);
