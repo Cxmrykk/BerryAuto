@@ -42,7 +42,9 @@ void VideoEncoder::stop()
         return;
     running = false;
 
-    // EVDI loop relies on this flag to break out
+    // Wake up the EVDI event loop so it can break out immediately
+    frame_cv.notify_one();
+
     if (worker_thread.joinable())
         worker_thread.join();
 }
@@ -50,6 +52,7 @@ void VideoEncoder::stop()
 void VideoEncoder::force_keyframe()
 {
     request_keyframe = true;
+    frame_cv.notify_one(); // Wake up the capture loop immediately to process the keyframe request
 }
 
 void VideoEncoder::update_sws()
@@ -180,11 +183,19 @@ bool VideoEncoder::init_encoder()
         codec_ctx->gop_size = target_fps * 2;
         codec_ctx->max_b_frames = 0;
 
+        // Force zero-latency streaming behavior
+        codec_ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
+        codec_ctx->strict_std_compliance = FF_COMPLIANCE_EXPERIMENTAL;
+
         int target_bitrate = static_cast<int>(target_width * target_height * target_fps * 0.15);
         if (user_config_video_bitrate > 0)
             target_bitrate = user_config_video_bitrate;
         target_bitrate = std::clamp(target_bitrate, 4000000, 40000000);
+
+        // Provide strong VBR constraints for artifact-free rendering
         codec_ctx->bit_rate = target_bitrate;
+        codec_ctx->rc_max_rate = target_bitrate * 1.5;
+        codec_ctx->rc_buffer_size = target_bitrate / 2;
 
         std::string name = codec->name;
         bool is_hw = false;
@@ -203,16 +214,17 @@ bool VideoEncoder::init_encoder()
         {
             codec_ctx->thread_count = 1;
             codec_ctx->thread_type = 0;
+            // Best effort command to hardware encoders for latency priority
+            av_opt_set(codec_ctx->priv_data, "tune", "zerolatency", 0);
         }
         else
         {
             codec_ctx->thread_count = std::max(1u, std::thread::hardware_concurrency());
             codec_ctx->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
-            codec_ctx->rc_max_rate = target_bitrate * 2;
-            codec_ctx->rc_buffer_size = target_bitrate * 2;
-            codec_ctx->qmin = 15;
-            codec_ctx->qmax = 51;
-            codec_ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
+
+            // Software Encoders: Establish a hard floor for visual quality to prevent muddy artifacts
+            codec_ctx->qmin = 10;
+            codec_ctx->qmax = 35;
         }
 
         // Apply external configurations overrides or sensible presets
@@ -223,11 +235,13 @@ bool VideoEncoder::init_encoder()
         else if (is_hw && name.find("v4l2m2m") != std::string::npos)
         {
             av_opt_set(codec_ctx->priv_data, "profile", "main", 0);
+            av_opt_set(codec_ctx->priv_data, "num_capture_buffers", "4", 0); // Optimization for RPi
         }
 
         if (!is_hw || name.find("libx") != std::string::npos)
         {
-            std::string preset = user_config_video_preset.empty() ? "ultrafast" : user_config_video_preset;
+            // Altered default preset from ultrafast to superfast. Much better visual quality with negligible CPU cost.
+            std::string preset = user_config_video_preset.empty() ? "superfast" : user_config_video_preset;
             std::string tune = user_config_video_tune.empty() ? "zerolatency" : user_config_video_tune;
             av_opt_set(codec_ctx->priv_data, "preset", preset.c_str(), 0);
             av_opt_set(codec_ctx->priv_data, "tune", tune.c_str(), 0);

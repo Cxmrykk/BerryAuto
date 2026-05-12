@@ -1,5 +1,6 @@
 #pragma once
 #include <atomic>
+#include <condition_variable> // Added condition variable support
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -40,6 +41,8 @@ public:
     std::vector<uint8_t> latest_frame_buffer;
     int latest_stride = 0;
     std::mutex frame_mutex;
+    std::condition_variable frame_cv; // Event-driven frame notify
+    bool frame_ready{false};          // Flag indicating a new frame is available
 
     std::atomic<bool> running{false};
 

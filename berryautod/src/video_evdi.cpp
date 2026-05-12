@@ -61,16 +61,11 @@ std::vector<uint8_t> VideoEncoder::get_edid(int width, int height)
 
 void VideoEncoder::handle_evdi_update(int buffer_id)
 {
-    // Deprecated: Internal looping mechanism moved to evdi_update_ready_handler
-    // to strictly respect libevdi's state machine.
     (void)buffer_id;
 }
 
 // -------------------------------------------------------------------
 // Helper to safely grab pixels and recursively request the next frame.
-// This MUST be used because evdi_request_update returning 'true' means
-// the kernel will NOT send an event, so we must grab pixels immediately
-// or GNOME will permanently freeze waiting for a VBlank acknowledgment.
 // -------------------------------------------------------------------
 static void evdi_grab_and_request_next(VideoEncoder* enc, int buf_id)
 {
@@ -93,19 +88,23 @@ static void evdi_grab_and_request_next(VideoEncoder* enc, int buf_id)
                 first_desktop_frame = true;
             }
 
-            std::lock_guard<std::mutex> lock(enc->frame_mutex);
-            size_t req_size = buf.stride * buf.height;
-            if (enc->latest_frame_buffer.size() != req_size)
             {
-                enc->latest_frame_buffer.resize(req_size);
+                std::lock_guard<std::mutex> lock(enc->frame_mutex);
+                size_t req_size = buf.stride * buf.height;
+                if (enc->latest_frame_buffer.size() != req_size)
+                {
+                    enc->latest_frame_buffer.resize(req_size);
+                }
+                memcpy(enc->latest_frame_buffer.data(), buf.buffer, req_size);
+                enc->latest_stride = buf.stride;
+                enc->frame_ready = true;
             }
-            memcpy(enc->latest_frame_buffer.data(), buf.buffer, req_size);
-            enc->latest_stride = buf.stride;
+
+            // Wake up the event loop immediately to encode the captured frame
+            enc->frame_cv.notify_one();
         }
 
         // Ask the kernel for the next frame.
-        // If it returns true, frames are waiting NOW (loop again).
-        // If it returns false, kernel will send an event later (break out).
         if (!evdi_request_update(enc->evdi, buf_id))
         {
             break;
@@ -116,7 +115,6 @@ static void evdi_grab_and_request_next(VideoEncoder* enc, int buf_id)
 static void evdi_update_ready_handler(int buffer_to_be_updated, void* user_data)
 {
     VideoEncoder* enc = static_cast<VideoEncoder*>(user_data);
-    // The event loop woke up because a frame is ready. Grab it and queue the next.
     evdi_grab_and_request_next(enc, buffer_to_be_updated);
 }
 
@@ -127,7 +125,6 @@ static void evdi_dpms_handler(int dpms_mode, void* user_data)
 
     if (dpms_mode == 0) // DRM_MODE_DPMS_ON
     {
-        // Prime the pump using buffer 0 ONLY
         if (enc->evdi_buffers[0].buffer)
         {
             if (evdi_request_update(enc->evdi, 0))
@@ -230,7 +227,6 @@ void VideoEncoder::run_evdi_loop()
     evdi_buffers = new evdi_buffer[evdi_buffer_count];
     for (int i = 0; i < evdi_buffer_count; ++i)
     {
-        // Safe initialize properties preventing garbage memory reads
         memset(&evdi_buffers[i], 0, sizeof(evdi_buffer));
         evdi_buffers[i].id = i;
         evdi_buffers[i].buffer = nullptr;
@@ -262,36 +258,40 @@ void VideoEncoder::run_evdi_loop()
             }
         });
 
-    uint64_t frame_interval_us = 1000000 / target_fps;
-    uint64_t next_frame_time = get_monotonic_usec() + frame_interval_us;
-
+    // Event-driven capture loop. Wait for EVDI callbacks or Android Auto keyframe requests.
+    // Idles at ~0% CPU when screen is static, immediately responsive otherwise.
     while (running.load())
     {
         std::vector<uint8_t> frame_copy;
         int current_stride = 0, current_w = 0, current_h = 0;
+        bool keyframe_req = false;
 
         {
-            std::lock_guard<std::mutex> lock(frame_mutex);
-            current_w = input_w;
-            current_h = input_h;
-            current_stride = latest_stride;
-            frame_copy = latest_frame_buffer;
+            std::unique_lock<std::mutex> lock(frame_mutex);
+            // 1-second timeout acts as a fallback heartbeat or keyframe trigger window
+            frame_cv.wait_for(lock, std::chrono::milliseconds(1000),
+                              [this, &keyframe_req]
+                              {
+                                  keyframe_req = request_keyframe.load();
+                                  return frame_ready || keyframe_req || !running.load();
+                              });
+
+            if (!running.load())
+                break;
+
+            if (frame_ready || keyframe_req)
+            {
+                current_w = input_w;
+                current_h = input_h;
+                current_stride = latest_stride;
+                frame_copy = latest_frame_buffer;
+                frame_ready = false;
+            }
         }
 
         if (!frame_copy.empty() && current_w > 0 && current_h > 0)
         {
             process_raw_frame(frame_copy.data(), current_stride, current_w, current_h);
-        }
-
-        uint64_t now = get_monotonic_usec();
-        if (now < next_frame_time)
-        {
-            usleep(next_frame_time - now);
-            next_frame_time += frame_interval_us;
-        }
-        else
-        {
-            next_frame_time = now + frame_interval_us;
         }
     }
 
