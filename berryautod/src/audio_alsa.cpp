@@ -15,7 +15,6 @@ static std::thread audio_capture_thread;
 bool init_alsa_playback()
 {
     int err;
-    // Fix: Use 'plughw:' instead of 'plug:hw:' to prevent ALSA parsing errors
     if ((err = snd_pcm_open(&pcm_playback_handle, "plughw:Loopback,1,1", SND_PCM_STREAM_PLAYBACK, 0)) < 0)
     {
         LOG_E("[ALSA] Cannot open Loopback for playback (mic): " << snd_strerror(err));
@@ -33,7 +32,6 @@ bool init_alsa_playback()
 bool init_alsa_capture()
 {
     int err;
-    // Fix: Use 'plughw:' instead of 'plug:hw:'
     if ((err = snd_pcm_open(&pcm_capture_handle, "plughw:Loopback,1,0", SND_PCM_STREAM_CAPTURE, 0)) < 0)
     {
         LOG_E("[ALSA] Cannot open Loopback for capture (audio): " << snd_strerror(err));
@@ -54,15 +52,21 @@ void audio_capture_loop()
     int buffer_size = frames * 4; // 2 channels * 2 bytes
     std::vector<uint8_t> buffer(buffer_size);
 
+    uint64_t last_log_time = get_monotonic_usec();
+    uint64_t frames_sent = 0;
+
     while (!should_exit.load())
     {
+        // If the car hasn't started the stream or granted focus, wait.
         if (!is_audio_streaming.load() || !has_audio_focus.load() || audio_channel_id < 0)
         {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue;
         }
 
+        // This will block until the Linux desktop (PulseAudio/PipeWire) actually plays audio to the loopback!
         int err = snd_pcm_readi(pcm_capture_handle, buffer.data(), frames);
+
         if (err == -EPIPE)
         {
             snd_pcm_prepare(pcm_capture_handle); // Recover from overrun
@@ -94,8 +98,16 @@ void audio_capture_loop()
             // Raw PCM payload
             pt.insert(pt.end(), buffer.data(), buffer.data() + bytes_read);
 
-            // Send standard PCM audio payload to the Audio Channel
+            // Send payload to the car
             send_media_payload(audio_channel_id, pt);
+            frames_sent++;
+
+            // Telemetry: Log every 5 seconds to prove the pipeline is active
+            if (timestamp - last_log_time > 5000000ULL)
+            {
+                LOG_I("[ALSA] Audio streaming is ACTIVE. Pushed " << frames_sent << " packets to the car.");
+                last_log_time = timestamp;
+            }
         }
     }
 }
@@ -116,9 +128,7 @@ bool init_alsa()
 void stop_alsa()
 {
     if (audio_capture_thread.joinable())
-    {
         audio_capture_thread.join();
-    }
     if (pcm_capture_handle)
     {
         snd_pcm_close(pcm_capture_handle);
@@ -136,6 +146,7 @@ void inject_mic_data(const uint8_t* data, int len)
 {
     if (!pcm_playback_handle)
         return;
+
     int frames = len / 2; // 1 channel, 16-bit
     int err = snd_pcm_writei(pcm_playback_handle, data, frames);
     if (err == -EPIPE)
@@ -145,6 +156,16 @@ void inject_mic_data(const uint8_t* data, int len)
     }
     else if (err < 0)
     {
-        LOG_E("[ALSA] Write error: " << snd_strerror(err));
+        LOG_E("[ALSA] Mic Write error: " << snd_strerror(err));
+    }
+
+    // Telemetry log for incoming mic data
+    static uint64_t mic_frames = 0;
+    static uint64_t last_mic_log = get_monotonic_usec();
+    mic_frames++;
+    if (get_monotonic_usec() - last_mic_log > 5000000ULL)
+    {
+        LOG_I("[ALSA] Mic receiving is ACTIVE. Injected " << mic_frames << " packets into the OS.");
+        last_mic_log = get_monotonic_usec();
     }
 }
