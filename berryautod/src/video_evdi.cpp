@@ -97,11 +97,11 @@ static void evdi_grab_and_request_next(VideoEncoder* enc, int buf_id)
             enc->frame_cv.notify_one();
         }
 
-        // CRITICAL FIX: evdi_request_update returns TRUE if the request is queued successfully.
-        // It returns FALSE if the buffer is ALREADY dirty, meaning the compositor updated the
-        // screen while we were copying. If it returns false, we MUST NOT break, we must loop
-        // and grab the new pixels immediately to catch the final frame of an animation.
-        if (evdi_request_update(enc->evdi, buf_id))
+        // EVDI BUGFIX: libevdi's evdi_request_update() returns TRUE if the buffer is ALREADY
+        // dirty and pixels can be grabbed immediately. It returns FALSE if the request
+        // was successfully queued and the kernel will notify us asynchronously later.
+        // The original code had this inverted, causing a 100% CPU infinite ioctl spinlock!
+        if (!evdi_request_update(enc->evdi, buf_id))
         {
             break;
         }
@@ -262,9 +262,10 @@ void VideoEncoder::run_evdi_loop()
             }
         });
 
-    // Constant FPS Loop Initialization
     auto frame_duration = std::chrono::milliseconds(1000 / target_fps);
     auto next_tick = std::chrono::steady_clock::now() + frame_duration;
+    auto last_heartbeat = std::chrono::steady_clock::now();
+    int frames_since_real_update = 0;
 
     while (running.load())
     {
@@ -273,7 +274,6 @@ void VideoEncoder::run_evdi_loop()
 
         {
             std::unique_lock<std::mutex> lock(frame_mutex);
-            // Wait up to the frame duration for a NEW frame from EVDI or a manual keyframe request
             frame_cv.wait_until(lock, next_tick,
                                 [this] { return frame_ready || request_keyframe.load() || !running.load(); });
 
@@ -286,13 +286,26 @@ void VideoEncoder::run_evdi_loop()
                 std::swap(write_idx, read_idx);
                 frame_ready = false;
                 do_process = true;
+                frames_since_real_update = 0;
             }
             else
             {
-                // Timeout reached or keyframe requested.
-                // We MUST process the old frame (read_idx) to flush hardware encoders
-                // like v4l2m2m that hold frames hostage in their pipeline.
-                do_process = true;
+                // Timeout reached. We process identical frames ONLY up to 4 times to ensure HW
+                // encoder pipelines flush correctly, then drop to a 1 FPS heartbeat.
+                if (request_keyframe.load() || frames_since_real_update < 4)
+                {
+                    do_process = true;
+                    frames_since_real_update++;
+                }
+                else
+                {
+                    auto now = std::chrono::steady_clock::now();
+                    if (now - last_heartbeat > std::chrono::milliseconds(1000))
+                    {
+                        do_process = true;
+                        last_heartbeat = now;
+                    }
+                }
             }
 
             if (do_process)
@@ -306,12 +319,19 @@ void VideoEncoder::run_evdi_loop()
         if (do_process && current_w > 0 && current_h > 0)
         {
             process_raw_frame(frame_buffers[read_idx].data(), current_stride, current_w, current_h);
+            if (frames_since_real_update == 0)
+                last_heartbeat = std::chrono::steady_clock::now();
         }
 
         auto now = std::chrono::steady_clock::now();
         if (now >= next_tick)
         {
             next_tick = now + frame_duration;
+            // Guard against the loop spinning out of control to catch up when heavy processing delayed it
+            if (next_tick < now)
+            {
+                next_tick = now + frame_duration;
+            }
         }
     }
 

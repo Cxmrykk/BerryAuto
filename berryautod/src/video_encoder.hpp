@@ -67,7 +67,9 @@ private:
     const AVCodec* codec = nullptr;
     AVCodecContext* codec_ctx = nullptr;
     AVPacket* pkt = nullptr;
+    AVFrame* encode_frame = nullptr; // Reusable frame buffer for CPU efficiency
     SwsContext* sws_ctx = nullptr;
+
     bool init_encoder();
     void cleanup_encoder();
 

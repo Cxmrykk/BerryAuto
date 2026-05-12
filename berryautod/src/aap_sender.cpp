@@ -189,17 +189,24 @@ void send_message(uint8_t channel, uint16_t type, const google::protobuf::Messag
         pt.insert(pt.end(), serialized.begin(), serialized.end());
 
         SSL_write(ssl, pt.data(), pt.size());
-        int pending = BIO_ctrl_pending(wbio);
-        if (pending > 0)
+
+        while (true)
         {
-            std::vector<uint8_t> ciphertext(pending);
-            BIO_read(wbio, ciphertext.data(), pending);
+            int pending = BIO_ctrl_pending(wbio);
+            if (pending <= 0)
+                break;
 
-            uint8_t flag = 0x0B;
-            if (channel != 0 && type <= 26)
-                flag = 0x0F;
+            uint8_t temp_buf[65536];
+            int to_read = std::min(pending, (int)sizeof(temp_buf));
+            int read_bytes = BIO_read(wbio, temp_buf, to_read);
+            if (read_bytes > 0)
+            {
+                uint8_t flag = 0x0B;
+                if (channel != 0 && type <= 26)
+                    flag = 0x0F;
 
-            build_chunk(batch, ciphertext.data(), ciphertext.size(), channel, flag, 0);
+                build_chunk(batch, temp_buf, read_bytes, channel, flag, 0);
+            }
         }
 
         if (!batch.empty())
@@ -242,12 +249,19 @@ bool send_media_payload(uint8_t channel, const std::vector<uint8_t>& pt)
             if (!ssl_bypassed)
             {
                 SSL_write(ssl, pt.data(), pt.size());
-                int pending = BIO_ctrl_pending(wbio);
-                if (pending > 0)
+                while (true)
                 {
-                    std::vector<uint8_t> chunk(pending);
-                    BIO_read(wbio, chunk.data(), pending);
-                    build_chunk(batch, chunk.data(), chunk.size(), channel, 0x0B, 0);
+                    int pending = BIO_ctrl_pending(wbio);
+                    if (pending <= 0)
+                        break;
+
+                    uint8_t temp_buf[65536];
+                    int to_read = std::min(pending, (int)sizeof(temp_buf));
+                    int read_bytes = BIO_read(wbio, temp_buf, to_read);
+                    if (read_bytes > 0)
+                    {
+                        build_chunk(batch, temp_buf, read_bytes, channel, 0x0B, 0);
+                    }
                 }
             }
             else
@@ -281,12 +295,19 @@ bool send_media_payload(uint8_t channel, const std::vector<uint8_t>& pt)
                 if (!ssl_bypassed)
                 {
                     SSL_write(ssl, pt.data() + offset, chunk_size);
-                    int pending = BIO_ctrl_pending(wbio);
-                    if (pending > 0)
+                    while (true)
                     {
-                        std::vector<uint8_t> chunk(pending);
-                        BIO_read(wbio, chunk.data(), pending);
-                        build_chunk(batch, chunk.data(), chunk.size(), channel, flag, unfrag_size);
+                        int pending = BIO_ctrl_pending(wbio);
+                        if (pending <= 0)
+                            break;
+
+                        uint8_t temp_buf[65536];
+                        int to_read = std::min(pending, (int)sizeof(temp_buf));
+                        int read_bytes = BIO_read(wbio, temp_buf, to_read);
+                        if (read_bytes > 0)
+                        {
+                            build_chunk(batch, temp_buf, read_bytes, channel, flag, unfrag_size);
+                        }
                     }
                 }
                 else

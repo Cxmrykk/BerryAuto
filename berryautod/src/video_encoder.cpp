@@ -253,6 +253,18 @@ bool VideoEncoder::init_encoder()
     }
 
     pkt = av_packet_alloc();
+
+    // Allocate the reusable video frame
+    encode_frame = av_frame_alloc();
+    encode_frame->format = codec_ctx->pix_fmt;
+    encode_frame->width = codec_ctx->width;
+    encode_frame->height = codec_ctx->height;
+    if (av_frame_get_buffer(encode_frame, 32) < 0)
+    {
+        LOG_E("[Capture] CRITICAL: Failed to allocate reusable hardware frame buffer!");
+        return false;
+    }
+
     return true;
 }
 
@@ -261,11 +273,15 @@ void VideoEncoder::cleanup_encoder()
     std::lock_guard<std::mutex> lock(sws_mutex);
     if (sws_ctx)
         sws_freeContext(sws_ctx);
+    if (encode_frame)
+        av_frame_free(&encode_frame);
     if (pkt)
         av_packet_free(&pkt);
     if (codec_ctx)
         avcodec_free_context(&codec_ctx);
+
     sws_ctx = nullptr;
+    encode_frame = nullptr;
     pkt = nullptr;
     codec_ctx = nullptr;
 }
@@ -273,7 +289,7 @@ void VideoEncoder::cleanup_encoder()
 void VideoEncoder::process_raw_frame(void* raw_data, int stride, int pw_w, int pw_h)
 {
     std::lock_guard<std::mutex> lock(sws_mutex);
-    if (!sws_ctx)
+    if (!sws_ctx || !encode_frame)
         return;
 
     const uint8_t* in_data[4] = {nullptr};
@@ -283,11 +299,8 @@ void VideoEncoder::process_raw_frame(void* raw_data, int stride, int pw_w, int p
     if (stride > in_linesize[0])
         in_linesize[0] = stride;
 
-    AVFrame* encode_frame = av_frame_alloc();
-    encode_frame->format = codec_ctx->pix_fmt;
-    encode_frame->width = codec_ctx->width;
-    encode_frame->height = codec_ctx->height;
-    av_frame_get_buffer(encode_frame, 32);
+    // Prepares the frame for data rewriting safely. It maintains the current buffer if uniquely owned.
+    av_frame_make_writable(encode_frame);
 
     sws_scale(sws_ctx, in_data, in_linesize, 0, pw_h, encode_frame->data, encode_frame->linesize);
 
@@ -299,7 +312,6 @@ void VideoEncoder::process_raw_frame(void* raw_data, int stride, int pw_w, int p
     encode_frame->pict_type = keyframe_req ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_NONE;
 
     int ret = avcodec_send_frame(codec_ctx, encode_frame);
-    av_frame_free(&encode_frame);
 
     while (ret >= 0)
     {
