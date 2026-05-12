@@ -9,6 +9,7 @@ pkg_check_modules(OPENSSL REQUIRED openssl)
 pkg_check_modules(PROTOBUF REQUIRED protobuf)
 pkg_check_modules(FFMPEG REQUIRED libavcodec libavutil libswscale)
 pkg_check_modules(LIBDRM REQUIRED libdrm)
+pkg_check_modules(ALSA REQUIRED alsa)
 
 # EVDI doesn't provide a pkg-config file, manually find the library AND the headers
 find_library(EVDI_LIBRARY evdi)
@@ -52,6 +53,7 @@ include_directories(
     ${PROTOBUF_INCLUDE_DIRS} 
     ${FFMPEG_INCLUDE_DIRS} 
     ${LIBDRM_INCLUDE_DIRS}
+    ${ALSA_INCLUDE_DIRS}
     ${EVDI_INCLUDE_DIR}
     src 
     ${GENERATED_DIR}
@@ -67,5 +69,6 @@ target_link_libraries(opengal_emitter
     ${FFMPEG_LIBRARIES}
     ${LIBDRM_LIBRARIES}
     ${EVDI_LIBRARY}
+    ${ALSA_LIBRARIES}
     pthread
 )

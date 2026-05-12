@@ -2,7 +2,7 @@
 #include "aap_sender.hpp"
 #include "globals.hpp"
 #include <linux/usb/functionfs.h>
-#include <openssl/ssl.h> // ADDED
+#include <openssl/ssl.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
@@ -50,8 +50,10 @@ void ep0_thread(int ep0)
                 video_channel_ready = false;
                 input_channel_ready = false;
                 video_unacked_count = 0;
+                is_audio_streaming = false;
+                has_audio_focus = false;
 
-                // ADDED: Scrub TLS data so next rapid connection does not fault on stale symmetric keys
+                // Scrub TLS data so next rapid connection does not fault on stale symmetric keys
                 SSL_clear(ssl);
                 BIO_reset(rbio);
                 BIO_reset(wbio);

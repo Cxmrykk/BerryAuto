@@ -1,5 +1,6 @@
 #include "handler_media.hpp"
 #include "aap_sender.hpp"
+#include "audio_alsa.hpp"
 #include "control.pb.h"
 #include "globals.hpp"
 #include "media.pb.h"
@@ -14,6 +15,14 @@ void handle_media_message(uint8_t channel, uint16_t type, uint8_t* payload_data,
     // Prevent car stalls by ACKing incoming microphone/audio data payloads
     if (type == MediaMsgType::MEDIA_MESSAGE_DATA || type == MediaMsgType::MEDIA_MESSAGE_CODEC_CONFIG)
     {
+        if (ctype == ChannelType::MIC && type == MediaMsgType::MEDIA_MESSAGE_DATA)
+        {
+            // AAP Audio Packets: [0..7] is the Timestamp. PCM Data starts at offset 8.
+            if (payload_len > 8)
+            {
+                inject_mic_data(payload_data + 8, payload_len - 8);
+            }
+        }
         Ack ack;
         ack.set_session_id(0);
         ack.set_ack(1);
@@ -66,6 +75,19 @@ void handle_media_message(uint8_t channel, uint16_t type, uint8_t* payload_data,
             start.set_session_id(5678);
             start.set_configuration_index(0);
             send_message(channel, MediaMsgType::MEDIA_MESSAGE_START, start);
+
+            if (ctype == ChannelType::AUDIO && channel == audio_channel_id)
+            {
+                is_audio_streaming = true;
+            }
+            else if (ctype == ChannelType::MIC)
+            {
+                MicrophoneRequest mr;
+                mr.set_open(true);
+                mr.set_anc_enabled(false);
+                mr.set_ec_enabled(false);
+                send_message(channel, MediaMsgType::MEDIA_MESSAGE_MICROPHONE_REQUEST, mr);
+            }
         }
     }
     else if (type == MediaMsgType::MEDIA_MESSAGE_ACK)
@@ -104,6 +126,11 @@ void handle_media_message(uint8_t channel, uint16_t type, uint8_t* payload_data,
             LOG_I(">>> Video Stream stopped by car! <<<");
             video_session_id++; // Invalidate pending starts
             stop_video_stream();
+        }
+        else if (ctype == ChannelType::AUDIO && channel == audio_channel_id)
+        {
+            LOG_I(">>> Audio Stream stopped by car! <<<");
+            is_audio_streaming = false;
         }
     }
     else if (type == MediaMsgType::MEDIA_MESSAGE_VIDEO_FOCUS_REQUEST)

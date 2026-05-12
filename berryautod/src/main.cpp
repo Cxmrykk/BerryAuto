@@ -4,6 +4,7 @@
 #include <thread>
 #include <unistd.h>
 
+#include "audio_alsa.hpp"
 #include "certs.hpp"
 #include "config_parser.hpp"
 #include "ffs_usb.hpp"
@@ -38,6 +39,11 @@ std::atomic<bool> should_exit{false};
 
 int video_channel_id = 2;
 int input_channel_id = 3;
+int audio_channel_id = -1;
+int mic_channel_id = -1;
+
+std::atomic<bool> is_audio_streaming{false};
+std::atomic<bool> has_audio_focus{false};
 
 std::queue<int> pending_channel_opens;
 std::map<int, ChannelType> channel_types;
@@ -142,6 +148,12 @@ int main()
         return 1;
     }
 
+    if (!init_alsa())
+    {
+        LOG_E("Failed to initialize ALSA subsystem! Are virtual loopback devices present?");
+        // We can continue running without audio, but log heavily.
+    }
+
     ssl = SSL_new(ssl_ctx);
     rbio = BIO_new(BIO_s_mem());
     wbio = BIO_new(BIO_s_mem());
@@ -158,5 +170,7 @@ int main()
     std::thread ep0_t(ep0_thread, ep0);
     ep0_t.detach();
 
-    return usb_rx_loop();
+    int exit_code = usb_rx_loop();
+    stop_alsa();
+    return exit_code;
 }

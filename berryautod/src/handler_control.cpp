@@ -3,7 +3,7 @@
 #include "channel_manager.hpp"
 #include "control.pb.h"
 #include "globals.hpp"
-#include <openssl/ssl.h> // ADDED
+#include <openssl/ssl.h>
 
 using namespace com::andrerinas::headunitrevived::aap::protocol::proto;
 
@@ -12,6 +12,25 @@ void handle_control_message(uint16_t type, uint8_t* payload_data, int payload_le
     if (type == ControlMsgType::MESSAGE_SERVICE_DISCOVERY_RESPONSE)
     {
         process_service_discovery_response(payload_data, payload_len);
+    }
+    else if (type == ControlMsgType::MESSAGE_AUDIO_FOCUS_NOTIFICATION)
+    {
+        AudioFocusNotification afn;
+        if (afn.ParseFromArray(payload_data, payload_len))
+        {
+            if (afn.focus_state() == AudioFocusNotification::STATE_GAIN ||
+                afn.focus_state() == AudioFocusNotification::STATE_GAIN_TRANSIENT ||
+                afn.focus_state() == AudioFocusNotification::STATE_GAIN_MEDIA_ONLY)
+            {
+                has_audio_focus = true;
+                LOG_I(">>> Audio Focus GRANTED <<<");
+            }
+            else
+            {
+                has_audio_focus = false;
+                LOG_I(">>> Audio Focus LOST <<<");
+            }
+        }
     }
     else if (type == ControlMsgType::MESSAGE_AUDIO_FOCUS_REQUEST)
     {

@@ -210,11 +210,16 @@ void process_service_discovery_response(uint8_t* payload_data, int payload_len)
                     else
                     {
                         channel_types[svc_id] = ChannelType::AUDIO;
+                        if (svc.media_sink_service().audio_type() == 3)
+                        {
+                            audio_channel_id = svc_id;
+                        }
                         int codec = svc.media_sink_service().has_available_type()
                                         ? svc.media_sink_service().available_type()
                                         : MediaCodecType::MEDIA_CODEC_AUDIO_PCM;
                         channel_codecs[svc_id] = codec;
-                        std::cout << "[INFO] Headunit advertised AUDIO (Channel " << svc_id << ")" << std::endl;
+                        std::cout << "[INFO] Headunit advertised AUDIO (Channel " << svc_id << " Type "
+                                  << svc.media_sink_service().audio_type() << ")" << std::endl;
                     }
                 }
                 else if (svc.has_input_source_service())
@@ -236,6 +241,7 @@ void process_service_discovery_response(uint8_t* payload_data, int payload_len)
                 else if (svc.has_media_source_service())
                 {
                     channel_types[svc_id] = ChannelType::MIC;
+                    mic_channel_id = svc_id;
                     int codec = svc.media_source_service().has_type() ? svc.media_source_service().type()
                                                                       : MediaCodecType::MEDIA_CODEC_AUDIO_PCM;
                     channel_codecs[svc_id] = codec;

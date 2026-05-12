@@ -27,6 +27,11 @@ void stop_video_stream();
 
 extern int video_channel_id;
 extern int input_channel_id;
+extern int audio_channel_id;
+extern int mic_channel_id;
+
+extern std::atomic<bool> is_audio_streaming;
+extern std::atomic<bool> has_audio_focus;
 
 extern int os_desktop_width;
 extern int os_desktop_height;
