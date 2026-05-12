@@ -12,7 +12,7 @@
 
 using namespace com::andrerinas::headunitrevived::aap::protocol::proto;
 
-std::map<int, int> channel_codecs;
+static std::map<int, int> channel_codecs;
 
 void handle_channel_open_response()
 {
