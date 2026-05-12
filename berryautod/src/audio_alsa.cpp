@@ -108,6 +108,7 @@ bool init_alsa()
         return false;
 
     audio_capture_thread = std::thread(audio_capture_loop);
+    audio_capture_thread.detach();
     LOG_I("[ALSA] Audio capture and playback loops initialized successfully.");
     return true;
 }
