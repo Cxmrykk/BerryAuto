@@ -141,13 +141,18 @@ static void evdi_mode_changed_handler(evdi_mode mode, void* user_data)
         enc->frame_buffers[0].resize(req_size);
         enc->frame_buffers[1].resize(req_size);
 
-        // Purple dummy screen
+        // Fill BOTH buffers with the purple dummy screen so swaps don't reveal garbage
         for (size_t i = 0; i < req_size; i += 4)
         {
-            enc->frame_buffers[enc->write_idx][i] = 0x80;
-            enc->frame_buffers[enc->write_idx][i + 1] = 0x00;
-            enc->frame_buffers[enc->write_idx][i + 2] = 0x80;
-            enc->frame_buffers[enc->write_idx][i + 3] = 0xFF;
+            enc->frame_buffers[0][i] = 0x80;     // Blue  (128)
+            enc->frame_buffers[0][i + 1] = 0x00; // Green (0)
+            enc->frame_buffers[0][i + 2] = 0x80; // Red   (128)
+            enc->frame_buffers[0][i + 3] = 0xFF; // Alpha (255)
+
+            enc->frame_buffers[1][i] = 0x80;
+            enc->frame_buffers[1][i + 1] = 0x00;
+            enc->frame_buffers[1][i + 2] = 0x80;
+            enc->frame_buffers[1][i + 3] = 0xFF;
         }
         enc->frame_ready = true;
     }
@@ -267,17 +272,25 @@ void VideoEncoder::run_evdi_loop()
             if (!running.load())
                 break;
 
-            if (frame_ready || keyframe_req)
+            if (frame_ready)
+            {
+                // Only swap buffers if EVDI actually produced a NEW frame
+                std::swap(write_idx, read_idx);
+                frame_ready = false;
+                do_process = true;
+            }
+            else if (keyframe_req)
+            {
+                // Watchdog requested a keyframe heartbeat, but the screen is static.
+                // Do NOT swap buffers! Simply re-encode the active read_idx buffer.
+                do_process = true;
+            }
+
+            if (do_process)
             {
                 current_w = input_w;
                 current_h = input_h;
                 current_stride = latest_stride;
-
-                // Ping-pong buffer swap instead of deep copy
-                std::swap(write_idx, read_idx);
-
-                frame_ready = false;
-                do_process = true;
             }
         }
 

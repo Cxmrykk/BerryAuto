@@ -65,7 +65,7 @@ void VideoEncoder::update_sws()
     if (input_w == 0 || input_h == 0)
         return;
 
-    // Use SWS_POINT because we expect 1:1 scaling (just color space conversion)
+    // Use SWS_POINT because we expect 1:1 scaling (just color space conversion to NV12)
     sws_ctx = sws_getContext(input_w, input_h, input_fmt, target_width, target_height, encoder_pix_fmt, SWS_POINT, NULL,
                              NULL, NULL);
 
