@@ -10,6 +10,8 @@ extern uint64_t get_monotonic_usec();
 
 std::vector<uint8_t> VideoEncoder::get_edid(int width, int height)
 {
+    (void)height; // Suppress unused parameter warning
+
     std::vector<uint8_t> edid;
 
     if (width >= 1920)
@@ -185,6 +187,7 @@ static void evdi_mode_changed_handler(evdi_mode mode, void* user_data)
 
 static void evdi_crtc_state_handler(int state, void* user_data)
 {
+    (void)state; // Suppress unused parameter warning
     (void)user_data;
 }
 

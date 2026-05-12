@@ -294,8 +294,10 @@ void VideoEncoder::process_raw_frame(void* raw_data, int stride, int pw_w, int p
     encode_frame->pts = get_monotonic_usec();
 
     bool keyframe_req = request_keyframe.exchange(false);
+
+    // Setting pict_type to I forces libavcodec to generate an I-Frame natively.
+    // Setting the deprecated 'key_frame' boolean is redundant and triggers compiler warnings.
     encode_frame->pict_type = keyframe_req ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_NONE;
-    encode_frame->key_frame = keyframe_req ? 1 : 0;
 
     int ret = avcodec_send_frame(codec_ctx, encode_frame);
     av_frame_free(&encode_frame);
