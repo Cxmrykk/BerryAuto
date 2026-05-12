@@ -26,7 +26,6 @@ bool init_alsa_playback()
         LOG_E("[ALSA] Cannot set params for playback (mic): " << snd_strerror(err));
         return false;
     }
-    // Force ALSA state into PREPARED so the pipeline is awake
     if ((err = snd_pcm_prepare(pcm_playback_handle)) < 0)
     {
         LOG_E("[ALSA] Cannot prepare playback stream: " << snd_strerror(err));
@@ -49,7 +48,6 @@ bool init_alsa_capture()
         LOG_E("[ALSA] Cannot set params for capture (audio): " << snd_strerror(err));
         return false;
     }
-    // Force ALSA state into PREPARED
     if ((err = snd_pcm_prepare(pcm_capture_handle)) < 0)
     {
         LOG_E("[ALSA] Cannot prepare capture stream: " << snd_strerror(err));
@@ -67,6 +65,7 @@ void audio_capture_loop()
     uint64_t last_log_time = get_monotonic_usec();
     uint64_t frames_sent = 0;
     bool stream_active_logged = false;
+    int eio_spam_guard = 0;
 
     while (!should_exit.load())
     {
@@ -78,24 +77,44 @@ void audio_capture_loop()
 
         if (!stream_active_logged)
         {
-            LOG_I("[ALSA] Car granted audio focus! Thread unblocked. Waiting for Linux OS to push audio...");
+            LOG_I("[ALSA] Car granted audio focus! Waiting for Linux OS to route audio to Loopback...");
             stream_active_logged = true;
         }
 
-        // Block until PulseAudio/PipeWire pushes data to the loopback
         int err = snd_pcm_readi(pcm_capture_handle, buffer.data(), frames);
 
         if (err < 0)
         {
-            if (err != -EPIPE && err != -EAGAIN)
+            if (err == -EIO)
             {
-                LOG_E("[ALSA] Capture error: " << snd_strerror(err) << ". Attempting recovery...");
+                // -EIO on snd-aloop means the other end (PulseAudio/PipeWire) is closed or not pushing audio.
+                if (eio_spam_guard % 100 == 0)
+                { // Log roughly every ~10 seconds instead of spamming
+                    LOG_I("[ALSA] Waiting for audio data... (Use pavucontrol to route an app to 'Built-in Audio Analog "
+                          "Stereo')");
+                }
+                eio_spam_guard++;
+                snd_pcm_prepare(pcm_capture_handle);
+                std::this_thread::sleep_for(std::chrono::milliseconds(100)); // Throttle CPU while waiting
             }
-            snd_pcm_recover(pcm_capture_handle, err, 0); // Forcibly wake up suspended pipelines
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            else
+            {
+                if (err != -EPIPE && err != -EAGAIN)
+                {
+                    LOG_E("[ALSA] Capture error: " << snd_strerror(err) << ". Recovering...");
+                }
+                int rec_err = snd_pcm_recover(pcm_capture_handle, err, 0);
+                if (rec_err < 0)
+                {
+                    snd_pcm_prepare(pcm_capture_handle);
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
             continue;
         }
 
+        // Success path
+        eio_spam_guard = 0;
         if (err > 0)
         {
             int bytes_read = err * 4;
@@ -165,11 +184,21 @@ void inject_mic_data(const uint8_t* data, int len)
     int err = snd_pcm_writei(pcm_playback_handle, data, frames);
     if (err < 0)
     {
-        if (err != -EPIPE && err != -EAGAIN)
+        if (err == -EIO)
         {
-            LOG_E("[ALSA] Mic Write error: " << snd_strerror(err));
+            // OS isn't listening to the mic yet. Reset and drop.
+            snd_pcm_prepare(pcm_playback_handle);
+            return;
         }
-        snd_pcm_recover(pcm_playback_handle, err, 0);
+        int rec_err = snd_pcm_recover(pcm_playback_handle, err, 0);
+        if (rec_err < 0)
+        {
+            snd_pcm_prepare(pcm_playback_handle);
+        }
+        else
+        {
+            snd_pcm_writei(pcm_playback_handle, data, frames); // Retry write
+        }
     }
 
     static uint64_t mic_frames = 0;
