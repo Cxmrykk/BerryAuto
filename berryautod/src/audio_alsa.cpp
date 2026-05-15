@@ -72,103 +72,89 @@ void audio_capture_loop()
 
         int err = snd_pcm_readi(pcm_capture_handle, buffer.data(), frames);
 
-        bool use_generated_silence = false;
-
-        // Catch the dreaded -EIO starvation error!
+        // Handle Overruns (-EPIPE) and Hardware errors
         if (err < 0)
         {
-            use_generated_silence = true; // ALSA crashed or PipeWire suspended. We MUST feed the car.
-
-            if (err != -EPIPE && err != -EAGAIN && err != -EIO)
+            if (err == -EPIPE)
+            {
+                // Silent XRUN recovery (daemon was slightly too slow processing)
+            }
+            else if (err == -EIO)
+            {
+                LOG_E("[ALSA] Fatal -EIO from loopback. Recovering...");
+            }
+            else if (err != -EAGAIN)
             {
                 LOG_E("[ALSA] Capture error: " << snd_strerror(err) << ". Recovering...");
             }
+
             int rec_err = snd_pcm_recover(pcm_capture_handle, err, 0);
             if (rec_err < 0)
             {
                 snd_pcm_prepare(pcm_capture_handle);
             }
+            // Loop immediately to catch up. DO NOT SLEEP HERE!
+            continue;
         }
 
         // --- VOLUME ANALYZER ---
-        if (!use_generated_silence)
+        int chunk_peak = 0;
+        int16_t* pcm_samples = reinterpret_cast<int16_t*>(buffer.data());
+        for (int i = 0; i < (err * 2); i++)
         {
-            int chunk_peak = 0;
-            int16_t* pcm_samples = reinterpret_cast<int16_t*>(buffer.data());
-            for (int i = 0; i < (err * 2); i++)
-            {
-                if (std::abs(pcm_samples[i]) > chunk_peak)
-                    chunk_peak = std::abs(pcm_samples[i]);
-            }
-
-            if (chunk_peak == 0)
-            {
-                consecutive_silent_chunks++;
-            }
-            else
-            {
-                consecutive_silent_chunks = 0; // We heard real audio!
-            }
+            if (std::abs(pcm_samples[i]) > chunk_peak)
+                chunk_peak = std::abs(pcm_samples[i]);
         }
 
-        // If PipeWire crashed (-EIO) OR we've received pure silence for >3 seconds, inject a diagnostic tone/silence.
-        if (use_generated_silence || consecutive_silent_chunks > 150)
+        if (chunk_peak == 0)
         {
-            int16_t* pcm_samples = reinterpret_cast<int16_t*>(buffer.data());
-            for (int i = 0; i < frames; i++)
+            consecutive_silent_chunks++;
+        }
+        else
+        {
+            consecutive_silent_chunks = 0; // We heard real audio!
+        }
+
+        // Overwrite the pure silence with the diagnostic tone (in-place)
+        if (consecutive_silent_chunks > 150)
+        {
+            for (int i = 0; i < err; i++)
             {
-                // Generate a very quiet 440Hz beep (amplitude 1000/32767) so we know the daemon is alive
                 int16_t wave = (int16_t)(std::sin(2.0 * M_PI * 440.0 * (sample_index / 48000.0)) * 1000.0);
-
-                // If it's a true ALSA -EIO crash, we actually just want pure silence (0x00) to act as padding
-                if (use_generated_silence)
-                    wave = 0;
-
                 pcm_samples[i * 2] = wave;
                 pcm_samples[i * 2 + 1] = wave;
                 sample_index++;
             }
-            err = frames; // Trick the sender into thinking we read 1024 frames successfully
-
-            // Sleep for ~21.3ms to mimic the exact hardware clock rate we missed
-            std::this_thread::sleep_for(std::chrono::milliseconds(21));
         }
 
         // Package and send to car
-        if (err > 0)
+        int bytes_read = err * 4;
+        std::vector<uint8_t> pt;
+        pt.reserve(bytes_read + 10);
+
+        pt.push_back(0x00);
+        pt.push_back(0x00);
+
+        uint64_t timestamp = get_monotonic_usec();
+        for (int i = 7; i >= 0; --i)
         {
-            int bytes_read = err * 4;
-            std::vector<uint8_t> pt;
-            pt.reserve(bytes_read + 10);
+            pt.push_back((timestamp >> (i * 8)) & 0xFF);
+        }
 
-            pt.push_back(0x00);
-            pt.push_back(0x00);
+        pt.insert(pt.end(), buffer.data(), buffer.data() + bytes_read);
+        send_media_payload(audio_channel_id, pt);
 
-            uint64_t timestamp = get_monotonic_usec();
-            for (int i = 7; i >= 0; --i)
+        if (timestamp - last_log_time > 3000000ULL)
+        {
+            if (consecutive_silent_chunks > 150)
             {
-                pt.push_back((timestamp >> (i * 8)) & 0xFF);
+                LOG_I("[ALSA] OS is sending pure silence. Injected diagnostic beep.");
             }
-
-            pt.insert(pt.end(), buffer.data(), buffer.data() + bytes_read);
-            send_media_payload(audio_channel_id, pt);
-
-            if (timestamp - last_log_time > 3000000ULL)
+            else
             {
-                if (use_generated_silence)
-                {
-                    LOG_I("[ALSA] PipeWire suspended stream (-EIO). Injected 3s of anti-starvation silence.");
-                }
-                else if (consecutive_silent_chunks > 150)
-                {
-                    LOG_I("[ALSA] OS is sending pure silence. Injecting diagnostic beep.");
-                }
-                else
-                {
-                    LOG_I("[ALSA] Real desktop audio is flowing perfectly.");
-                }
-                last_log_time = timestamp;
+                LOG_I("[ALSA] Real desktop audio is flowing perfectly.");
             }
+            last_log_time = timestamp;
         }
     }
 }
