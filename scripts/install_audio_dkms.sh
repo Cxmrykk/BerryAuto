@@ -21,7 +21,7 @@ fi
 echo "Copying source files to ${DKMS_SRC}..."
 rm -rf ${DKMS_SRC}
 mkdir -p ${DKMS_SRC}
-cp -r ../dkms/${MODULE_NAME}-${MODULE_VERSION}/* ${DKMS_SRC}/
+cp -r ./dkms/${MODULE_NAME}-${MODULE_VERSION}/* ${DKMS_SRC}/
 
 # 3. Add, Build, and Install the module via DKMS
 echo "Adding module to DKMS..."
