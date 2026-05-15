@@ -1,6 +1,6 @@
 # BerryAuto
 
-BerryAuto is a daemon that transforms a Linux single-board computer into a wired Android Auto receiver. It handles Android Auto Protocol (AAP) communication over USB OTG, acts as a virtual hardware monitor via EVDI, encodes the display to H.264/HEVC, and translates Android Auto touch inputs into local Linux virtual input devices.
+BerryAuto is a daemon that transforms a Linux single-board computer into a wired Android Auto receiver. It handles Android Auto Protocol (AAP) communication over USB OTG, acts as a virtual hardware monitor via EVDI, encodes the display to H.264/HEVC, translates Android Auto touch inputs into local Linux virtual input devices, and provides a dedicated virtual soundcard via a custom DKMS kernel module for flawless audio sync.
 
 While the Raspberry Pi 4 is a popular target, **any Linux device** with a USB Device Controller (UDC), hardware video encoding capabilities (V4L2/OMX/VAAPI), and DKMS support is compatible.
 
@@ -10,6 +10,7 @@ While the Raspberry Pi 4 is a popular target, **any Linux device** with a USB De
 - **Kernel-Level Virtual Display (EVDI):** Appears to the OS as a physical plug-and-play monitor. Bypasses all Wayland/X11 screen-capture restrictions and headless display problems.
 - **Dynamic EDID Injection:** Automatically generates and injects a hardware EDID matching the vehicle's exact resolution and frame rate, causing the Linux desktop to perfectly resize itself natively.
 - **Smart Hardware Encoding:** Automatically queries FFmpeg to discover and prioritize system-specific hardware encoders (`v4l2m2m`, `vaapi`, `nvenc`, `qsv`, `rpi`, etc.) before falling back to highly optimized software encoders.
+- **Custom Kernel Audio Module (DKMS):** Replaces fragile userspace audio routing with a dedicated "BerryAuto" virtual soundcard. Uses a zero-starvation `hrtimer` to guarantee a flawless, uninterrupted 48kHz audio stream to the car, while forcing PipeWire/PulseAudio to automatically resample desktop audio to meet strict Android Auto constraints natively.
 - **Touch Injection:** Creates a virtual touchscreen via `uinput` to pass touch events to the local display server.
 
 ## Requirements
@@ -30,6 +31,7 @@ dwc2
 libcomposite
 uinput
 evdi
+snd-berryauto
 ```
 
 Reboot your device after applying these changes.
@@ -43,10 +45,10 @@ sudo apt update
 sudo apt install -y build-essential cmake pkg-config git \
     libssl-dev libprotobuf-dev protobuf-compiler \
     libavcodec-dev libavutil-dev libswscale-dev \
-    linux-headers-$(uname -r) dkms libdrm-dev
+    linux-headers-$(uname -r) dkms libdrm-dev libasound2-dev
 ```
 
-### Compiling EVDI from Source
+### 1. Compiling EVDI from Source
 
 Because distribution package managers often contain outdated versions of EVDI, we will compile it directly from the official DisplayLink repository.
 
@@ -80,14 +82,28 @@ sudo dkms install -m evdi -v $EVDI_VER
 sudo modprobe evdi
 ```
 
-## Building BerryAuto
+### 2. Building BerryAuto & Custom Audio Driver
 
 Clone the repository and build the daemon:
 
 ```sh
 cd ~
 git clone https://github.com/Cxmrykk/BerryAuto.git
-cd BerryAuto/berryautod
+cd BerryAuto
+```
+
+First, compile and install the custom BerryAuto Audio DKMS kernel module. This guarantees drop-out free, zero-starvation audio streaming to the car:
+
+```sh
+sudo ./scripts/install_audio_dkms.sh
+```
+
+_(You can verify it installed correctly by running `aplay -l`. You should see `[BerryAutoAudio]` listed as a hardware device)._
+
+Next, build the primary C++ daemon:
+
+```sh
+cd berryautod
 mkdir build
 cd build
 cmake ..
@@ -104,10 +120,10 @@ sudo ln -sf "$(pwd)/scripts/setup_opengal_gadget.sh" /usr/local/bin/
 sudo chmod +x /usr/local/bin/setup_opengal_gadget.sh
 ```
 
-Ensure your user is in the `video` group to access hardware encoders:
+Ensure your user is in the `video` and `audio` groups to access hardware encoders and ALSA devices:
 
 ```sh
-sudo usermod -aG video $(whoami)
+sudo usermod -aG video,audio $(whoami)
 ```
 
 Remove the password prompt from `sudo` so the runner script can configure the USB gadget without interrupting the connection process:
@@ -118,7 +134,7 @@ echo "$(whoami) ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/$(whoami)
 
 ## Configuration
 
-By default, BerryAuto works **out of the box** with zero configuration. It will automatically negotiate the best resolution with your phone and automatically search your system for hardware video encoders.
+By default, BerryAuto works **out of the box** with zero configuration. It will automatically negotiate the best resolution with your phone, automatically search your system for hardware video encoders, and PipeWire/PulseAudio will automatically route and resample desktop audio to the new `BerryAutoAudio` virtual soundcard.
 
 If you want to manually override the video encoder, adjust the bitrate, or force a specific resolution, you can create a configuration file at `~/.config/berryauto.conf` or `/etc/berryauto.conf`.
 
@@ -129,10 +145,11 @@ See [CONFIG.md](CONFIG.md) for a full list of available options and an example c
 Plug your phone into the OTG port, then execute:
 
 ```sh
+cd ~/BerryAuto
 ./scripts/run_berryauto.sh
 ```
 
-Because BerryAuto uses EVDI, there are no screen-sharing prompts or permission pop-ups to click. The daemon will instantly create a virtual display, the Linux desktop will extend/resize to it, and video streaming will begin.
+Because BerryAuto uses EVDI and a custom audio module, there are no screen-sharing prompts or permission pop-ups to click. The daemon will instantly create a virtual display, the Linux desktop will extend/resize to it, audio routing will latch into place, and streaming will begin.
 
 ## Autostart on Boot (Systemd Service)
 
