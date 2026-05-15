@@ -10,6 +10,7 @@
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
+#include <linux/version.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
 
@@ -344,8 +345,8 @@ static int berryauto_probe(struct platform_device* devptr)
     for (i = 0; i < 2; i++)
     {
         spin_lock_init(&bcard->cables[i].lock);
-        hrtimer_init(&bcard->cables[i].timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL_SOFT);
-        bcard->cables[i].timer.function = berryauto_hrtimer_callback;
+        /* FIXED: Replaced hrtimer_init with modern hrtimer_setup */
+        hrtimer_setup(&bcard->cables[i].timer, berryauto_hrtimer_callback, CLOCK_MONOTONIC, HRTIMER_MODE_REL_SOFT);
     }
 
     /* Device 0: OS facing */
@@ -382,7 +383,12 @@ error:
     return err;
 }
 
+/* FIXED: Handle platform driver .remove signature change in newer kernels */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
+static void berryauto_remove(struct platform_device* devptr)
+#else
 static int berryauto_remove(struct platform_device* devptr)
+#endif
 {
     struct snd_card* card = platform_get_drvdata(devptr);
     struct berryauto_card* bcard = card->private_data;
@@ -391,7 +397,10 @@ static int berryauto_remove(struct platform_device* devptr)
     hrtimer_cancel(&bcard->cables[1].timer);
 
     snd_card_free(card);
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 11, 0)
     return 0;
+#endif
 }
 
 static struct platform_driver berryauto_driver = {
