@@ -15,11 +15,14 @@ static std::thread audio_capture_thread;
 bool init_alsa_playback()
 {
     int err;
-    if ((err = snd_pcm_open(&pcm_playback_handle, "plughw:Loopback,1,1", SND_PCM_STREAM_PLAYBACK, 0)) < 0)
+    // Connect to the Daemon-facing side of the BerryAuto virtual soundcard (Device 1)
+    if ((err = snd_pcm_open(&pcm_playback_handle, "plughw:BerryAutoAudio,1,0", SND_PCM_STREAM_PLAYBACK, 0)) < 0)
     {
-        LOG_E("[ALSA] Cannot open Loopback for playback (mic): " << snd_strerror(err));
+        LOG_E("[ALSA] Cannot open BerryAutoAudio for playback (mic): " << snd_strerror(err));
         return false;
     }
+
+    // Set to the exact Android Auto constraints hardcoded in our DKMS module
     if ((err = snd_pcm_set_params(pcm_playback_handle, SND_PCM_FORMAT_S16_LE, SND_PCM_ACCESS_RW_INTERLEAVED, 1, 16000,
                                   1, 500000)) < 0)
     {
@@ -37,15 +40,18 @@ bool init_alsa_playback()
 bool init_alsa_capture()
 {
     int err;
-    if ((err = snd_pcm_open(&pcm_capture_handle, "plughw:Loopback,1,0", SND_PCM_STREAM_CAPTURE, 0)) < 0)
+    // Connect to the Daemon-facing side of the BerryAuto virtual soundcard (Device 1)
+    if ((err = snd_pcm_open(&pcm_capture_handle, "plughw:BerryAutoAudio,1,0", SND_PCM_STREAM_CAPTURE, 0)) < 0)
     {
-        LOG_E("[ALSA] Cannot open Loopback for capture (audio): " << snd_strerror(err));
+        LOG_E("[ALSA] Cannot open BerryAutoAudio for capture (media): " << snd_strerror(err));
         return false;
     }
+
+    // Set to the exact Android Auto constraints hardcoded in our DKMS module
     if ((err = snd_pcm_set_params(pcm_capture_handle, SND_PCM_FORMAT_S16_LE, SND_PCM_ACCESS_RW_INTERLEAVED, 2, 48000, 1,
                                   500000)) < 0)
     {
-        LOG_E("[ALSA] Cannot set params for capture (audio): " << snd_strerror(err));
+        LOG_E("[ALSA] Cannot set params for capture (media): " << snd_strerror(err));
         return false;
     }
     if ((err = snd_pcm_prepare(pcm_capture_handle)) < 0)
@@ -65,7 +71,6 @@ void audio_capture_loop()
     uint64_t last_log_time = get_monotonic_usec();
     uint64_t frames_sent = 0;
     bool stream_active_logged = false;
-    int eio_spam_guard = 0;
 
     while (!should_exit.load())
     {
@@ -77,44 +82,31 @@ void audio_capture_loop()
 
         if (!stream_active_logged)
         {
-            LOG_I("[ALSA] Car granted audio focus! Waiting for Linux OS to route audio to Loopback...");
+            LOG_I("[ALSA] Car granted audio focus! Kernel module handling continuous clocking.");
             stream_active_logged = true;
         }
 
+        // With our custom DKMS module, this will cleanly block and return 1024 frames.
+        // If the OS isn't playing audio, it will return 1024 frames of silence (0x00).
         int err = snd_pcm_readi(pcm_capture_handle, buffer.data(), frames);
 
         if (err < 0)
         {
-            if (err == -EIO)
+            // We no longer need the heavy -EIO starvation checks here.
+            // Just standard XRUN (underrun/overrun) recovery.
+            if (err != -EPIPE && err != -EAGAIN && err != -EIO)
             {
-                // -EIO on snd-aloop means the other end (PulseAudio/PipeWire) is closed or not pushing audio.
-                if (eio_spam_guard % 100 == 0)
-                { // Log roughly every ~10 seconds instead of spamming
-                    LOG_I("[ALSA] Waiting for audio data... (Use pavucontrol to route an app to 'Built-in Audio Analog "
-                          "Stereo')");
-                }
-                eio_spam_guard++;
+                LOG_E("[ALSA] Capture error: " << snd_strerror(err) << ". Recovering...");
+            }
+            int rec_err = snd_pcm_recover(pcm_capture_handle, err, 0);
+            if (rec_err < 0)
+            {
                 snd_pcm_prepare(pcm_capture_handle);
-                std::this_thread::sleep_for(std::chrono::milliseconds(100)); // Throttle CPU while waiting
             }
-            else
-            {
-                if (err != -EPIPE && err != -EAGAIN)
-                {
-                    LOG_E("[ALSA] Capture error: " << snd_strerror(err) << ". Recovering...");
-                }
-                int rec_err = snd_pcm_recover(pcm_capture_handle, err, 0);
-                if (rec_err < 0)
-                {
-                    snd_pcm_prepare(pcm_capture_handle);
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
             continue;
         }
 
-        // Success path
-        eio_spam_guard = 0;
         if (err > 0)
         {
             int bytes_read = err * 4;
@@ -184,12 +176,6 @@ void inject_mic_data(const uint8_t* data, int len)
     int err = snd_pcm_writei(pcm_playback_handle, data, frames);
     if (err < 0)
     {
-        if (err == -EIO)
-        {
-            // OS isn't listening to the mic yet. Reset and drop.
-            snd_pcm_prepare(pcm_playback_handle);
-            return;
-        }
         int rec_err = snd_pcm_recover(pcm_playback_handle, err, 0);
         if (rec_err < 0)
         {
