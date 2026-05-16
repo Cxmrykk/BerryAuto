@@ -20,33 +20,35 @@ MODULE_LICENSE("GPL");
 
 /* Hardcoded Constraints for Android Auto */
 static const struct snd_pcm_hardware berryauto_media_hw = {
-    .info = SNDRV_PCM_INFO_INTERLEAVED | SNDRV_PCM_INFO_MMAP | SNDRV_PCM_INFO_MMAP_VALID,
+    .info =
+        SNDRV_PCM_INFO_INTERLEAVED | SNDRV_PCM_INFO_MMAP | SNDRV_PCM_INFO_MMAP_VALID | SNDRV_PCM_INFO_BLOCK_TRANSFER,
     .formats = SNDRV_PCM_FMTBIT_S16_LE,
     .rates = SNDRV_PCM_RATE_48000,
     .rate_min = 48000,
     .rate_max = 48000,
     .channels_min = 2,
     .channels_max = 2,
-    .buffer_bytes_max = 48000 * 4 * 2, // 2 seconds
+    .buffer_bytes_max = 48000 * 4 * 2, // 384,000 bytes (2 seconds)
     .period_bytes_min = 480 * 4,       // 10 ms
-    .period_bytes_max = 4800 * 4,      // 100 ms
+    .period_bytes_max = 48000 * 4 * 2, // Allow period to stretch to the max buffer
     .periods_min = 2,
-    .periods_max = 16,
+    .periods_max = 128,
 };
 
 static const struct snd_pcm_hardware berryauto_mic_hw = {
-    .info = SNDRV_PCM_INFO_INTERLEAVED | SNDRV_PCM_INFO_MMAP | SNDRV_PCM_INFO_MMAP_VALID,
+    .info =
+        SNDRV_PCM_INFO_INTERLEAVED | SNDRV_PCM_INFO_MMAP | SNDRV_PCM_INFO_MMAP_VALID | SNDRV_PCM_INFO_BLOCK_TRANSFER,
     .formats = SNDRV_PCM_FMTBIT_S16_LE,
     .rates = SNDRV_PCM_RATE_16000,
     .rate_min = 16000,
     .rate_max = 16000,
     .channels_min = 1,
     .channels_max = 1,
-    .buffer_bytes_max = 16000 * 2 * 2, // 2 seconds
+    .buffer_bytes_max = 16000 * 2 * 2, // 64,000 bytes (2 seconds)
     .period_bytes_min = 160 * 2,       // 10 ms
-    .period_bytes_max = 1600 * 2,      // 100 ms
+    .period_bytes_max = 16000 * 2 * 2, // Allow period to stretch to the max buffer
     .periods_min = 2,
-    .periods_max = 16,
+    .periods_max = 128,
 };
 
 struct berryauto_cable

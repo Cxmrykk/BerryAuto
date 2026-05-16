@@ -5,6 +5,7 @@
 #include <cmath>
 #include <iostream>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 extern uint64_t get_monotonic_usec();
@@ -13,12 +14,29 @@ static snd_pcm_t* pcm_capture_handle = nullptr;
 static snd_pcm_t* pcm_playback_handle = nullptr;
 static std::thread audio_capture_thread;
 
+// Helper function to bypass PipeWire's aggressive startup probing
+bool open_alsa_with_retry(snd_pcm_t** handle, const char* device, int stream)
+{
+    int err = -1;
+    for (int i = 0; i < 20; i++) // Try for up to 2 seconds
+    {
+        err = snd_pcm_open(handle, device, stream, 0);
+        if (err >= 0)
+            return true;
+
+        if (err != -EBUSY)
+            break; // If it's not a busy lock, fail immediately
+
+        usleep(100000); // 100ms
+    }
+    return false;
+}
+
 bool init_alsa_playback()
 {
-    int err;
     // We try our custom DKMS module first, but fallback to standard aloop if needed
     const char* device = "plughw:BerryAutoAudio,1,0";
-    if (snd_pcm_open(&pcm_playback_handle, device, SND_PCM_STREAM_PLAYBACK, 0) < 0)
+    if (!open_alsa_with_retry(&pcm_playback_handle, device, SND_PCM_STREAM_PLAYBACK))
     {
         device = "plughw:Loopback,1,0"; // Fallback to standard aloop
         if (snd_pcm_open(&pcm_playback_handle, device, SND_PCM_STREAM_PLAYBACK, 0) < 0)
@@ -35,9 +53,8 @@ bool init_alsa_playback()
 
 bool init_alsa_capture()
 {
-    int err;
     const char* device = "plughw:BerryAutoAudio,1,0";
-    if (snd_pcm_open(&pcm_capture_handle, device, SND_PCM_STREAM_CAPTURE, 0) < 0)
+    if (!open_alsa_with_retry(&pcm_capture_handle, device, SND_PCM_STREAM_CAPTURE))
     {
         device = "plughw:Loopback,1,1"; // Fallback to standard aloop
         if (snd_pcm_open(&pcm_capture_handle, device, SND_PCM_STREAM_CAPTURE, 0) < 0)
@@ -72,27 +89,20 @@ void audio_capture_loop()
 
         int err = snd_pcm_readi(pcm_capture_handle, buffer.data(), frames);
 
-        // Handle Overruns (-EPIPE) and Hardware errors
+        // Handle Overruns (-EPIPE) silently, log actual -EIOs
         if (err < 0)
         {
-            if (err == -EPIPE)
+            if (err == -EIO)
             {
-                // Silent XRUN recovery (daemon was slightly too slow processing)
+                LOG_E("[ALSA] Fatal -EIO from Loopback fallback. Check PipeWire!");
             }
-            else if (err == -EIO)
-            {
-                LOG_E("[ALSA] Fatal -EIO from loopback. Recovering...");
-            }
-            else if (err != -EAGAIN)
+            else if (err != -EPIPE && err != -EAGAIN)
             {
                 LOG_E("[ALSA] Capture error: " << snd_strerror(err) << ". Recovering...");
             }
 
-            int rec_err = snd_pcm_recover(pcm_capture_handle, err, 0);
-            if (rec_err < 0)
-            {
-                snd_pcm_prepare(pcm_capture_handle);
-            }
+            snd_pcm_recover(pcm_capture_handle, err, 0);
+
             // Loop immediately to catch up. DO NOT SLEEP HERE!
             continue;
         }
@@ -115,7 +125,8 @@ void audio_capture_loop()
             consecutive_silent_chunks = 0; // We heard real audio!
         }
 
-        // Overwrite the pure silence with the diagnostic tone (in-place)
+        // In-place overwrite: Generate diagnostic tone over the silence
+        // without adding artificial sleep, keeping 100% sync with the DKMS clock.
         if (consecutive_silent_chunks > 150)
         {
             for (int i = 0; i < err; i++)
