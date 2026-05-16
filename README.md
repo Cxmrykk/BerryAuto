@@ -144,21 +144,29 @@ From the project root directory (`~/BerryAuto`), run:
 # Enable systemd linger for the current user so user-level systemd-run commands execute correctly
 loginctl enable-linger $USER
 
+# Grab your user's UID dynamically
+USER_UID=$(id -u $USER)
+
 # Create the service file
 sudo tee /etc/systemd/system/berryauto.service > /dev/null <<EOF
 [Unit]
 Description=BerryAuto Daemon Runner
-After=graphical.target systemd-modules-load.service
+After=graphical.target systemd-modules-load.service user@${USER_UID}.service
+Requires=user@${USER_UID}.service
 Wants=graphical.target
 
 [Service]
 Type=simple
 User=$USER
 Group=$(id -g -n)
+Environment="XDG_RUNTIME_DIR=/run/user/${USER_UID}"
 WorkingDirectory=$PWD
 ExecStart=$PWD/scripts/run_berryauto.sh
+
+# Prevent systemd from permanently giving up if the script restarts quickly
 Restart=always
 RestartSec=3
+StartLimitIntervalSec=0
 
 [Install]
 WantedBy=graphical.target

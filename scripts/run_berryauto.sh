@@ -33,10 +33,18 @@ echo "[RUNNER] Starting BerryAuto Daemon..."
 systemd-run --quiet --user --scope --unit="app-com.berryauto.receiver-$$" "$PWD/berryautod/build/opengal_emitter" &
 EMITTER_PID=$!
 
-sleep 2
-UDC_NAME=$(ls /sys/class/udc | head -n 1)
+echo "[RUNNER] Waiting for USB Device Controller (UDC) to become available..."
+# Poll for the UDC for up to 30 seconds
+for i in {1..30}; do
+    UDC_NAME=$(ls /sys/class/udc 2>/dev/null | head -n 1)
+    if [ -n "$UDC_NAME" ]; then
+        break
+    fi
+    sleep 1
+done
+
 if [ -n "$UDC_NAME" ]; then
-    echo "[RUNNER] Evicting any system processes holding UDC: $UDC_NAME"
+    echo "[RUNNER] Found UDC: $UDC_NAME. Evicting any existing system processes..."
     for u in /sys/kernel/config/usb_gadget/*/UDC; do
         if [ "$(cat "$u" 2>/dev/null)" = "$UDC_NAME" ]; then
             echo "" | sudo tee "$u" >/dev/null 2>&1
