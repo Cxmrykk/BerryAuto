@@ -15,7 +15,7 @@ static snd_pcm_t* pcm_playback_handle = nullptr;
 static std::thread audio_capture_thread;
 
 // Helper function to bypass PipeWire's aggressive startup probing
-bool open_alsa_with_retry(snd_pcm_t** handle, const char* device, int stream)
+bool open_alsa_with_retry(snd_pcm_t** handle, const char* device, snd_pcm_stream_t stream)
 {
     int err = -1;
     for (int i = 0; i < 20; i++) // Try for up to 2 seconds
